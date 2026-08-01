@@ -1,0 +1,12 @@
+/target
+/result
+/result-*
+
+# Never commit anything that could carry a key or captured data.
+api-key
+*.db
+*.db-shm
+*.db-wal
+*.jpg
+*.png
+.env
