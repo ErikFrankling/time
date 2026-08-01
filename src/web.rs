@@ -4,18 +4,14 @@ use std::sync::Arc;
 use crate::config::Config;
 use crate::db::Db;
 
-/// Categorical slots 1-8, light and dark. Validated as a set: adjacent-pair CVD
-/// ΔE 9.1 light / 8.4 dark, normal-vision 19.6 / 19.3. Three light slots sit
-/// under 3:1 on the surface, so the relief rule applies -- every slice carries a
-/// direct label and the table below repeats the numbers, meaning colour is never
-/// the only carrier of identity.
-const SERIES_LIGHT: [&str; 8] = [
-    "#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948",
-];
-const SERIES_DARK: [&str; 8] = [
-    "#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300", "#9085e9", "#e66767",
-];
-
+/// Categorical slots 1-8 live as `--series-N` custom properties in the CSS
+/// below, in both light and dark. Validated as a set: adjacent-pair CVD ΔE 9.1
+/// light / 8.4 dark, normal-vision 19.6 / 19.3. Three light slots sit under 3:1
+/// on the surface, so the relief rule applies -- every slice carries a direct
+/// label and the table repeats the numbers, so colour is never the only carrier
+/// of identity. Slices are emitted in config order, which is what keeps
+/// adjacency on the validated pairlist.
+///
 /// `idle` and `other` are absence-of-activity, not series. Giving them a neutral
 /// keeps the eight real hues for things worth distinguishing.
 fn slot_for(cfg: &Config, category: &str) -> Option<usize> {
