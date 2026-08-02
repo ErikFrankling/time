@@ -9,11 +9,20 @@
 let
   cfg = config.services.time-agent;
 
+  # Flatten to one line and escape, so a multi-line note stays a valid TOML
+  # basic string rather than silently breaking the config file.
+  escapeToml =
+    s:
+    lib.escape [ "\\" "\"" ] (
+      lib.concatStringsSep " " (lib.filter (x: x != "" && !lib.isList x) (builtins.split "[[:space:]]+" s))
+    );
+
   agentToml = pkgs.writeText "time-config.toml" ''
     [agent]
     server = "${cfg.server}"
     device = "${cfg.device}"
     width = ${toString cfg.width}
+    ${lib.optionalString (cfg.note != null) ''note = "${escapeToml cfg.note}"''}
     blocklist = [
     ${lib.concatMapStringsSep "\n" (b: ''  "${b}",'') cfg.blocklist}
     ]
@@ -78,6 +87,18 @@ in
         Case-insensitive substrings matched against the active window class
         and title. A matching window is never screenshotted and its title is
         not sent either, so nothing about it leaves the machine.
+      '';
+    };
+
+    note = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "This machine runs unattended AI agent sessions.";
+      description = ''
+        Free-text context about this machine, passed to the model with every
+        frame. Use it for things a screenshot alone would misrepresent -- for
+        instance that an agent drives this screen with nobody present, so
+        visible activity is not evidence the user is here.
       '';
     };
 
