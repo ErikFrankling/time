@@ -93,9 +93,15 @@ pub fn run(cfg: Arc<ServerConfig>) -> Result<()> {
 /// Decide what a frame means and record it. Everything expensive happens here:
 /// the idle check, the model call, and the write.
 fn ingest(cfg: &ServerConfig, db: &Mutex<Db>, key: &str, frame: Frame) -> Result<FrameAck> {
-    let db = db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
+    // Read what we need and release immediately. The model call below takes
+    // tens of seconds, and holding the lock across it would block the UI, stall
+    // every other agent, and time out the liveness probe into a restart loop.
+    let (existing, last) = {
+        let db = db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
+        (db.get(&frame.device, frame.ts)?, db.last(&frame.device)?)
+    };
 
-    if let Some(existing) = db.get(&frame.device, frame.ts)? {
+    if let Some(existing) = existing {
         return Ok(FrameAck {
             category: existing.category,
             project: existing.project,
@@ -103,8 +109,6 @@ fn ingest(cfg: &ServerConfig, db: &Mutex<Db>, key: &str, frame: Frame) -> Result
             classified: false,
         });
     }
-
-    let last = db.last(&frame.device)?;
 
     if frame.blocked {
         let m = Minute {
@@ -117,7 +121,7 @@ fn ingest(cfg: &ServerConfig, db: &Mutex<Db>, key: &str, frame: Frame) -> Result
             phash: 0,
             model: None,
         };
-        db.insert(&m)?;
+        db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?.insert(&m)?;
         return Ok(ack(m, false));
     }
 
@@ -179,7 +183,7 @@ fn ingest(cfg: &ServerConfig, db: &Mutex<Db>, key: &str, frame: Frame) -> Result
                 phash: phash as i64,
                 model: None,
             };
-            db.insert(&m)?;
+            db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?.insert(&m)?;
             return Ok(ack(m, false));
         }
     }
@@ -208,7 +212,7 @@ fn ingest(cfg: &ServerConfig, db: &Mutex<Db>, key: &str, frame: Frame) -> Result
         phash: phash as i64,
         model: Some(cfg.model.clone()),
     };
-    db.insert(&m)?;
+    db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?.insert(&m)?;
     Ok(ack(m, true))
     // The JPEG goes out of scope here and is never written anywhere.
 }
