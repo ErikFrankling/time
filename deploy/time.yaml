@@ -6,13 +6,13 @@
 #     --from-literal=api-key='<opencode key>' \
 #     --from-literal=ingest-token="$(openssl rand -hex 32)"
 #
+# The Traefik route lives in homelab ingress/routes.yaml, alongside the others.
 # See README.md for the full walkthrough.
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: time-data
-  namespace: homelab
   annotations:
     # The database is the only thing that can't be reconstructed. Keep Flux
     # (and anything else doing a prune) away from it.
@@ -29,7 +29,6 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: time-config
-  namespace: homelab
 data:
   config.toml: |
     # Only the [server] section is read here. Agents keep their own config.
@@ -55,7 +54,6 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: time
-  namespace: homelab
 spec:
   replicas: 1
   revisionHistoryLimit: 2
@@ -138,7 +136,6 @@ apiVersion: v1
 kind: Service
 metadata:
   name: time
-  namespace: homelab
 spec:
   selector:
     app.kubernetes.io/name: time
@@ -147,23 +144,3 @@ spec:
       port: 80
       protocol: TCP
       targetPort: http
----
-# lan-only matches the existing middleware used by AdGuard and the Traefik
-# dashboard: reachable from the LAN and the 10.8.0.0/24 VPN, nothing else.
-# This endpoint receives screenshots, so it must never be internet-facing.
-apiVersion: traefik.io/v1alpha1
-kind: IngressRoute
-metadata:
-  name: time
-  namespace: homelab
-spec:
-  entryPoints:
-    - websecure
-  routes:
-    - kind: Rule
-      match: Host(`time.erikfrankling.duckdns.org`)
-      middlewares:
-        - name: lan-only
-      services:
-        - name: time
-          port: 80

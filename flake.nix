@@ -8,11 +8,15 @@
 
   outputs =
     {
+      self,
       nixpkgs,
       flake-utils,
       ...
     }:
-    flake-utils.lib.eachDefaultSystem (
+    {
+      homeManagerModules.default = import ./nix/hm-module.nix { inherit self; };
+    }
+    // flake-utils.lib.eachDefaultSystem (
       system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
