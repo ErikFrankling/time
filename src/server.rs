@@ -66,18 +66,27 @@ pub fn run(cfg: Arc<ServerConfig>) -> Result<()> {
             };
             let _ = req.respond(resp);
         } else {
-            let offset = req
-                .url()
-                .split_once("d=")
-                .and_then(|(_, v)| v.split('&').next())
-                .and_then(|v| v.parse::<i64>().ok())
-                .unwrap_or(0)
-                .clamp(0, 3650);
+            let url = req.url().to_string();
+            let param = |k: &str| -> Option<String> {
+                url.split(&['?', '&'][..]).find_map(|p| {
+                    p.strip_prefix(&format!("{k}=")).map(|v| {
+                        v.replace('+', " ")
+                    })
+                }).filter(|v| !v.is_empty())
+            };
+            let q = crate::web::Query {
+                day: param("d").and_then(|v| v.parse().ok()).unwrap_or(0).clamp(0, 3650),
+                filter: crate::db::Filter {
+                    category: param("cat").map(|v| urldecode(&v)),
+                    device: param("dev").map(|v| urldecode(&v)),
+                    app: param("app").map(|v| urldecode(&v)),
+                },
+            };
 
             let body = db
                 .lock()
                 .map_err(|e| anyhow::anyhow!("db lock: {e}"))
-                .and_then(|db| web::page(&cfg, &db, offset))
+                .and_then(|db| web::page(&cfg, &db, &q))
                 .unwrap_or_else(|e| format!("<pre>error: {e:#}</pre>"));
 
             let _ = req.respond(
@@ -119,6 +128,12 @@ fn ingest(cfg: &ServerConfig, db: &Mutex<Db>, key: &str, frame: Frame) -> Result
             detail: Some("blocked window — not captured".into()),
             window: None,
             phash: 0,
+            keys: frame.keys,
+            mouse: frame.mouse,
+            idle_secs: frame.idle_secs,
+            apps: Vec::new(),
+            workspaces: frame.workspaces,
+            classified: false,
             model: None,
         };
         db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?.insert(&m)?;
@@ -181,6 +196,12 @@ fn ingest(cfg: &ServerConfig, db: &Mutex<Db>, key: &str, frame: Frame) -> Result
                 detail: Some(detail),
                 window: Some(frame.window),
                 phash: phash as i64,
+                keys: frame.keys,
+                mouse: frame.mouse,
+                idle_secs: frame.idle_secs,
+                apps: frame.apps.clone(),
+                workspaces: frame.workspaces,
+                classified: false,
                 model: None,
             };
             db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?.insert(&m)?;
@@ -210,6 +231,12 @@ fn ingest(cfg: &ServerConfig, db: &Mutex<Db>, key: &str, frame: Frame) -> Result
         detail: label.detail,
         window: Some(frame.window),
         phash: phash as i64,
+        keys: frame.keys,
+        mouse: frame.mouse,
+        idle_secs: frame.idle_secs,
+        apps: frame.apps.clone(),
+        workspaces: frame.workspaces,
+        classified: true,
         model: Some(cfg.model.clone()),
     };
     db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?.insert(&m)?;
@@ -224,4 +251,23 @@ fn ack(m: Minute, classified: bool) -> FrameAck {
         detail: m.detail,
         classified,
     }
+}
+
+/// Minimal percent-decoding for query values.
+fn urldecode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }

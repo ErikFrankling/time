@@ -24,6 +24,8 @@ pub fn build_frame(cfg: &AgentConfig, input: &input::Monitor) -> Result<Frame> {
             keys: snap.keys,
             mouse: snap.mouse,
             note: cfg.note.clone(),
+            apps: Vec::new(),
+            workspaces: 0,
         });
     }
 
@@ -41,6 +43,8 @@ pub fn build_frame(cfg: &AgentConfig, input: &input::Monitor) -> Result<Frame> {
         keys: snap.keys,
         mouse: snap.mouse,
         note: cfg.note.clone(),
+        apps: capture::open_apps(),
+        workspaces: capture::workspace_count(),
     })
 }
 

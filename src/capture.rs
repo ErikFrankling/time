@@ -56,6 +56,35 @@ pub fn active_window() -> Window {
     }
 }
 
+/// Every window class currently open, deduplicated. The active window says what
+/// is in front; this says what the session as a whole is set up to do, which is
+/// the difference between "checked Slack once" and "had Slack open all day".
+pub fn open_apps() -> Vec<String> {
+    let Ok(v) = hyprctl(&["clients"]) else {
+        return Vec::new();
+    };
+    let Some(arr) = v.as_array() else {
+        return Vec::new();
+    };
+    let mut apps: Vec<String> = arr
+        .iter()
+        .filter_map(|c| c["class"].as_str())
+        .filter(|c| !c.is_empty())
+        .map(|c| c.to_string())
+        .collect();
+    apps.sort();
+    apps.dedup();
+    apps
+}
+
+/// Number of workspaces with at least one window, as a rough spread measure.
+pub fn workspace_count() -> u16 {
+    hyprctl(&["workspaces"])
+        .ok()
+        .and_then(|v| v.as_array().map(|a| a.len() as u16))
+        .unwrap_or(0)
+}
+
 /// Name of the monitor that currently has focus, so multi-monitor setups
 /// capture the screen actually being looked at rather than all of them.
 pub fn focused_monitor() -> Option<String> {

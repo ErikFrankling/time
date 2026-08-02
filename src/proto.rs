@@ -43,6 +43,15 @@ pub struct Frame {
     /// Free-text note about this machine, passed to the model as context.
     #[serde(default)]
     pub note: Option<String>,
+
+    /// Every window class open this minute, deduplicated. The active window
+    /// says what is in front; this says what the session is set up to do.
+    #[serde(default)]
+    pub apps: Vec<String>,
+
+    /// Workspaces in use, a rough measure of how spread out the session is.
+    #[serde(default)]
+    pub workspaces: u16,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
