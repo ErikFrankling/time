@@ -1,8 +1,10 @@
 package se.frankling.time
 
+import android.net.Uri
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.PowerManager
 import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
@@ -52,7 +54,7 @@ class MainActivity : ComponentActivity() {
             askNotifications.launch(android.Manifest.permission.POST_NOTIFICATIONS)
         }
 
-        // The periodic work is scheduled with KEEP and a 30-minute period, so
+        // The periodic work has a 30-minute period, so
         // without this the first half hour after granting access looks exactly
         // like a broken app.
         if (lastSync == 0L && Usage.hasAccess(this)) SyncWorker.once(this)
@@ -80,6 +82,10 @@ class MainActivity : ComponentActivity() {
         val key = Triple(once.firstOrNull()?.state, periodic.firstOrNull()?.state, resumed)
 
         val granted = remember(key) { Usage.hasAccess(this) }
+        val batteryExempt = remember(key) {
+            getSystemService(PowerManager::class.java)
+                ?.isIgnoringBatteryOptimizations(packageName) ?: true
+        }
         val synced = remember(key) { lastSync }
         val attempted = remember(key) { lastAttempt }
         val err = remember(key) { lastError }
@@ -142,6 +148,32 @@ class MainActivity : ComponentActivity() {
             HorizontalDivider()
 
             SyncStatus(running, granted, synced, attempted, err, detail, nextRun)
+
+            // Optional, and the single biggest thing available for keeping the
+            // schedule honest. An app opened once a week decays to the RARE
+            // standby bucket, where the whole quota is three job sessions a day
+            // -- so a thirty-minute period quietly becomes eight-hourly. The
+            // exemption pins the app to EXEMPTED, which stops the decay and
+            // lets jobs run through Doze. One dialog, no notification, no
+            // service; strictly a better trade than a foreground service.
+            if (!batteryExempt) {
+                OutlinedButton(
+                    onClick = {
+                        startActivity(
+                            Intent(
+                                Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                Uri.parse("package:$packageName")
+                            )
+                        )
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Sync more often (exempt from battery limits)") }
+                Text(
+                    "Optional. Without it Android throttles the sync to roughly three " +
+                        "times a day once the app has gone a couple of days unopened.",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
 
             Button(
                 onClick = { SyncWorker.once(this@MainActivity) },

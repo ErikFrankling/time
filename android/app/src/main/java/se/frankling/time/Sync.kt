@@ -162,7 +162,17 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
                 val (why, detail) = describe(e)
                 ctx.lastError = why
                 ctx.lastErrorDetail = detail
-                Result.retry()
+
+                // Being away from the LAN is the normal state, not a fault, and
+                // retrying does not help: the route is unreachable until the
+                // phone comes home. Reporting failure would be worse than
+                // useless, because WorkManager's exponential backoff replaces
+                // the 30-minute period and saturates at five hours after about
+                // six consecutive misses -- so a day out of the house would
+                // leave the next attempt hours past the point it would have
+                // worked. Nothing is lost by waiting: the watermark has not
+                // moved and the system still holds the events.
+                if (isUnreachable(e)) Result.success() else Result.retry()
             }
         }
     }
@@ -262,7 +272,24 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
                 .build()
 
             WorkManager.getInstance(ctx)
-                .enqueueUniquePeriodicWork(PERIODIC, ExistingPeriodicWorkPolicy.KEEP, work)
+                // UPDATE, not KEEP: KEEP means a build that changes the period or
+                // the backoff never reaches a phone that already has the app,
+                // which is precisely how a scheduling bug becomes permanent.
+                // UPDATE keeps the existing schedule rather than restarting it.
+                .enqueueUniquePeriodicWork(PERIODIC, ExistingPeriodicWorkPolicy.UPDATE, work)
         }
     }
 }
+
+/**
+ * Whether this failure means "not home", as opposed to something worth retrying.
+ *
+ * A 403 is what the lan-only route returns to the whole internet, so off the LAN
+ * it is the expected answer rather than an error. DNS and connect failures mean
+ * the same thing when the server only resolves at home.
+ */
+fun isUnreachable(e: Exception): Boolean =
+    (e is HttpError && e.code == 403) ||
+        e is java.net.UnknownHostException ||
+        e is java.net.ConnectException ||
+        e is java.net.NoRouteToHostException
