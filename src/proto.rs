@@ -86,13 +86,28 @@ pub struct AgentReport {
     pub minutes: Vec<crate::agents::AgentMinute>,
 }
 
+/// What the server says back about a stored minute.
+///
+/// The fields describe the row as it stands *now*, not as it will read once the
+/// model has spoken. Classification happens on a background queue, so for a
+/// minute that needs one the category here is only a carried-forward guess and
+/// `pending` is the honest part of the answer.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FrameAck {
+    /// Unix seconds of the minute this acknowledges. Redundant for a single
+    /// post, load-bearing in a batch reply.
+    #[serde(default)]
+    pub ts: i64,
     pub category: String,
     #[serde(default)]
     pub project: Option<String>,
     #[serde(default)]
     pub detail: Option<String>,
-    /// Whether the server spent a model call on this frame.
+    /// Whether a model has actually labelled this minute.
     pub classified: bool,
+    /// Whether it is queued for one. False together with `classified` means the
+    /// minute was decided without a model at all -- blocked, or an unchanged
+    /// screen with nobody at it.
+    #[serde(default)]
+    pub pending: bool,
 }

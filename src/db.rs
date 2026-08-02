@@ -23,6 +23,10 @@ pub struct Minute {
     pub apps: Vec<String>,
     pub workspaces: u16,
     pub classified: bool,
+    /// Waiting on the background classifier. Distinct from `!classified`,
+    /// which is also true of blocked and idle-skipped minutes -- those were
+    /// decided without a model and are finished, not owed an answer.
+    pub pending: bool,
     /// Everything active this minute, including the primary category.
     pub tags: Vec<String>,
 }
@@ -104,7 +108,8 @@ fn params<'a>(
 }
 
 const COLS: &str = "ts, device, category, project, detail, window, phash, model, \
-                    keys, mouse, idle_secs, apps, workspaces, classified, tags, domain";
+                    keys, mouse, idle_secs, apps, workspaces, classified, tags, domain, \
+                    pending";
 
 impl Db {
     pub fn open() -> Result<Self> {
@@ -139,6 +144,7 @@ impl Db {
             ("classified", "INTEGER NOT NULL DEFAULT 0"),
             ("tags", "TEXT"),
             ("domain", "TEXT"),
+            ("pending", "INTEGER NOT NULL DEFAULT 0"),
         ] {
             let exists: bool = conn
                 .prepare("SELECT 1 FROM pragma_table_info('minute') WHERE name = ?1")?
@@ -147,6 +153,14 @@ impl Db {
                 conn.execute_batch(&format!("ALTER TABLE minute ADD COLUMN {col} {decl};"))?;
             }
         }
+
+        // Created after the migration loop rather than with the table, because
+        // the column it indexes is one of the ones added there. The sweep runs
+        // on every start and must not scan the whole history to find a handful
+        // of rows.
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS minute_pending ON minute(pending, ts);",
+        )?;
 
         // Output, kept well away from the minute table. Different grain (a day,
         // not a minute), different truth (retrospective and re-derivable rather
@@ -222,8 +236,9 @@ impl Db {
         self.conn.execute(
             "INSERT OR REPLACE INTO minute
                (ts, device, category, project, detail, window, phash, model,
-                keys, mouse, idle_secs, apps, workspaces, classified, tags, domain)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+                keys, mouse, idle_secs, apps, workspaces, classified, tags, domain,
+                pending)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
             rusqlite::params![
                 m.ts,
                 m.device,
@@ -241,9 +256,49 @@ impl Db {
                 m.classified as i32,
                 serde_json::to_string(&m.tags).unwrap_or_else(|_| "[]".into()),
                 m.domain,
+                m.pending as i32,
             ],
         )?;
         Ok(())
+    }
+
+    /// Write the label a background worker eventually came back with.
+    ///
+    /// An UPDATE rather than an INSERT: ingest already stored everything it
+    /// observed about the minute, and re-inserting from the queued job would
+    /// overwrite it with a stale copy. Only the judgment changes here.
+    pub fn label(
+        &self,
+        device: &str,
+        ts: i64,
+        label: &crate::classify::Label,
+        model: &str,
+    ) -> Result<usize> {
+        Ok(self.conn.execute(
+            "UPDATE minute SET category = ?3, project = ?4, detail = ?5, tags = ?6,
+                    model = ?7, classified = 1, pending = 0
+             WHERE device = ?1 AND ts = ?2",
+            rusqlite::params![
+                device,
+                ts,
+                label.category,
+                label.project,
+                label.detail,
+                serde_json::to_string(&label.tags).unwrap_or_else(|_| "[]".into()),
+                model,
+            ],
+        )?)
+    }
+
+    /// Minutes still owed a label, newest first so a truncated sweep picks up
+    /// the ones a person is most likely to be looking at.
+    pub fn pending_since(&self, since: i64, limit: usize) -> Result<Vec<Minute>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {COLS} FROM minute WHERE pending = 1 AND ts >= ?1 \
+             ORDER BY ts DESC LIMIT ?2"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params![since, limit as i64], row_to_minute)?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     pub fn get(&self, device: &str, ts: i64) -> Result<Option<Minute>> {
@@ -475,6 +530,7 @@ fn row_to_minute(r: &rusqlite::Row) -> rusqlite::Result<Minute> {
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default(),
         domain: r.get(15).unwrap_or(None),
+        pending: r.get::<_, i32>(16).unwrap_or(0) != 0,
     })
 }
 

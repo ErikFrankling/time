@@ -81,6 +81,13 @@ spec:
                 secretKeyRef:
                   name: time-secrets
                   key: api-key
+            # The server pulls the Android APK from this repo's GitHub
+            # releases hourly and serves it at /app, so it needs outbound
+            # HTTPS to api.github.com and objects.githubusercontent.com. The
+            # default is this repo; TIME_APK_PATH would pin a file instead and
+            # switch fetching off.
+            - name: TIME_APK_REPO
+              value: ErikFrankling/time
             # Typst writes a font/package cache; without this it tries $HOME.
             - name: XDG_CACHE_HOME
               value: /tmp/cache
@@ -90,15 +97,20 @@ spec:
             - containerPort: 7373
               name: http
               protocol: TCP
+          # /healthz answers from the accept loop and touches neither the
+          # database nor the model. The dashboard renders in about 20ms and
+          # would usually do, but "usually" is what took the route away last
+          # time: a probe should report whether the process can answer, not
+          # queue behind whatever else it is answering.
           readinessProbe:
             httpGet:
-              path: /
+              path: /healthz
               port: http
             periodSeconds: 10
             timeoutSeconds: 5
           livenessProbe:
             httpGet:
-              path: /
+              path: /healthz
               port: http
             periodSeconds: 30
             timeoutSeconds: 5

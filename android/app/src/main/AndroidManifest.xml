@@ -11,6 +11,19 @@
 
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
+    <!-- Sideloaded apps have no store to update them, so the app updates
+         itself. This is signature|appop: it cannot be requested at runtime,
+         only toggled in Settings, which is what canRequestPackageInstalls()
+         reports and MainActivity deep-links to. Even granted, the install
+         itself still shows the system confirmation dialog — one tap per
+         update is the floor for an unprivileged app. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
+    <!-- The update prompt is a notification, and from API 33 that needs an
+         explicit grant. Sync keeps working without it; the settings screen is
+         then the only place an update shows up. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <!-- To resolve a package name to a human-readable app label. -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />
@@ -38,6 +51,22 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- The package installer runs in another process and cannot read our
+             cache directory, so the downloaded APK is handed over as a content
+             URI with a read grant rather than a file path. The authority is
+             derived from the applicationId so the debug variant, which carries
+             a .debug suffix, does not collide with a release build installed
+             alongside it. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.updates"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
         <receiver
             android:name=".BootReceiver"

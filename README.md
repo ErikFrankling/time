@@ -88,6 +88,116 @@ export TIME_INGEST_TOKEN=<the token from above>
 | `time agents` | read what the coding agents did, post it to the server |
 | `time config` | print config and database paths |
 
+## The Android app
+
+The phone client reports which app is in the foreground. There is no store
+behind it, so getting builds onto the phone is its own problem — and it used to
+be solved by a human running `kubectl cp`. It isn't any more:
+
+```
+push to main (android/**)
+  → GitHub Actions builds and signs the APK
+  → publishes a release tagged android-v<version>-<versionCode>
+  → the server pulls it within the hour and serves it at /app
+  → the phone notices at its next sync and offers to install
+```
+
+Nothing in that chain needs a person. What it cannot do is install without a
+tap: silent installation needs a system or privileged signature, so **every
+update ends at one confirmation dialog**. The goal here is zero thinking, not
+zero taps.
+
+### Installing it — use Obtainium
+
+[Obtainium][obt] watches a GitHub repo's releases and installs from them. Paste
+this into it:
+
+```
+https://github.com/ErikFrankling/time
+```
+
+This is the recommended route, not a fallback, for a reason that is not
+obvious: Obtainium installs through the `PackageInstaller` session API, the
+same one app stores use. Android 13+ treats packages installed any other way as
+untrusted and **silently greys out restricted permissions** —
+`PACKAGE_USAGE_STATS`, which this app cannot work without, is one of them. The
+toggle simply refuses to move and gives no reason.
+
+If you install by downloading `/app` in a browser instead, you will hit exactly
+that, and the way out is:
+
+> Settings → Apps → time → ⋮ → **Allow restricted settings**
+
+That menu item is hidden until Android has blocked the permission at least
+once, so the sequence is: install, try to grant usage access, watch it fail,
+then go allow restricted settings. The `/app` landing page says so too.
+
+[obt]: https://github.com/ImranR98/Obtainium
+
+### Updating
+
+Whichever way it was installed, the app checks `GET /app/version` during its
+normal 30-minute sync. If the server is serving a higher `versionCode` it
+downloads the APK to its cache — on unmetered networks only, since it is ~25 MB
+— verifies the sha256, and posts a notification. Tapping it opens the installer.
+The settings screen shows installed vs available and has a manual check.
+
+Obtainium does the same thing independently and works even when the app itself
+is broken, which is the argument for having both.
+
+| Route | |
+|---|---|
+| `GET /app/` | landing page: version, size, signing key, staleness |
+| `GET /app` | the APK bytes |
+| `GET /app/version` | `{version, versionCode, sha256, url, published, size, signing, stale}` |
+
+The server keeps the APK at `<data dir>/time.apk` with a `.json` sidecar, and
+re-downloads only when the release asset actually changes. If GitHub is
+unreachable it keeps serving what it has and says so on the landing page.
+Setting `TIME_APK_PATH` pins it to a file and turns fetching off entirely,
+which is how a locally-built APK gets served.
+
+### Signing — do this before installing anything
+
+An APK signed with a different key than the one already installed **cannot**
+upgrade it. Android reports `INSTALL_FAILED_UPDATE_INCOMPATIBLE` and the only
+way forward is an uninstall, which takes the app's data with it. So the key has
+to exist before the first install, not after.
+
+Until `KEYSTORE_BASE64` is set, CI publishes the **debug** build instead of an
+unsigned release — an unsigned APK cannot be installed at all, so releasing one
+would be releasing nothing. The debug build works, carries a `.debug`
+application ID, and is a dead end: it can never become the release build. The
+landing page and the release notes both say which key a given APK carries.
+
+Generate the key and hand it to Actions. **You have to run these** — the secrets
+must not pass through anything else. In `bash`, not fish:
+
+```bash
+STOREPASS=$(openssl rand -base64 24)
+
+keytool -genkeypair \
+  -keystore ~/time-release.jks -storetype PKCS12 \
+  -storepass "$STOREPASS" -keypass "$STOREPASS" \
+  -alias time -keyalg RSA -keysize 4096 -validity 10000 \
+  -dname "CN=time, O=frankling.se, C=SE"
+
+base64 -w0 ~/time-release.jks | gh secret set KEYSTORE_BASE64 --repo ErikFrankling/time
+gh secret set KEYSTORE_PASSWORD --repo ErikFrankling/time --body "$STOREPASS"
+gh secret set KEY_PASSWORD      --repo ErikFrankling/time --body "$STOREPASS"
+gh secret set KEY_ALIAS         --repo ErikFrankling/time --body time
+
+echo "store this password somewhere durable: $STOREPASS"
+```
+
+Then back up `~/time-release.jks` and that password somewhere that survives the
+laptop. Losing them means every phone reinstalls from scratch. The file is
+gitignored (`*.jks`) and must never be committed.
+
+Re-run the workflow afterwards (`gh workflow run android.yml`), uninstall
+whatever debug build is on the phone, and install the release-signed one once.
+Every update after that is a notification and a tap.
+
 ## Time per website
 
 "Firefox — 4h" answers nothing. Two hours on dn.se and two on a bug tracker are

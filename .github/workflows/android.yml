@@ -6,9 +6,18 @@ on:
     paths: ["android/**", ".github/workflows/android.yml"]
   workflow_dispatch:
 
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   apk:
     runs-on: ubuntu-latest
+    permissions:
+      # Creating the release. Everything downstream — the server's hourly pull
+      # and Obtainium on the phone — reads it anonymously, because the repo is
+      # public.
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -24,8 +33,13 @@ jobs:
       # The signing secrets are read into the environment first: the `secrets`
       # context is not available in a step-level `if`, so the decision of
       # whether to sign has to be made inside a script rather than by the
-      # workflow parser. Absent secrets produce an unsigned APK rather than a
-      # failed build, so a fork or a fresh clone still gets something.
+      # workflow parser.
+      #
+      # Without a keystore this publishes the *debug* build rather than an
+      # unsigned release. An unsigned APK cannot be installed at all, so
+      # releasing one would be releasing nothing; the debug build is signed
+      # with AGP's throwaway key, carries a .debug applicationId, and at least
+      # installs. It is a dead end — see the README — but a usable one.
       - name: Decode keystore
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
@@ -33,9 +47,17 @@ jobs:
           if [ -n "$KEYSTORE_BASE64" ]; then
             echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
             echo "KEYSTORE_PATH=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+            echo "VARIANT=release" >> "$GITHUB_ENV"
           else
-            echo "no keystore secret; building unsigned"
+            echo "::warning::No KEYSTORE_BASE64 secret; publishing the debug build."
+            echo "VARIANT=debug" >> "$GITHUB_ENV"
           fi
+
+      # Android treats a versionCode that has not increased as a downgrade and
+      # refuses the install. The run number is the only counter available that
+      # is monotonic without committing a bumped file back to the repo.
+      - name: Version
+        run: echo "ANDROID_VERSION_CODE=${{ github.run_number }}" >> "$GITHUB_ENV"
 
       - name: Test
         working-directory: android
@@ -47,11 +69,47 @@ jobs:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: gradle --no-daemon assembleRelease assembleDebug
+        run: gradle --no-daemon "assemble${VARIANT^}"
 
+      # The tag carries the versionCode because the releases API does not
+      # expose it and the server would otherwise need an AXML parser to read
+      # one integer out of the APK. `src/apk.rs` parses exactly this shape.
+      - name: Stage release asset
+        run: |
+          VERSION=$(grep -oP 'versionName = "\K[^"]+' android/app/build.gradle.kts)
+          SUFFIX=""
+          [ "$VARIANT" = debug ] && SUFFIX="-debug"
+          NAME="time-${VERSION}-${ANDROID_VERSION_CODE}${SUFFIX}.apk"
+          mkdir -p dist
+          cp android/app/build/outputs/apk/"$VARIANT"/*.apk "dist/$NAME"
+          {
+            echo "TAG=android-v${VERSION}-${ANDROID_VERSION_CODE}"
+            echo "VERSION=$VERSION"
+            echo "ASSET=dist/$NAME"
+          } >> "$GITHUB_ENV"
+
+      # A tag per build rather than a rolling `android-latest`: a moving tag
+      # loses the ability to point anyone at the exact build they are running,
+      # and Obtainium's "latest release" resolution works either way. The cost
+      # is a long release list, which nobody reads.
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: android v${{ env.VERSION }} (${{ env.ANDROID_VERSION_CODE }})
+          files: ${{ env.ASSET }}
+          body: |
+            Android client, versionCode `${{ env.ANDROID_VERSION_CODE }}`, built from ${{ github.sha }}.
+
+            Signed with the **${{ env.VARIANT }}** key.
+            ${{ env.VARIANT == 'debug' && 'This build cannot be upgraded to a release-signed build — installing it now means an uninstall later. Set the signing secrets first.' || '' }}
+
+            The server at `/app` pulls this automatically within the hour. To let
+            your phone do it instead, point [Obtainium](https://github.com/ImranR98/Obtainium)
+            at `https://github.com/${{ github.repository }}`.
+
+      # Kept alongside the release: a failed release step should still leave
+      # something downloadable to diagnose from.
       - uses: actions/upload-artifact@v4
         with:
           name: time-apk
-          path: |
-            android/app/build/outputs/apk/release/*.apk
-            android/app/build/outputs/apk/debug/*.apk
+          path: dist/*.apk

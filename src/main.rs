@@ -1,9 +1,11 @@
 mod agent;
 mod agents;
+mod apk;
 mod browser;
 mod capture;
 mod code;
 mod input;
+mod classifier;
 mod classify;
 mod config;
 mod db;
@@ -57,7 +59,7 @@ fn main() -> Result<()> {
             println!(
                 "[{}]{} {} — {}",
                 ack.category,
-                if ack.classified { "" } else { " (skipped)" },
+                agent::status(&ack),
                 ack.project.as_deref().unwrap_or("-"),
                 ack.detail.as_deref().unwrap_or("")
             );

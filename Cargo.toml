@@ -17,6 +17,9 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The phone verifies the APK it downloads against the hash the server reports,
+# so a truncated or swapped download is caught before the installer sees it.
+sha2 = "0.10"
 tiny_http = "0.12"
 toml = "0.8"
 # Host extraction. Already in the tree via reqwest, and getting ports, IPv6

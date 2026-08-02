@@ -16,7 +16,11 @@ android {
         applicationId = "se.frankling.time"
         minSdk = 29
         targetSdk = 35
-        versionCode = 1
+        // Android refuses to install a package whose versionCode is not greater
+        // than the installed one, so every CI build has to get a fresh number.
+        // The workflow run number is the only counter that is guaranteed to be
+        // monotonic without committing a bumped file back to the repo.
+        versionCode = System.getenv("ANDROID_VERSION_CODE")?.toIntOrNull() ?: 1
         versionName = "0.1.0"
     }
 
@@ -73,6 +77,8 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation("androidx.work:work-runtime-ktx:2.10.0")
+    // FileProvider, for handing the downloaded APK to the package installer.
+    implementation("androidx.core:core-ktx:1.13.1")
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")
 }

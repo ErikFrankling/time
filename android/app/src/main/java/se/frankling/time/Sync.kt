@@ -6,7 +6,9 @@ import androidx.work.BackoffPolicy
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkerParameters
 import androidx.work.WorkManager
@@ -37,18 +39,91 @@ object Prefs {
         get() = get(this).getLong("lastSync", 0)
         set(v) = get(this).edit().putLong("lastSync", v).apply()
 
+    /** Plain-language cause, the thing the screen leads with. */
     var Context.lastError: String
         get() = get(this).getString("lastError", "")!!
         set(v) = get(this).edit().putString("lastError", v).apply()
+
+    /** The raw code or exception behind it. Kept, but shown small. */
+    var Context.lastErrorDetail: String
+        get() = get(this).getString("lastErrorDetail", "")!!
+        set(v) = get(this).edit().putString("lastErrorDetail", v).apply()
+
+    /** Every run, success or not — so "it is trying" is visible. */
+    var Context.lastAttempt: Long
+        get() = get(this).getLong("lastAttempt", 0)
+        set(v) = get(this).edit().putLong("lastAttempt", v).apply()
+
+    /** Last version the server said it was serving, for the settings screen. */
+    var Context.updateVersion: String
+        get() = get(this).getString("updateVersion", "")!!
+        set(v) = get(this).edit().putString("updateVersion", v).apply()
+
+    var Context.updateCode: Int
+        get() = get(this).getInt("updateCode", 0)
+        set(v) = get(this).edit().putInt("updateCode", v).apply()
+
+    var Context.updateChecked: Long
+        get() = get(this).getLong("updateChecked", 0)
+        set(v) = get(this).edit().putLong("updateChecked", v).apply()
+}
+
+class HttpError(val code: Int) : Exception("HTTP $code")
+
+/**
+ * Turn a failure into something the phone's owner can act on.
+ *
+ * A status code on a settings screen is a dead end: it says a thing went wrong
+ * without saying which of the two or three things it actually is. Off the LAN
+ * looks like a connect failure from a coffee shop and like a 403 from a network
+ * that resolves the name but is not trusted — same cause, same fix, entirely
+ * different symptom.
+ *
+ * Returns (what to tell the user, the raw detail to keep in the small print).
+ */
+fun describe(e: Exception): Pair<String, String> {
+    val detail = e.message ?: e.toString()
+    return when {
+        e is HttpError && e.code == 403 ->
+            "The server refused this device — the ingest route only accepts the LAN " +
+                "and the VPN. Connect to either and this clears itself." to detail
+        e is HttpError && e.code == 401 ->
+            "The server rejected the ingest token." to detail
+        e is HttpError && e.code in 500..599 ->
+            "The server is reachable but unhealthy. Nothing to do on the phone — " +
+                "it keeps retrying." to detail
+        e is HttpError && e.code == 404 ->
+            "The server URL is wrong, or that server is not running time." to detail
+        e is HttpError -> "The server rejected the upload." to detail
+        e is java.net.SocketTimeoutException ->
+            "The server took too long to answer. It keeps retrying." to detail
+        e is java.net.UnknownHostException ->
+            "Can't find the server — are you on the LAN or VPN?" to detail
+        e is java.net.ConnectException || e is java.net.NoRouteToHostException ->
+            "Can't reach the server — are you on the LAN or VPN?" to detail
+        e is javax.net.ssl.SSLException ->
+            "The server's certificate was rejected." to detail
+        e is java.io.IOException ->
+            "Network error while uploading. It keeps retrying." to detail
+        else -> "Sync failed." to detail
+    }
 }
 
 class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, params) {
 
     override suspend fun doWork(): Result {
         val ctx = applicationContext
+
+        // Before the usage-access gate on purpose: a phone that cannot sync is
+        // exactly the one that most needs the build which might fix it.
+        Update.checkAndNotify(ctx)
+
         with(Prefs) {
+            ctx.lastAttempt = System.currentTimeMillis()
+
             if (!Usage.hasAccess(ctx)) {
-                ctx.lastError = "usage access not granted"
+                ctx.lastError = "Usage access is not granted, so there is nothing to send."
+                ctx.lastErrorDetail = ""
                 return Result.failure()
             }
             // queryEvents returns null before first unlock on credential-
@@ -69,6 +144,8 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             val frames = Usage.frames(ctx, Usage.sessions(Usage.drain(events)))
             if (frames.isEmpty()) {
                 ctx.lastSync = now
+                ctx.lastError = ""
+                ctx.lastErrorDetail = ""
                 return Result.success()
             }
 
@@ -79,55 +156,94 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
                 ctx.watermark = now
                 ctx.lastSync = now
                 ctx.lastError = ""
+                ctx.lastErrorDetail = ""
                 Result.success()
             } catch (e: Exception) {
-                ctx.lastError = e.message ?: e.toString()
+                val (why, detail) = describe(e)
+                ctx.lastError = why
+                ctx.lastErrorDetail = detail
                 Result.retry()
             }
         }
     }
 
+    /**
+     * The whole backlog in one request.
+     *
+     * A phone reports retrospectively, so a normal run has dozens of minutes
+     * to send. One request each meant dozens of round trips, each holding a
+     * server thread for as long as the model took — which is how the server
+     * ran out of threads and started failing its health probes. `/v1/frames`
+     * takes the lot as an array. `/v1/frame` stays for the desktop agent,
+     * which really does have exactly one minute to send.
+     */
     private fun post(ctx: Context, frames: List<MinuteFrame>) {
         with(Prefs) {
             val base = ctx.server.trimEnd('/')
-            for (f in frames) {
-                val body = JSONObject().apply {
-                    put("ts", f.ts)
-                    put("device", ctx.device)
-                    put("window", f.window)
-                    put("blocked", false)
-                    put("keys", 0)
-                    put("mouse", 0)
-                    put("workspaces", 0)
-                    put("apps", JSONArray(f.apps))
-                    // Omitted rather than zeroed: the field is optional on the
-                    // server and absence reads as "unknown", which is what a
-                    // phone actually knows.
-                    f.idleSecs?.let { put("idle_secs", it) }
-                    f.note?.let { put("note", it) }
-                }.toString()
-
-                val conn = (URL("$base/v1/frame").openConnection() as HttpURLConnection).apply {
-                    requestMethod = "POST"
-                    doOutput = true
-                    connectTimeout = 15_000
-                    // The server may take a while when it calls the model.
-                    readTimeout = 180_000
-                    setRequestProperty("Content-Type", "application/json")
+            val body = JSONArray().apply {
+                for (f in frames) {
+                    put(JSONObject().apply {
+                        put("ts", f.ts)
+                        put("device", ctx.device)
+                        put("window", f.window)
+                        put("blocked", false)
+                        put("keys", 0)
+                        put("mouse", 0)
+                        put("workspaces", 0)
+                        put("apps", JSONArray(f.apps))
+                        // Omitted rather than zeroed: the field is optional on
+                        // the server and absence reads as "unknown", which is
+                        // what a phone actually knows.
+                        f.idleSecs?.let { put("idle_secs", it) }
+                        f.note?.let { put("note", it) }
+                    })
                 }
-                conn.outputStream.use { it.write(body.toByteArray()) }
-                val code = conn.responseCode
-                conn.disconnect()
+            }.toString()
 
-                // 403 means off-LAN, not rejected: the route is lan-only.
-                // Treat it like any other failure so the watermark holds and
-                // the same minutes replay once we're home.
-                if (code !in 200..299) error("HTTP $code")
+            val conn = (URL("$base/v1/frames").openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                doOutput = true
+                connectTimeout = 15_000
+                // Ingest stores and queues; it never waits on the model now, so
+                // a reply that takes minutes means something is broken rather
+                // than merely busy.
+                readTimeout = 60_000
+                setRequestProperty("Content-Type", "application/json")
             }
+            conn.outputStream.use { it.write(body.toByteArray()) }
+            val code = conn.responseCode
+            conn.disconnect()
+
+            // Any non-2xx holds the watermark so the same minutes replay
+            // later. 403 in particular is not a rejection but a location:
+            // the ingest route is lan-only.
+            if (code !in 200..299) throw HttpError(code)
         }
     }
 
     companion object {
+        const val PERIODIC = "sync"
+        const val ONCE = "sync-now"
+
+        /**
+         * A deliberate "Sync now". Unique and REPLACE so repeated taps do not
+         * stack up runs, and named so the screen can watch this one request
+         * rather than guess from prefs whether anything is happening.
+         */
+        fun once(ctx: Context) {
+            WorkManager.getInstance(ctx).enqueueUniqueWork(
+                ONCE,
+                ExistingWorkPolicy.REPLACE,
+                OneTimeWorkRequestBuilder<SyncWorker>()
+                    .setConstraints(
+                        Constraints.Builder()
+                            .setRequiredNetworkType(NetworkType.CONNECTED)
+                            .build()
+                    )
+                    .build()
+            )
+        }
+
         /**
          * 30 minutes with 15 minutes of flex rather than a bare 15, so the
          * system can fold this into a wakeup it was making anyway. Nothing is
@@ -146,7 +262,7 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
                 .build()
 
             WorkManager.getInstance(ctx)
-                .enqueueUniquePeriodicWork("sync", ExistingPeriodicWorkPolicy.KEEP, work)
+                .enqueueUniquePeriodicWork(PERIODIC, ExistingPeriodicWorkPolicy.KEEP, work)
         }
     }
 }

@@ -83,7 +83,10 @@ fn base64_encode(bytes: &[u8]) -> String {
 pub fn post(cfg: &AgentConfig, frame: &Frame) -> Result<FrameAck> {
     let url = format!("{}/v1/frame", cfg.server.trim_end_matches('/'));
     let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(330))
+        // Ingest no longer waits on the model, so anything past a few seconds
+        // of upload is a real fault. Waiting five and a half minutes for it
+        // only means the next minute's frame is late too.
+        .timeout(std::time::Duration::from_secs(30))
         .build()?;
 
     let req = client.post(&url).json(frame);
@@ -99,6 +102,19 @@ pub fn post(cfg: &AgentConfig, frame: &Frame) -> Result<FrameAck> {
     Ok(serde_json::from_str(&body).with_context(|| format!("parsing ack: {body}"))?)
 }
 
+/// What became of the minute, in the two characters a log line can spare.
+///
+/// The category printed next to "queued" is the previous minute's, carried
+/// forward until the classifier says otherwise -- so the line reads as a guess
+/// rather than as an answer, which is what it is.
+pub fn status(ack: &FrameAck) -> &'static str {
+    match (ack.classified, ack.pending) {
+        (true, _) => "",
+        (false, true) => " (queued)",
+        (false, false) => " (skipped)",
+    }
+}
+
 pub fn run(cfg: &AgentConfig) -> Result<()> {
     let input = input::Monitor::start();
     let tabs = browser::Tabs::start(&cfg.device);
@@ -109,7 +125,7 @@ pub fn run(cfg: &AgentConfig) -> Result<()> {
                 "{} [{}]{} {}",
                 chrono::Local::now().format("%H:%M"),
                 ack.category,
-                if ack.classified { "" } else { " (skipped)" },
+                status(&ack),
                 ack.detail.as_deref().unwrap_or("")
             ),
             // A daemon meant to run for months must survive a server restart, a

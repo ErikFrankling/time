@@ -1,8 +1,9 @@
 use anyhow::{Context, Result};
 use std::sync::{Arc, Mutex};
 
+use crate::apk;
 use crate::capture;
-use crate::classify;
+use crate::classifier::{self, Queue};
 use crate::config::{self, ServerConfig};
 use crate::db::{Db, Minute};
 use crate::proto::{Frame, FrameAck};
@@ -17,24 +18,31 @@ pub fn run(cfg: Arc<ServerConfig>) -> Result<()> {
     let db = Arc::new(Mutex::new(Db::open()?));
     println!("db: {}", config::db_path()?.display());
 
+    // Pulls the Android release in the background. Nothing below waits on it.
+    let apk = apk::start();
+
+    // Every model call happens over here, on threads that serve no request.
+    let queue = classifier::start(cfg.clone(), db.clone(), key.clone());
+
     let addr = format!("0.0.0.0:{}", cfg.port);
     let server = Arc::new(
         tiny_http::Server::http(&addr).map_err(|e| anyhow::anyhow!("binding {addr}: {e}"))?,
     );
     println!("listening on {addr}");
 
-    // A pool, not a loop. Classifying a frame blocks on the model for tens of
-    // seconds, and a single-threaded accept loop serves nothing else meanwhile
-    // -- health probes included, which is enough to get the pod restarted and
-    // the route pulled out from under it. Workers are cheap; being unreachable
-    // for the length of every model call is not.
-    let workers = 4;
+    // A pool, not a loop, and a generous one. Nothing here waits on the model
+    // any more, but a worker still spends real time reading a megabyte of
+    // base64 off a phone's uplink or typesetting a PDF, and every one of those
+    // is a thread that cannot answer a probe. They block on I/O rather than
+    // burn CPU, so the count costs stacks and nothing else.
+    let workers = 16;
     let mut handles = Vec::with_capacity(workers);
     for _ in 0..workers {
-        let (server, cfg, db, key) = (server.clone(), cfg.clone(), db.clone(), key.clone());
+        let (server, cfg, db) = (server.clone(), cfg.clone(), db.clone());
+        let (apk, queue) = (apk.clone(), queue.clone());
         handles.push(std::thread::spawn(move || {
             while let Ok(req) = server.recv() {
-                handle(&cfg, &db, &key, req);
+                handle(&cfg, &db, &apk, &queue, req);
             }
         }));
     }
@@ -44,9 +52,25 @@ pub fn run(cfg: Arc<ServerConfig>) -> Result<()> {
     Ok(())
 }
 
-fn handle(cfg: &ServerConfig, db: &Mutex<Db>, key: &str, mut req: tiny_http::Request) {
+fn handle(
+    cfg: &ServerConfig,
+    db: &Mutex<Db>,
+    apk: &apk::Shared,
+    queue: &Queue,
+    mut req: tiny_http::Request,
+) {
     {
-        let is_ingest = req.url().starts_with("/v1/frame");
+        // First, and touching nothing. A probe exists to report whether this
+        // process can still answer, and it can only answer that honestly if
+        // it never queues behind the work it is reporting on.
+        if req.url().starts_with("/healthz") {
+            let _ = req.respond(tiny_http::Response::from_string("ok\n"));
+            return;
+        }
+
+        // Longest first: `/v1/frames` also starts with `/v1/frame`.
+        let is_batch = req.url().starts_with("/v1/frames");
+        let is_ingest = is_batch || req.url().starts_with("/v1/frame");
 
         if req.url().starts_with("/v1/code") {
             let mut body = String::new();
@@ -98,8 +122,8 @@ fn handle(cfg: &ServerConfig, db: &Mutex<Db>, key: &str, mut req: tiny_http::Req
         // server that receives the frames also hands out the APK that sends
         // them -- one URL to type into a phone, no store, no third party.
         let path = req.url().split('?').next().unwrap_or("/").to_string();
-        if path == "/app" || path == "/app/" {
-            let _ = req.respond(app_response(&path));
+        if path == "/app" || path == "/app/" || path == "/app/version" {
+            let _ = req.respond(app_response(&path, apk));
             return;
         }
 
@@ -111,14 +135,22 @@ fn handle(cfg: &ServerConfig, db: &Mutex<Db>, key: &str, mut req: tiny_http::Req
                 return;
             }
 
-            let result = serde_json::from_str::<Frame>(&body)
-                .context("parsing frame")
-                .and_then(|f| ingest(&cfg, &db, &key, f));
+            // A batch replies with an array and a single frame with an object,
+            // so each client parses exactly what it sent.
+            let result = if is_batch {
+                serde_json::from_str::<Vec<Frame>>(&body)
+                    .context("parsing frame batch")
+                    .and_then(|frames| ingest_batch(cfg, db, queue, frames))
+                    .and_then(|acks| Ok(serde_json::to_string(&acks)?))
+            } else {
+                serde_json::from_str::<Frame>(&body)
+                    .context("parsing frame")
+                    .and_then(|f| ingest(cfg, db, queue, f))
+                    .and_then(|ack| Ok(serde_json::to_string(&ack)?))
+            };
 
             let resp = match result {
-                Ok(ack) => tiny_http::Response::from_string(
-                    serde_json::to_string(&ack).unwrap_or_else(|_| "{}".into()),
-                )
+                Ok(body) => tiny_http::Response::from_string(body)
                     .with_header::<tiny_http::Header>(
                         "Content-Type: application/json".parse().unwrap(),
                     ),
@@ -202,12 +234,56 @@ fn report_response(
     }
 }
 
-/// Decide what a frame means and record it. Everything expensive happens here:
-/// the idle check, the model call, and the write.
-fn ingest(cfg: &ServerConfig, db: &Mutex<Db>, key: &str, frame: Frame) -> Result<FrameAck> {
-    // Read what we need and release immediately. The model call below takes
-    // tens of seconds, and holding the lock across it would block the UI, stall
-    // every other agent, and time out the liveness probe into a restart loop.
+/// A whole sync in one request.
+///
+/// The phone reports retrospectively and routinely has a backlog of dozens of
+/// minutes. Sending those one at a time meant dozens of round trips, each
+/// holding a server thread -- the pile-up that took the pod down. Order is
+/// preserved because each minute is classified with the previous one as
+/// context, and shuffling them would scramble that.
+fn ingest_batch(
+    cfg: &ServerConfig,
+    db: &Mutex<Db>,
+    queue: &Queue,
+    mut frames: Vec<Frame>,
+) -> Result<Vec<FrameAck>> {
+    anyhow::ensure!(frames.len() <= 2000, "batch of {} frames is too large", frames.len());
+    frames.sort_by_key(|f| f.ts);
+
+    let mut acks = Vec::with_capacity(frames.len());
+    for f in frames {
+        let ts = f.ts;
+        // One bad minute must not cost the other forty-nine. Report it in
+        // place and carry on.
+        match ingest(cfg, db, queue, f) {
+            Ok(ack) => acks.push(ack),
+            Err(e) => {
+                eprintln!("ingest {ts}: {e:#}");
+                acks.push(FrameAck {
+                    ts,
+                    category: "other".into(),
+                    project: None,
+                    detail: Some(format!("rejected: {e:#}")),
+                    classified: false,
+                    pending: false,
+                });
+            }
+        }
+    }
+    Ok(acks)
+}
+
+/// Decide what a frame means and record it -- cheaply, and without ever
+/// blocking on the model.
+///
+/// Everything here is local work measured in milliseconds: a JPEG decode, a
+/// perceptual hash, one row written. A minute that genuinely needs a label is
+/// stored with the previous minute's as a placeholder and handed to the
+/// background queue, and the ack says so rather than pretending to know.
+fn ingest(cfg: &ServerConfig, db: &Mutex<Db>, queue: &Queue, frame: Frame) -> Result<FrameAck> {
+    // Read what we need and release immediately: the rest of this function
+    // decodes an image, and holding SQLite's single writer across that would
+    // serialise every agent behind the slowest one.
     let (existing, last) = {
         let db = db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
         (db.get(&frame.device, frame.ts)?, db.last(&frame.device)?)
@@ -215,10 +291,12 @@ fn ingest(cfg: &ServerConfig, db: &Mutex<Db>, key: &str, frame: Frame) -> Result
 
     if let Some(existing) = existing {
         return Ok(FrameAck {
+            ts: existing.ts,
             category: existing.category,
             project: existing.project,
             detail: existing.detail,
-            classified: false,
+            classified: existing.classified,
+            pending: existing.pending,
         });
     }
 
@@ -240,11 +318,12 @@ fn ingest(cfg: &ServerConfig, db: &Mutex<Db>, key: &str, frame: Frame) -> Result
             apps: Vec::new(),
             workspaces: frame.workspaces,
             classified: false,
+            pending: false,
             model: None,
             tags: vec!["other".to_string()],
         };
         db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?.insert(&m)?;
-        return Ok(ack(m, false));
+        return Ok(ack(&m));
     }
 
     // A phone cannot screenshot itself, so an image-less frame is normal
@@ -326,6 +405,7 @@ fn ingest(cfg: &ServerConfig, db: &Mutex<Db>, key: &str, frame: Frame) -> Result
                 apps: frame.apps.clone(),
                 workspaces: frame.workspaces,
                 classified: false,
+                pending: false,
                 tags: prev.tags.clone(),
                 model: None,
             };
@@ -343,39 +423,24 @@ fn ingest(cfg: &ServerConfig, db: &Mutex<Db>, key: &str, frame: Frame) -> Result
                     }
                 }
             }
-            return Ok(ack(m, false));
+            return Ok(ack(&m));
         }
     }
 
-    let prev = last.as_ref().map(|l| classify::Previous {
-        category: &l.category,
-        project: l.project.as_deref(),
-        detail: l.detail.as_deref(),
-    });
-    let presence = classify::Presence {
-        device: &frame.device,
-        idle_secs: frame.idle_secs,
-        keys: frame.keys,
-        mouse: frame.mouse,
-        note: frame.note.as_deref(),
-    };
-    let label = classify::classify(
-        cfg,
-        key,
-        jpeg.as_deref(),
-        &frame.window,
-        frame.domain.as_deref(),
-        presence,
-        prev,
-    )?;
-
+    // This minute needs a model, which is the one thing that must not happen
+    // while a client waits. Store what we know, carrying the previous label
+    // forward so the chart is approximately right in the meantime, and let the
+    // background pool replace it with the truth.
     let m = Minute {
         ts: frame.ts,
-        device: frame.device,
-        category: label.category,
-        project: label.project,
-        detail: label.detail,
-        window: Some(frame.window),
+        device: frame.device.clone(),
+        category: last
+            .as_ref()
+            .map(|l| l.category.clone())
+            .unwrap_or_else(|| "other".into()),
+        project: last.as_ref().and_then(|l| l.project.clone()),
+        detail: Some("queued for classification".into()),
+        window: Some(frame.window.clone()),
         domain: frame.domain.clone(),
         phash: phash as i64,
         keys: frame.keys,
@@ -383,48 +448,86 @@ fn ingest(cfg: &ServerConfig, db: &Mutex<Db>, key: &str, frame: Frame) -> Result
         idle_secs: frame.idle_secs,
         apps: frame.apps.clone(),
         workspaces: frame.workspaces,
-        classified: true,
-        tags: label.tags.clone(),
-        model: Some(cfg.model.clone()),
+        classified: false,
+        pending: true,
+        tags: last.as_ref().map(|l| l.tags.clone()).unwrap_or_default(),
+        model: None,
     };
+
+    // Written before it is queued, never after: the row is what makes the
+    // queue disposable. Lose the process and the minute is still on disk,
+    // flagged, waiting for the next sweep to find it.
     db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?.insert(&m)?;
-    Ok(ack(m, true))
-    // The JPEG goes out of scope here and is never written anywhere.
+
+    queue.push(classifier::Job {
+        ts: frame.ts,
+        device: frame.device,
+        window: frame.window,
+        domain: frame.domain,
+        jpeg,
+        idle_secs: frame.idle_secs,
+        keys: frame.keys,
+        mouse: frame.mouse,
+        note: frame.note,
+        prev: last.map(|l| classifier::Previous {
+            category: l.category,
+            project: l.project,
+            detail: l.detail,
+        }),
+    });
+
+    Ok(ack(&m))
+    // The JPEG lives on in the queue and is never written anywhere.
 }
 
-fn ack(m: Minute, classified: bool) -> FrameAck {
+fn ack(m: &Minute) -> FrameAck {
     FrameAck {
-        category: m.category,
-        project: m.project,
-        detail: m.detail,
-        classified,
+        ts: m.ts,
+        category: m.category.clone(),
+        project: m.project.clone(),
+        detail: m.detail.clone(),
+        classified: m.classified,
+        pending: m.pending,
     }
 }
 
-/// Where the APK to serve lives. Defaults inside the data volume so the
-/// deployment can drop a build next to the database without extra plumbing.
-fn apk_path() -> std::path::PathBuf {
-    std::env::var("TIME_APK_PATH")
-        .unwrap_or_else(|_| "/data/time.apk".into())
-        .into()
-}
+/// `/app` is the APK itself, `/app/version` is what the phone polls, and
+/// `/app/` is the page you point a browser at.
+fn app_response(path: &str, apk: &apk::Shared) -> tiny_http::ResponseBox {
+    let (meta, checked, error) = {
+        let s = apk.lock().unwrap_or_else(|e| e.into_inner());
+        (s.meta.clone(), s.checked, s.error.clone())
+    };
 
-/// The APK's own versionName is only in its binary manifest, and pulling in an
-/// AXML parser to read one string is not worth it. The build that publishes the
-/// APK knows the version already, so it says so here.
-fn apk_version() -> String {
-    std::env::var("TIME_APK_VERSION").unwrap_or_else(|_| env!("CARGO_PKG_VERSION").into())
-}
-
-/// `/app` is the APK itself; `/app/` is the page you point a phone at.
-fn app_response(path: &str) -> tiny_http::ResponseBox {
-    let apk = apk_path();
+    if path == "/app/version" {
+        let body = match &meta {
+            Some(m) => serde_json::json!({
+                "version": m.version,
+                "versionCode": m.version_code,
+                "sha256": m.sha256,
+                // Deliberately this server's own URL rather than GitHub's: the
+                // phone is on the LAN and may not have a route off it.
+                "url": "/app",
+                "published": m.published,
+                "size": m.size,
+                "signing": m.signing,
+                "stale": !error.is_empty(),
+            }),
+            None => serde_json::json!({ "error": "no APK published" }),
+        };
+        return tiny_http::Response::from_string(body.to_string())
+            .with_status_code(if meta.is_some() { 200 } else { 404 })
+            .with_header::<tiny_http::Header>(
+                "Content-Type: application/json".parse().unwrap(),
+            )
+            .boxed();
+    }
 
     if path == "/app" {
-        let file = match std::fs::File::open(&apk) {
+        let file = match std::fs::File::open(apk::path()) {
             Ok(f) => f,
             Err(e) => {
-                eprintln!("apk: {}: {e}", apk.display());
+                eprintln!("apk: {}: {e}", apk::path().display());
                 return tiny_http::Response::from_string("no APK published\n")
                     .with_status_code(404)
                     .boxed();
@@ -452,7 +555,7 @@ fn app_response(path: &str) -> tiny_http::ResponseBox {
             .with_header::<tiny_http::Header>(
                 format!(
                     "Content-Disposition: attachment; filename=\"time-{}.apk\"",
-                    apk_version()
+                    meta.as_ref().map(|m| m.version.as_str()).unwrap_or("dev")
                 )
                 .parse()
                 .unwrap(),
@@ -460,40 +563,113 @@ fn app_response(path: &str) -> tiny_http::ResponseBox {
             .boxed();
     }
 
-    let built = std::fs::metadata(&apk).ok().map(|m| {
-        let secs = m
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        (m.len(), secs)
-    });
+    tiny_http::Response::from_string(app_page(meta.as_ref(), checked, &error))
+        .with_header::<tiny_http::Header>("Content-Type: text/html; charset=utf-8".parse().unwrap())
+        .boxed()
+}
 
-    let body = match built {
-        Some((bytes, secs)) => {
-            use chrono::TimeZone;
-            let when = chrono::Local
-                .timestamp_opt(secs, 0)
-                .single()
-                .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
-                .unwrap_or_default();
+fn app_page(meta: Option<&apk::Meta>, checked: i64, error: &str) -> String {
+    let obtainium = format!("https://github.com/{}", apk::repo());
+
+    // Anyone reading this page is about to sideload from a browser, which is
+    // exactly the install Android 13+ treats as untrusted: PACKAGE_USAGE_STATS
+    // is a restricted permission, so the usage-access toggle comes up greyed
+    // and the app looks broken rather than blocked. Say so before the download
+    // button, not after.
+    let restricted = "<div class=\"warn\"><b>After installing from this page</b>, the \
+         usage-access toggle will refuse to turn on until you allow it: \
+         <b>Settings → Apps → time → ⋮ → Allow restricted settings</b>. That menu item \
+         only appears once Android has denied the permission at least once, so grant \
+         usage access first, watch it fail, then go do this.</div>"
+        .to_string();
+
+    let recommended = format!(
+        "<div class=\"tip\"><b>The easier route:</b> install \
+         <a href=\"https://github.com/ImranR98/Obtainium\">Obtainium</a> and add \
+         <code>{}</code>. It installs through the same API the app stores use, so none \
+         of the restricted-settings dance above applies, and it checks for new versions \
+         on its own.</div>",
+        web::esc(&obtainium)
+    );
+
+    let body = match meta {
+        Some(m) => {
+            let when = chrono::DateTime::parse_from_rfc3339(&m.published)
+                .map(|t| {
+                    t.with_timezone(&chrono::Local)
+                        .format("%Y-%m-%d %H:%M")
+                        .to_string()
+                })
+                .unwrap_or_else(|_| m.published.clone());
+
+            // A debug-signed APK is installable but is a dead end: the release
+            // key can never upgrade it, so the way out is an uninstall that
+            // takes the app's data with it. Better to know before installing.
+            let signing = match m.signing.as_str() {
+                "release" => String::new(),
+                "debug" => "<div class=\"warn\">This build is signed with the \
+                     <b>debug</b> key, because the release signing secrets are not set \
+                     in CI yet. It installs, but it can never be upgraded to a \
+                     release-signed build — that needs an uninstall. Treat it as \
+                     temporary.</div>"
+                    .to_string(),
+                other => format!(
+                    "<div class=\"warn\">Signing key unknown ({}). This APK was placed \
+                     on the server by hand rather than published by CI.</div>",
+                    web::esc(other)
+                ),
+            };
+
+            let stale = if !error.is_empty() {
+                let ago = if checked > 0 {
+                    let mins = (chrono::Utc::now().timestamp() - checked) / 60;
+                    format!("last successful check {} ago", human_ago(mins))
+                } else {
+                    "no successful check since this server started".into()
+                };
+                format!(
+                    "<div class=\"warn\">Serving a possibly outdated APK: {} ({}). \
+                     Error: {}</div>",
+                    ago,
+                    web::esc(&format!("repo {}", apk::repo())),
+                    web::esc(error)
+                )
+            } else {
+                String::new()
+            };
+
             format!(
-                "<p class=\"v\">v{}</p>\
-                 <p class=\"meta\">{:.1} MB · built {}</p>\
+                "<p class=\"v\">v{} <span class=\"code\">({})</span></p>\
+                 <p class=\"meta\">{:.1} MB · published {} · {}-signed</p>\
+                 {stale}{signing}\
                  <p><a class=\"dl\" href=\"/app\">Download APK</a></p>\
+                 {restricted}{recommended}\
+                 <p class=\"meta\">sha256 {}</p>\
                  <p class=\"meta\">Android blocks installs from unknown sources until you \
                   allow it for your browser. After installing, open the app and grant \
                   usage access — nothing is reported without it.</p>",
-                web::esc(&apk_version()),
-                bytes as f64 / 1_048_576.0,
+                web::esc(&m.version),
+                m.version_code,
+                m.size as f64 / 1_048_576.0,
                 web::esc(&when),
+                web::esc(&m.signing),
+                web::esc(&m.sha256),
             )
         }
-        None => "<p class=\"meta\">No APK has been published on this server yet.</p>".to_string(),
+        None => format!(
+            "<p class=\"meta\">No APK has been published yet.</p>\
+             <div class=\"warn\">The server fetches the newest release from \
+             <code>{}</code> on startup and hourly. {}</div>",
+            web::esc(&apk::repo()),
+            if error.is_empty() {
+                "It has not managed a successful check yet.".to_string()
+            } else {
+                format!("Last error: {}", web::esc(error))
+            }
+        ),
     };
 
-    tiny_http::Response::from_string(format!(
+    format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
 <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
 <title>time — Android app</title><style>\
@@ -501,14 +677,26 @@ fn app_response(path: &str) -> tiny_http::ResponseBox {
 body {{ margin:0; padding:40px 24px; font:16px/1.55 ui-sans-serif,system-ui,sans-serif; \
   max-width:520px; margin:0 auto; }}\
 h1 {{ font-size:22px; margin:0 0 4px; }}\
-.v {{ margin:0 0 24px; opacity:.6; font-variant-numeric:tabular-nums; }}\
-.meta {{ font-size:13px; opacity:.6; }}\
+.v {{ margin:0 0 4px; font-variant-numeric:tabular-nums; }}\
+.code {{ opacity:.5; }}\
+.meta {{ font-size:13px; opacity:.6; overflow-wrap:anywhere; }}\
+.warn, .tip {{ font-size:14px; padding:12px 14px; border-radius:10px; margin:16px 0; \
+  border:1px solid currentColor; }}\
+.warn {{ color:#a3560a; }}\
+.tip {{ opacity:.85; }}\
+code {{ font-size:13px; overflow-wrap:anywhere; }}\
 .dl {{ display:block; text-align:center; padding:14px; border:1px solid currentColor; \
   border-radius:10px; text-decoration:none; color:inherit; font-weight:600; margin:24px 0; }}\
 </style></head><body><h1>time</h1>{body}<p><a href=\"/\">← dashboard</a></p></body></html>"
-    ))
-    .with_header::<tiny_http::Header>("Content-Type: text/html; charset=utf-8".parse().unwrap())
-    .boxed()
+    )
+}
+
+fn human_ago(mins: i64) -> String {
+    match mins {
+        m if m < 60 => format!("{m}m"),
+        m if m < 60 * 48 => format!("{}h", m / 60),
+        m => format!("{}d", m / (60 * 24)),
+    }
 }
 
 /// Minimal percent-decoding for query values.
