@@ -107,8 +107,9 @@ Secrets come from the environment only, never the config file: `TIME_API_KEY`
 
 ## Cost
 
-`mimo-v2-omni` on the OpenCode Go plan, roughly 1400 tokens in / 100 out per
-call. About **$7–14/month** depending on how much the idle skip catches — a
+`qwen3.6-plus` on the OpenCode Go plan ($0.50/$3.00 per M), roughly 1400 tokens
+in / 100 out per call, so about $0.001 a call. That lands around
+**$9–18/month** depending on how much the idle skip catches — a
 minute whose screen is unchanged from the last one is recorded without an API
 call at all, which on a normal day is a large fraction of them.
 

@@ -61,7 +61,12 @@ clicking a slice worth doing.
 
 ## 3. The model call
 
-- **Model:** `opencode-go/mimo-v2-omni` — the one confirmed multimodal model on
+- **Model:** `qwen3.6-plus`. The original pick, `mimo-v2-omni`, is still listed
+  by the models endpoint but 404s as deprecated on every call — so the plan's
+  models had to be probed with a test image to find what actually accepts
+  vision. Only `qwen3.6-plus` and `minimax-m3` do; the latter is a reasoning
+  model whose think blocks break JSON parsing. Superseded note below:
+- ~~**Model:** `opencode-go/mimo-v2-omni`~~ — was the confirmed multimodal model on
   the Go plan, $0.40/$2.00 per M, 262K context.
 - **Endpoint:** `https://opencode.ai/zen/go/v1/chat/completions`,
   OpenAI-compatible, Bearer auth.
