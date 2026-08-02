@@ -394,7 +394,7 @@ fn ingest(cfg: &ServerConfig, db: &Mutex<Db>, queue: &Queue, frame: Frame) -> Re
                 db.lock()
                     .map_err(|e| anyhow::anyhow!("db lock: {e}"))?
                     .insert(&m)?;
-                return Ok(ack(m, false, false));
+                return Ok(ack(&m));
             }
         }
     }
