@@ -533,6 +533,16 @@ pub fn page(cfg: &ServerConfig, db: &Db, q: &Query) -> Result<String> {
     let minutes = db.range(from, to, f)?;
     let stats = db.stats(from, to, f)?;
     let (buckets, _input) = db.hourly(from, to, f)?;
+
+    // "Deep" is work and study; everything else is shallow by construction.
+    let deep: Vec<String> = cfg
+        .categories
+        .iter()
+        .filter(|c| c.starts_with("work_") || c.as_str() == "kth")
+        .cloned()
+        .collect();
+    let focus = db.focus(from, to, f, &deep)?;
+    let strips = db.day_strips(30, 10, f)?;
     let all_devices = db.all_devices()?;
     let total = stats.tracked;
 
@@ -666,6 +676,9 @@ h2 {{ font-size:12px; text-transform:uppercase; letter-spacing:.07em;
 .grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:28px; }}
 .hourly {{ width:100%; height:148px; }}
 .tick {{ font-size:9px; fill:var(--text-muted); text-anchor:middle; }}
+.strip {{ width:100%; height:auto; }}
+.strip-label {{ font-size:8px; fill:var(--text-muted); }}
+.strip-grid {{ stroke:var(--rule); stroke-width:1; }}
 .bars {{ display:flex; flex-direction:column; gap:5px; }}
 .bar {{ display:grid; grid-template-columns:minmax(80px,150px) 1fr 58px; gap:10px;
   align-items:center; text-decoration:none; font-size:13px; padding:1px 0; }}
@@ -710,6 +723,10 @@ h2 {{ font-size:12px; text-transform:uppercase; letter-spacing:.07em;
 <table><thead><tr><th>Category</th><th class="num">Time</th><th class="num">Share</th></tr></thead>
 <tbody>{cat_rows}</tbody></table></div>
 
+<h2>Focus</h2>{focus_panel}
+
+<h2>Last 30 days — each row is one day, midnight to midnight</h2>{strip}
+
 <h2>By hour</h2>{hourly}
 
 <div class="grid">
@@ -723,6 +740,8 @@ h2 {{ font-size:12px; text-transform:uppercase; letter-spacing:.07em;
 </main></body></html>"#,
         donut = sunburst(cfg, q, &layers),
         hourly = hourly_chart(cfg, &buckets),
+        focus_panel = focus_panel(&focus),
+        strip = day_strip(cfg, &strips, 10),
         app_bars = bar_list(q, &apps, total, 12, "app", &f.app, "var(--series-1)"),
         open_bars = bar_list(q, &open, total, 12, "app", &f.app, "var(--series-3)"),
         proj_bars = bar_list(q, &projects, total, 10, "cat", &None, "var(--series-7)"),
@@ -742,4 +761,88 @@ h2 {{ font-size:12px; text-transform:uppercase; letter-spacing:.07em;
             format!(" ({} known)", all_devices.len())
         },
     ))
+}
+
+/// One row per day, midnight to midnight, coloured by category.
+///
+/// This is the form the whole field converged on independently -- it is what
+/// nearly every long-run tracker ends up drawing, because totals hide the thing
+/// that actually matters. A day that reads "4h work" in the pie can be one
+/// solid block or sixty fragments, and only this shows which.
+fn day_strip(cfg: &ServerConfig, rows: &[(i64, Vec<Option<String>>)], bucket_mins: i64) -> String {
+    if rows.is_empty() {
+        return "<p class=\"empty\">No history yet.</p>".into();
+    }
+    let per_day = rows[0].1.len().max(1);
+    let (w, row_h, label_w) = (760.0_f64, 11.0_f64, 42.0_f64);
+    let cell_w = (w - label_w) / per_day as f64;
+    let mut out = String::new();
+
+    for (i, (start, buckets)) in rows.iter().enumerate() {
+        let y = i as f64 * row_h;
+        let label = chrono::DateTime::from_timestamp(*start, 0)
+            .map(|d| d.with_timezone(&chrono::Local).format("%a %d").to_string())
+            .unwrap_or_default();
+        out.push_str(&format!(
+            "<text x=\"0\" y=\"{:.1}\" class=\"strip-label\">{}</text>",
+            y + row_h - 2.0,
+            esc(&label)
+        ));
+        for (b, cat) in buckets.iter().enumerate() {
+            let Some(cat) = cat else { continue };
+            let mins = b as i64 * bucket_mins;
+            out.push_str(&format!(
+                "<rect x=\"{:.2}\" y=\"{y:.1}\" width=\"{:.2}\" height=\"{:.1}\" fill=\"{}\">\
+                 <title>{} {:02}:{:02} — {}</title></rect>",
+                label_w + b as f64 * cell_w,
+                cell_w + 0.4,
+                row_h - 1.0,
+                css_var(cfg, cat),
+                esc(&label),
+                mins / 60,
+                mins % 60,
+                esc(cat)
+            ));
+        }
+    }
+
+    // Hour ruler along the bottom, so a row position reads as a time of day.
+    let base = rows.len() as f64 * row_h;
+    let mut ticks = String::new();
+    for h in (0..=24).step_by(3) {
+        let x = label_w + (h as f64 / 24.0) * (w - label_w);
+        ticks.push_str(&format!(
+            "<line x1=\"{x:.1}\" y1=\"0\" x2=\"{x:.1}\" y2=\"{base:.1}\" class=\"strip-grid\"/>\
+             <text x=\"{x:.1}\" y=\"{:.1}\" class=\"tick\">{h:02}</text>",
+            base + 11.0
+        ));
+    }
+
+    format!(
+        "<svg viewBox=\"0 0 {w} {:.1}\" class=\"strip\" role=\"img\" \
+         aria-label=\"Each row is one day, midnight to midnight\">{ticks}{out}</svg>",
+        base + 16.0
+    )
+}
+
+fn focus_panel(f: &crate::db::Focus) -> String {
+    let ttfd = match f.time_to_first_deep {
+        Some(m) => fmt_hm(m),
+        None => "—".into(),
+    };
+    format!(
+        "<div class=\"statrow\">\
+         <div class=\"stat\"><b>{}</b><span>longest block</span></div>\
+         <div class=\"stat\"><b>{}</b><span>blocks ≥25m</span></div>\
+         <div class=\"stat\"><b>{}</b><span>blocks ≥50m</span></div>\
+         <div class=\"stat\"><b>{ttfd}</b><span>to first deep block</span></div>\
+         <div class=\"stat\"><b>{}</b><span>median block</span></div>\
+         <div class=\"stat\"><b>{}</b><span>switches</span></div>\
+         </div>",
+        fmt_hm(f.longest),
+        f.blocks_25,
+        f.blocks_50,
+        fmt_hm(f.median_block),
+        f.switches
+    )
 }

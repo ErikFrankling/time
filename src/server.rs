@@ -228,7 +228,20 @@ fn ingest(cfg: &ServerConfig, db: &Mutex<Db>, key: &str, frame: Frame) -> Result
                 tags: prev.tags.clone(),
                 model: None,
             };
-            db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?.insert(&m)?;
+            {
+                let db = db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
+                db.insert(&m)?;
+                // The absence started when input stopped, not when we
+                // noticed. Correct the record backwards.
+                if m.category == "idle" && prev.category != "idle" {
+                    if let Some(s) = frame.idle_secs {
+                        let n = db.backdate_idle(&m.device, m.ts, s)?;
+                        if n > 0 {
+                            eprintln!("backdated {n} minute(s) to idle on {}", m.device);
+                        }
+                    }
+                }
+            }
             return Ok(ack(m, false));
         }
     }

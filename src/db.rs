@@ -444,3 +444,167 @@ impl Db {
             .collect())
     }
 }
+
+impl Db {
+    /// Rewrite the minutes leading up to a detected absence.
+    ///
+    /// Idle is only noticed once the timeout expires, so by the time a minute
+    /// is marked idle the preceding `idle_secs` were already written as
+    /// whatever was last happening. Left alone, every break silently credits
+    /// that much phantom work to the last category -- six breaks a day is half
+    /// an hour of fiction.
+    ///
+    /// Only minutes with no input are rewritten: if there were keypresses the
+    /// person was demonstrably still there, whatever the screen was doing.
+    pub fn backdate_idle(&self, device: &str, until_ts: i64, idle_secs: u32) -> Result<usize> {
+        let from = until_ts - (idle_secs as i64).min(3600);
+        let mut stmt = self.conn.prepare(
+            "UPDATE minute SET category = 'idle', project = NULL,
+                    detail = 'backdated: no input before this was noticed'
+             WHERE device = ?1 AND ts >= ?2 AND ts < ?3
+               AND keys = 0 AND mouse = 0 AND category != 'idle'",
+        )?;
+        Ok(stmt.execute(rusqlite::params![device, from, until_ts])?)
+    }
+}
+
+/// A run of consecutive minutes in one category.
+#[derive(Debug, Clone)]
+pub struct Block {
+    pub start: i64,
+    pub minutes: i64,
+    pub category: String,
+    pub project: Option<String>,
+}
+
+/// What the day looked like as blocks rather than totals.
+#[derive(Debug, Default)]
+pub struct Focus {
+    pub longest: i64,
+    pub blocks_25: i64,
+    pub blocks_50: i64,
+    /// Minutes from the first tracked activity to the start of the first
+    /// block of 25+ deep minutes. None if there never was one.
+    pub time_to_first_deep: Option<i64>,
+    pub switches: i64,
+    pub median_block: i64,
+}
+
+impl Db {
+    /// Merge consecutive minutes of the same category into blocks.
+    ///
+    /// A single stray minute would otherwise shatter every block, so up to
+    /// `tolerance` interrupting minutes are absorbed. Without that the metric
+    /// reads as zero forever, which is both false and demoralising.
+    pub fn blocks(&self, from: i64, to: i64, f: &Filter, tolerance: i64) -> Result<Vec<Block>> {
+        let minutes = self.resolved(from, to, f)?;
+        let mut out: Vec<Block> = Vec::new();
+        let mut interruptions = 0i64;
+
+        for m in minutes {
+            match out.last_mut() {
+                Some(b)
+                    if b.category == m.category
+                        && m.ts - (b.start + b.minutes * 60) <= 60 * (tolerance + 1) =>
+                {
+                    b.minutes = (m.ts - b.start) / 60 + 1;
+                    interruptions = 0;
+                }
+                Some(b)
+                    if interruptions < tolerance
+                        && m.ts - (b.start + b.minutes * 60) <= 60 =>
+                {
+                    // A brief dip into something else: hold the block open.
+                    interruptions += 1;
+                    let _ = b;
+                    out.push(Block {
+                        start: m.ts,
+                        minutes: 1,
+                        category: m.category,
+                        project: m.project,
+                    });
+                }
+                _ => {
+                    interruptions = 0;
+                    out.push(Block {
+                        start: m.ts,
+                        minutes: 1,
+                        category: m.category,
+                        project: m.project,
+                    });
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Fragmentation metrics. Two days with identical pie charts can differ
+    /// fivefold here, which is the whole reason to compute it.
+    pub fn focus(&self, from: i64, to: i64, f: &Filter, deep: &[String]) -> Result<Focus> {
+        let blocks = self.blocks(from, to, f, 2)?;
+        let real: Vec<&Block> = blocks.iter().filter(|b| b.category != "idle").collect();
+        let deep_blocks: Vec<&&Block> = real
+            .iter()
+            .filter(|b| deep.iter().any(|d| *d == b.category))
+            .collect();
+
+        let mut lengths: Vec<i64> = real.iter().map(|b| b.minutes).collect();
+        lengths.sort_unstable();
+
+        let first_activity = real.first().map(|b| b.start);
+        Ok(Focus {
+            longest: deep_blocks.iter().map(|b| b.minutes).max().unwrap_or(0),
+            blocks_25: deep_blocks.iter().filter(|b| b.minutes >= 25).count() as i64,
+            blocks_50: deep_blocks.iter().filter(|b| b.minutes >= 50).count() as i64,
+            time_to_first_deep: deep_blocks
+                .iter()
+                .find(|b| b.minutes >= 25)
+                .zip(first_activity)
+                .map(|(b, start)| (b.start - start) / 60),
+            switches: real.len().saturating_sub(1) as i64,
+            median_block: lengths.get(lengths.len() / 2).copied().unwrap_or(0),
+        })
+    }
+
+    /// One row per day for the strip chart: (day_start, minute-of-day buckets).
+    /// Each bucket is the dominant category in that slice of the day.
+    pub fn day_strips(
+        &self,
+        days: i64,
+        bucket_mins: i64,
+        f: &Filter,
+    ) -> Result<Vec<(i64, Vec<Option<String>>)>> {
+        use chrono::{Duration, Local, TimeZone};
+        let per_day = (1440 / bucket_mins) as usize;
+        let mut out = Vec::new();
+
+        for d in (0..days).rev() {
+            let day = Local::now().date_naive() - Duration::days(d);
+            let Some(start) = Local
+                .from_local_datetime(&day.and_hms_opt(0, 0, 0).unwrap())
+                .earliest()
+                .map(|x| x.timestamp())
+            else {
+                continue;
+            };
+
+            let mut tally: Vec<std::collections::HashMap<String, i64>> =
+                vec![Default::default(); per_day];
+            for m in self.resolved(start, start + 86_400, f)? {
+                let idx = (((m.ts - start) / 60 / bucket_mins) as usize).min(per_day - 1);
+                *tally[idx].entry(m.category).or_default() += 1;
+            }
+
+            let row = tally
+                .into_iter()
+                .map(|t| {
+                    t.into_iter()
+                        .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)))
+                        .map(|(c, _)| c)
+                })
+                .collect();
+            out.push((start, row));
+        }
+        Ok(out)
+    }
+}
