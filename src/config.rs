@@ -73,6 +73,20 @@ pub struct ServerConfig {
     #[serde(default = "default_idle_distance")]
     pub idle_distance: u32,
 
+    /// Minutes labelled per model call. One call per minute per device does not
+    /// fit a weekly allowance that is shared with real work, and a run of
+    /// minutes is also a better prompt than an isolated screenshot: the model
+    /// can see that a build started four minutes ago and is still running.
+    #[serde(default = "default_batch_minutes")]
+    pub batch_minutes: usize,
+
+    /// How long the first minute of a batch waits for company before the call
+    /// goes out anyway. Devices report one minute at a time, so this is the
+    /// knob that decides whether a batch ever forms -- at the cost of labels
+    /// lagging the minute they describe by up to this long.
+    #[serde(default = "default_batch_wait_secs")]
+    pub batch_wait_secs: u64,
+
     /// Directories searched for git repositories. The search stops at the first
     /// `.git` on a path, so listing a parent of everything is the intent.
     #[serde(default = "default_code_roots")]
@@ -104,6 +118,12 @@ pub struct ServerConfig {
     /// How far back an agent run looks. Separate from `code_days` because the
     /// windows cost very different amounts: a month of git log is a few seconds,
     /// a month of transcripts is well over a gigabyte of JSONL.
+    /// Package substring to category, as "substring=category". A phone
+    /// minute matching one is labelled without a model call: the app name
+    /// is the whole signal there, and paying to have it restated is waste.
+    #[serde(default = "default_phone_categories")]
+    pub phone_categories: Vec<String>,
+
     #[serde(default = "default_agent_days")]
     pub agent_days: i64,
 }
@@ -136,12 +156,15 @@ impl Default for ServerConfig {
             port: default_port(),
             idle_after_secs: default_idle_after_secs(),
             idle_distance: default_idle_distance(),
+            batch_minutes: default_batch_minutes(),
+            batch_wait_secs: default_batch_wait_secs(),
             code_roots: default_code_roots(),
             code_authors: Vec::new(),
             github_user: None,
             code_days: default_code_days(),
             agent_tools: default_agent_tools(),
             agent_days: default_agent_days(),
+            phone_categories: default_phone_categories(),
         }
     }
 }
@@ -159,6 +182,28 @@ fn default_agent_tools() -> Vec<String> {
         crate::agents::TOOL_CLAUDE,
         crate::agents::TOOL_OPENCODE,
         crate::agents::TOOL_CODEX,
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+fn default_phone_categories() -> Vec<String> {
+    [
+        "com.google.android.youtube=youtube",
+        "com.twitter=twitter",
+        "com.x.=twitter",
+        "com.instagram=twitter",
+        "com.reddit=twitter",
+        "com.slack=comms",
+        "com.discord=comms",
+        "org.thoughtcrime.securesms=comms",
+        "com.whatsapp=comms",
+        "com.google.android.gm=comms",
+        "com.android.chrome=browsing",
+        "org.mozilla=browsing",
+        "com.spotify=other",
+        "com.netflix=netflix",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -244,6 +289,17 @@ fn default_idle_distance() -> u32 {
     3
 }
 
+fn default_batch_minutes() -> usize {
+    20
+}
+
+/// Ten minutes. Long enough that a live desktop accumulates a real run, short
+/// enough that today's chart is never badly out of date -- and irrelevant to a
+/// phone catching up on a week, which fills a batch instantly.
+fn default_batch_wait_secs() -> u64 {
+    600
+}
+
 pub const DEFAULT_CONFIG: &str = r#"# The agent runs on each machine you use. It screenshots, and posts. That's all
 # it does -- no API key, no database, no model calls.
 [agent]
@@ -309,6 +365,14 @@ idle_distance = 3
 # Seconds without human input after which an unchanged screen is called idle
 # outright rather than inheriting the previous label.
 idle_after_secs = 300
+
+# Minutes per model call, and how long the first minute of a batch waits for
+# the next one. Together these are what a day of tracking costs: 20 minutes in
+# one call sends the system prompt once instead of twenty times, and the model
+# sees the run rather than twenty unrelated screenshots. Labels lag by up to
+# batch_wait_secs; the row is written immediately either way.
+batch_minutes = 20
+batch_wait_secs = 600
 
 # `time collect` reads how much you actually produced -- commits, diffs, pull
 # requests -- and joins it to the timeline. Run it nightly; commit timestamps

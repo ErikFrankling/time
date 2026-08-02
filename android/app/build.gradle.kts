@@ -81,4 +81,8 @@ dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")
+    // android.jar's org.json is a stub that throws on every call, so the spool
+    // -- which is nothing but JSON -- is untestable on the JVM without a real
+    // implementation ahead of it on the classpath.
+    testImplementation("org.json:json:20240303")
 }

@@ -98,6 +98,24 @@ Fine, but it's real money against the coding allowance, which is why the idle
 skip is in V1 and not parked. If it turns out worse than this, the next lever is
 batching 5 minutes per call — 5× cheaper — at the cost of some complexity.
 
+**Update: it did turn out worse, and batching shipped** — 20 minutes per call,
+not 5. The weekly cap was hit outright, which stopped the user's own coding, so
+this stopped being a cost question and became an availability one.
+
+Two things the estimate above got wrong. There is **no Batch API** on the Go
+plan — `/v1/batches` and `/v1/files` 404, only `/v1/chat/completions` and
+`/v1/responses` exist — so the obvious 50%-off route is not available. And
+batching is nowhere near "N× cheaper": only the system prompt amortises. The
+screenshot is per-minute and is ~85% of what a batched desktop minute costs, so
+20 per call is ~43% off with a screenshot and ~70% off without. The phone,
+which sends no image at all, was paying ~925 tokens of system prompt to say
+sixty tokens' worth of "Instagram was in the foreground"; that is where the
+saving actually landed.
+
+The unplanned benefit is quality: the model now sees a run rather than twenty
+unrelated frames, which is the context it needed to tell "reading" from "left
+the room" — the distinction §3 says is the whole job.
+
 ---
 
 ## 4. Data

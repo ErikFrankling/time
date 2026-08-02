@@ -5,6 +5,19 @@ use crate::capture;
 use crate::input;
 use crate::config::AgentConfig;
 use crate::proto::{Frame, FrameAck};
+use crate::spool::Spool;
+
+/// Frames per batch when draining a backlog. Well under the server's cap of
+/// 2000, matching what the phone sends, and small enough that a request that
+/// fails costs one round trip rather than the whole backlog.
+const CHUNK: usize = 500;
+
+/// How long one tick may spend on the backlog.
+///
+/// A week-long outage is thousands of minutes and cannot go in one tick without
+/// the loop missing the minute it is standing in. Half the tick goes to the
+/// backlog and the rest stays for the present; the remainder drains next minute.
+const DRAIN_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// How stale a tab report may be before it is discarded. The extension beats
 /// once a minute and on every tab switch, so anything older than a couple of
@@ -55,16 +68,24 @@ pub fn build_frame(cfg: &AgentConfig, input: &input::Monitor, tabs: &browser::Ta
         });
     }
 
-    let img = capture::screenshot(cfg.width)?;
-    let jpeg = capture::to_jpeg(&img)?;
-    drop(img);
+    // A compositor hiccup or a missing `grim` must not cost the whole minute.
+    // The window, the open apps and the input counts are still true, and the
+    // server treats an image-less frame as a first-class case already -- it is
+    // the only kind the phone can send.
+    let image = match capture::screenshot(cfg.width).and_then(|img| capture::to_jpeg(&img)) {
+        Ok(jpeg) => Some(base64_encode(&jpeg)),
+        Err(e) => {
+            eprintln!("screenshot failed, sending metadata only: {e:#}");
+            None
+        }
+    };
 
     Ok(Frame {
         ts,
         device: cfg.device.clone(),
         window: window.describe(),
         domain,
-        image: Some(base64_encode(&jpeg)),
+        image,
         blocked: false,
         idle_secs: snap.idle_secs,
         keys: snap.keys,
@@ -82,6 +103,18 @@ fn base64_encode(bytes: &[u8]) -> String {
 
 pub fn post(cfg: &AgentConfig, frame: &Frame) -> Result<FrameAck> {
     let url = format!("{}/v1/frame", cfg.server.trim_end_matches('/'));
+    let body = send(&url, frame)?;
+    Ok(serde_json::from_str(&body).with_context(|| format!("parsing ack: {body}"))?)
+}
+
+/// Post a backlog to the batch endpoint. One request, one reply per frame.
+fn post_batch(cfg: &AgentConfig, frames: &[serde_json::Value]) -> Result<Vec<FrameAck>> {
+    let url = format!("{}/v1/frames", cfg.server.trim_end_matches('/'));
+    let body = send(&url, frames)?;
+    Ok(serde_json::from_str(&body).with_context(|| format!("parsing acks: {body}"))?)
+}
+
+fn send(url: &str, body: &(impl serde::Serialize + ?Sized)) -> Result<String> {
     let client = reqwest::blocking::Client::builder()
         // Ingest no longer waits on the model, so anything past a few seconds
         // of upload is a real fault. Waiting five and a half minutes for it
@@ -89,17 +122,84 @@ pub fn post(cfg: &AgentConfig, frame: &Frame) -> Result<FrameAck> {
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
 
-    let req = client.post(&url).json(frame);
-
-    let resp = req.send().with_context(|| format!("posting to {url}"))?;
+    let resp = client
+        .post(url)
+        .json(body)
+        .send()
+        .with_context(|| format!("posting to {url}"))?;
     let status = resp.status();
-    let body = resp.text().unwrap_or_default();
+    let text = resp.text().unwrap_or_default();
     anyhow::ensure!(
         status.is_success(),
         "server returned {status}: {}",
-        body.chars().take(300).collect::<String>()
+        text.chars().take(300).collect::<String>()
     );
-    Ok(serde_json::from_str(&body).with_context(|| format!("parsing ack: {body}"))?)
+    Ok(text)
+}
+
+/// How much of the backlog went, and the ack for `want` if it was in it.
+pub struct Drained {
+    pub sent: usize,
+    pub left: usize,
+    pub ack: Option<FrameAck>,
+}
+
+/// Hand the server everything it has not acknowledged, oldest first.
+///
+/// Oldest first because the classifier reads each minute with the previous one
+/// as context; a backlog that arrives shuffled is a backlog that is labelled
+/// wrong. Files are deleted only after the server has answered 2xx for the
+/// batch they were in, so a failure anywhere leaves the rest exactly where they
+/// were and the next tick starts from the same place.
+pub fn drain(cfg: &AgentConfig, spool: &Spool, want: i64) -> Result<Drained> {
+    let start = std::time::Instant::now();
+    let pending = spool.pending()?;
+    let mut out = Drained {
+        sent: 0,
+        left: pending.len(),
+        ack: None,
+    };
+
+    for chunk in pending.chunks(CHUNK) {
+        if out.sent > 0 && start.elapsed() >= DRAIN_BUDGET {
+            break;
+        }
+
+        let mut body = Vec::with_capacity(chunk.len());
+        let mut queued = Vec::with_capacity(chunk.len());
+        for e in chunk {
+            match std::fs::read(&e.path)
+                .ok()
+                .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            {
+                Some(v) => {
+                    body.push(v);
+                    queued.push(e);
+                }
+                // It will not parse next minute either, and leaving it in place
+                // would wedge every later minute behind it forever.
+                None => {
+                    eprintln!("spool: discarding unreadable {}", e.path.display());
+                    spool.remove(e);
+                    out.left -= 1;
+                }
+            }
+        }
+        if body.is_empty() {
+            continue;
+        }
+
+        let acks = post_batch(cfg, &body)?;
+        for e in queued {
+            spool.remove(e);
+        }
+        out.sent += body.len();
+        out.left -= body.len();
+        if out.ack.is_none() {
+            out.ack = acks.into_iter().find(|a| a.ts == want);
+        }
+    }
+    Ok(out)
 }
 
 /// What became of the minute, in the two characters a log line can spare.
@@ -115,22 +215,90 @@ pub fn status(ack: &FrameAck) -> &'static str {
     }
 }
 
+/// One minute: capture it, make it durable, then get it and anything owed
+/// before it to the server.
+///
+/// The write to disk comes before the wire deliberately. A frame that exists
+/// only in memory is lost to a kill, a panic, or a lid closing during the
+/// request -- and unlike the phone, this client has no system log to rebuild
+/// the minute from afterwards.
+fn tick(cfg: &AgentConfig, spool: &Spool, frame: &Frame) -> Result<Option<FrameAck>> {
+    let entry = spool.push(frame)?;
+    let pending = spool.pending()?;
+
+    // Nothing older is waiting, so this minute can go on its own -- and this is
+    // the only path that still holds the screenshot, since the spooled copy
+    // deliberately does not.
+    if pending.len() == 1 && pending[0].ts == entry.ts {
+        let ack = post(cfg, frame)?;
+        spool.remove(&entry);
+        return Ok(Some(ack));
+    }
+
+    let d = drain(cfg, spool, frame.ts)?;
+    if d.left > 0 {
+        println!(
+            "{} sent {} of {} spooled minute(s), {} still waiting",
+            chrono::Local::now().format("%H:%M"),
+            d.sent,
+            d.sent + d.left,
+            d.left
+        );
+    } else {
+        println!(
+            "{} sent {} spooled minute(s), spool empty",
+            chrono::Local::now().format("%H:%M"),
+            d.sent
+        );
+    }
+    Ok(d.ack)
+}
+
 pub fn run(cfg: &AgentConfig) -> Result<()> {
     let input = input::Monitor::start();
     let tabs = browser::Tabs::start(&cfg.device);
-    println!("agent {} -> {}", cfg.device, cfg.server);
+    let spool = Spool::open()?;
+    println!(
+        "agent {} -> {} (spool {})",
+        cfg.device,
+        cfg.server,
+        spool.dir().display()
+    );
+    // Whatever the last run could not deliver is still owed, and is now older
+    // than anything this run will capture.
+    if let Ok(n) = spool.pending().map(|p| p.len()) {
+        if n > 0 {
+            println!("{n} minute(s) carried over from the last run");
+        }
+    }
+
     loop {
-        match build_frame(cfg, &input, &tabs).and_then(|f| post(cfg, &f)) {
-            Ok(ack) => println!(
+        let now = chrono::Local::now();
+        // Before capture, not after: a spool already over budget must not be
+        // allowed to grow by another minute first.
+        if let Err(e) = spool.evict(now.timestamp()) {
+            eprintln!("{} spool evict: {e:#}", now.format("%H:%M"));
+        }
+
+        match build_frame(cfg, &input, &tabs).and_then(|f| tick(cfg, &spool, &f)) {
+            Ok(Some(ack)) => println!(
                 "{} [{}]{} {}",
-                chrono::Local::now().format("%H:%M"),
+                now.format("%H:%M"),
                 ack.category,
                 status(&ack),
                 ack.detail.as_deref().unwrap_or("")
             ),
+            // Delivered in a batch whose reply did not cover this minute. It is
+            // on the server; there is simply nothing more to say about it.
+            Ok(None) => {}
             // A daemon meant to run for months must survive a server restart, a
-            // dropped VPN, or a compositor hiccup.
-            Err(e) => eprintln!("{} error: {e:#}", chrono::Local::now().format("%H:%M")),
+            // dropped VPN, or a compositor hiccup. Nothing is lost by any of
+            // them any more -- the frame is on disk until the server takes it.
+            Err(e) => eprintln!(
+                "{} error: {e:#} ({} minute(s) spooled)",
+                now.format("%H:%M"),
+                spool.pending().map(|p| p.len()).unwrap_or(0)
+            ),
         }
         sleep_to_next_minute();
     }

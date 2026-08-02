@@ -14,6 +14,7 @@ import androidx.work.WorkerParameters
 import androidx.work.WorkManager
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.TimeUnit
@@ -30,7 +31,11 @@ object Prefs {
         get() = get(this).getString("device", "phone")!!
         set(v) = get(this).edit().putString("device", v).apply()
 
-    /** Only advanced on a 2xx, so a failed upload replays next run. */
+    /**
+     * How far the system event log has been read. Advanced once the minutes
+     * are in the spool, not once they are uploaded -- the spool is what an
+     * unsent minute now depends on, and it outlives the event log.
+     */
     var Context.watermark: Long
         get() = get(this).getLong("watermark", 0)
         set(v) = get(this).edit().putLong("watermark", v).apply()
@@ -146,8 +151,19 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             val from = maxOf(ctx.watermark - 120_000L, floor)
 
             val events = Usage.query(ctx, from, now) ?: return Result.retry()
-            val frames = Usage.frames(ctx, Usage.sessions(Usage.drain(events)))
-            if (frames.isEmpty()) {
+            val fresh = Usage.frames(ctx, Usage.sessions(Usage.drain(events))).map { frame(ctx, it) }
+
+            // Derived minutes go to disk before anything is attempted over the
+            // network, and the watermark follows the disk rather than the
+            // upload. The system event log is only a write-ahead log for as
+            // long as it retains the events; past that it forgets them without
+            // saying so, which is a week of silence away from being a week of
+            // missing chart.
+            val spool = Spool(File(ctx.filesDir, "spool.json"))
+            val pending = spool.merge(fresh, now / 1000)
+            ctx.watermark = now
+
+            if (pending.isEmpty()) {
                 ctx.lastSync = now
                 ctx.lastError = ""
                 ctx.lastErrorDetail = ""
@@ -155,10 +171,7 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             }
 
             return try {
-                post(ctx, frames)
-                // Advance only on success. The system event log is the
-                // write-ahead log, so there is no local buffer to lose.
-                ctx.watermark = now
+                post(ctx, spool, pending)
                 ctx.lastSync = now
                 ctx.lastError = ""
                 ctx.lastErrorDetail = ""
@@ -175,8 +188,8 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
                 // the 30-minute period and saturates at five hours after about
                 // six consecutive misses -- so a day out of the house would
                 // leave the next attempt hours past the point it would have
-                // worked. Nothing is lost by waiting: the watermark has not
-                // moved and the system still holds the events.
+                // worked. Nothing is lost by waiting: whatever was not accepted
+                // is still in the spool.
                 if (isUnreachable(e)) Result.success() else Result.retry()
             }
         }
@@ -192,42 +205,42 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
      * takes the lot as an array. `/v1/frame` stays for the desktop agent,
      * which really does have exactly one minute to send.
      */
-    private fun post(ctx: Context, frames: List<MinuteFrame>) {
-        // Chunked because the server caps a batch, and a first sync after a
-        // fresh install can hold days of minutes. Sent whole it is rejected,
-        // the watermark never advances, and the next run rebuilds the same
-        // oversized batch -- a deadlock that never resolves itself.
-        //
-        // The watermark moves after each accepted chunk, so an interrupted run
-        // resumes rather than starting the whole backlog again.
-        for (chunk in frames.chunked(CHUNK)) {
-            postChunk(ctx, chunk)
-            with(Prefs) { ctx.watermark = chunk.last().ts * 1000 }
+    /** One minute in the shape the server's `Frame` expects. */
+    private fun frame(ctx: Context, f: MinuteFrame): JSONObject = with(Prefs) {
+        JSONObject().apply {
+            put("ts", f.ts)
+            put("device", ctx.device)
+            put("window", f.window)
+            put("blocked", false)
+            put("keys", 0)
+            put("mouse", 0)
+            put("workspaces", 0)
+            put("apps", JSONArray(f.apps))
+            // Omitted rather than zeroed: the field is optional on the server
+            // and absence reads as "unknown", which is what a phone knows.
+            f.idleSecs?.let { put("idle_secs", it) }
+            f.note?.let { put("note", it) }
         }
     }
 
-    private fun postChunk(ctx: Context, frames: List<MinuteFrame>) {
+    private fun post(ctx: Context, spool: Spool, frames: List<JSONObject>) {
+        // Chunked because the server caps a batch, and a first sync after a
+        // fresh install can hold days of minutes. Sent whole it is rejected,
+        // nothing ever drains, and the next run rebuilds the same oversized
+        // batch -- a deadlock that never resolves itself.
+        //
+        // Each chunk leaves the spool as soon as the server has taken it, so an
+        // interrupted run resumes rather than replaying the whole backlog.
+        for (chunk in frames.chunked(CHUNK)) {
+            postChunk(ctx, chunk)
+            spool.ack(chunk.map { it.optLong("ts") })
+        }
+    }
+
+    private fun postChunk(ctx: Context, frames: List<JSONObject>) {
         with(Prefs) {
             val base = ctx.server.trimEnd('/')
-            val body = JSONArray().apply {
-                for (f in frames) {
-                    put(JSONObject().apply {
-                        put("ts", f.ts)
-                        put("device", ctx.device)
-                        put("window", f.window)
-                        put("blocked", false)
-                        put("keys", 0)
-                        put("mouse", 0)
-                        put("workspaces", 0)
-                        put("apps", JSONArray(f.apps))
-                        // Omitted rather than zeroed: the field is optional on
-                        // the server and absence reads as "unknown", which is
-                        // what a phone actually knows.
-                        f.idleSecs?.let { put("idle_secs", it) }
-                        f.note?.let { put("note", it) }
-                    })
-                }
-            }.toString()
+            val body = JSONArray(frames).toString()
 
             val conn = (URL("$base/v1/frames").openConnection() as HttpURLConnection).apply {
                 requestMethod = "POST"
@@ -243,8 +256,8 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             val code = conn.responseCode
             conn.disconnect()
 
-            // Any non-2xx holds the watermark so the same minutes replay
-            // later. 403 in particular is not a rejection but a location:
+            // Any non-2xx leaves the chunk in the spool, to be offered again
+            // next run. 403 in particular is not a rejection but a location:
             // the ingest route is lan-only.
             if (code !in 200..299) throw HttpError(code)
         }
@@ -280,16 +293,19 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
          * 30 minutes with 15 minutes of flex rather than a bare 15, so the
          * system can fold this into a wakeup it was making anyway. Nothing is
          * lost by waiting: queryEvents is retrospective.
+         *
+         * No network constraint any more. The run's first job is to read the
+         * system event log into the spool, and that has to keep happening on a
+         * phone with no signal -- the event log is exactly what a week in
+         * flight mode would otherwise expire. With nothing reachable the
+         * upload half fails on DNS in milliseconds, which `isUnreachable`
+         * already treats as "not home" rather than as a fault worth backing
+         * off from.
          */
         fun schedule(ctx: Context) {
             val work = PeriodicWorkRequestBuilder<SyncWorker>(
                 30, TimeUnit.MINUTES, 15, TimeUnit.MINUTES
             )
-                .setConstraints(
-                    Constraints.Builder()
-                        .setRequiredNetworkType(NetworkType.CONNECTED)
-                        .build()
-                )
                 .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 10, TimeUnit.MINUTES)
                 .build()
 

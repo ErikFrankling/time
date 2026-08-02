@@ -50,6 +50,11 @@ data:
     port = 7373
     idle_distance = 3
     idle_after_secs = 300
+    # One call per minute per device does not fit a weekly allowance shared
+    # with real coding. Twenty minutes share one system prompt, and the label
+    # lands within ten minutes of the minute it describes.
+    batch_minutes = 20
+    batch_wait_secs = 600
 ---
 apiVersion: apps/v1
 kind: Deployment

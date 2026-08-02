@@ -366,6 +366,35 @@ fn ingest(cfg: &ServerConfig, db: &Mutex<Db>, queue: &Queue, frame: Frame) -> Re
     // thirty identical minutes, and paying for thirty judgements of the same
     // fact is how a first sync filled the classifier queue and got its work
     // dropped. Carry the label instead.
+    // A phone minute whose app maps to a category needs no model at all.
+    if jpeg.is_none() && !frame.blocked {
+        if let Some(cat) = crate::classify::from_package(cfg, &frame.window) {
+            let m = Minute {
+                ts: frame.ts,
+                device: frame.device,
+                category: cat.clone(),
+                project: None,
+                detail: Some(format!("{} (by app)", frame.window)),
+                window: Some(frame.window),
+                domain: None,
+                phash: 0,
+                keys: frame.keys,
+                mouse: frame.mouse,
+                idle_secs: frame.idle_secs,
+                apps: frame.apps,
+                workspaces: frame.workspaces,
+                classified: true,
+                pending: false,
+                model: Some("package-map".into()),
+                tags: vec![cat],
+            };
+            db.lock()
+                .map_err(|e| anyhow::anyhow!("db lock: {e}"))?
+                .insert(&m)?;
+            return Ok(ack(&m));
+        }
+    }
+
     if jpeg.is_none() && !frame.blocked {
         if let Some(prev) = &last {
             if prev.ts + 60 == frame.ts

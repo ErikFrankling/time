@@ -12,6 +12,7 @@ mod db;
 mod proto;
 mod report;
 mod server;
+mod spool;
 mod web;
 
 use anyhow::Result;

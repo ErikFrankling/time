@@ -31,12 +31,28 @@ the ones the health probe needed, which took the pod out of the load balancer
 and returned 503 to everybody. The row is written before the job is queued, so
 the queue is disposable: a restart re-reads anything still unlabelled.
 
-The phone posts its whole backlog to `/v1/frames` as one array; `/v1/frame`
-takes a single minute, which is all the desktop agent ever has.
+Both clients post a backlog to `/v1/frames` as one array; `/v1/frame` takes a
+single minute, which is what the desktop agent sends whenever it is caught up.
 
 The agent is deliberately dumb. It holds no secret and makes no billable calls,
 so a laptop is never more than a capture device. Every decision that costs money
 happens server-side, in one place, with one config.
+
+### Offline
+
+Every frame is written to `~/.local/share/time/spool/` before it is sent, and
+deleted only once the server has answered 2xx. A server restart, a dropped VPN
+or a closed laptop costs nothing: the next tick posts the backlog to
+`/v1/frames`, oldest first, and only then the current minute. The spool is
+capped at 7 days and 32 MiB, evicts oldest first, and says on stderr exactly
+what it dropped.
+
+A spooled frame carries no screenshot. Pixels still never touch the disk — the
+promise that makes the blocklist worth having — and metadata is small enough
+(a few hundred bytes a minute) that a week-long outage never reaches the cap.
+A stranded minute is classified from its window, apps and domain instead, which
+is how every minute the phone sends is classified anyway. Minutes that go out
+while the server is up still carry their screenshot.
 
 ## Why a model instead of rules
 
@@ -251,6 +267,10 @@ side reads only its own, so the same file works everywhere.
   `other` rather than inventing a slice.
 - **`server.idle_distance`** — how similar two consecutive screens must be to
   count as unchanged.
+- **`server.batch_minutes`** / **`server.batch_wait_secs`** — how many minutes
+  share one model call, and how long the first of them waits for the rest.
+  Together they are what a day costs. A label appears up to `batch_wait_secs`
+  after the minute it describes; the row itself is written immediately.
 
 Secrets come from the environment only, never the config file: `TIME_API_KEY`
 (server) and `TIME_INGEST_TOKEN` (both).
@@ -326,11 +346,41 @@ adding them up produces days longer than a day.
 
 ## Cost
 
-`qwen3.6-plus` on the OpenCode Go plan ($0.50/$3.00 per M), roughly 1400 tokens
-in / 100 out per call, so about $0.001 a call. That lands around
-**$9–18/month** depending on how much the idle skip catches — a
-minute whose screen is unchanged from the last one is recorded without an API
-call at all, which on a normal day is a large fraction of them.
+`qwen3.6-plus` on the OpenCode Go plan ($0.50/$3.00 per M). The plan has **no
+Batch API** — `/v1/batches` and `/v1/files` are 404 on that endpoint, so the
+half-price 24-hour turnaround that OpenAI sells does not exist here. Batching
+had to be done in the prompt instead.
+
+Minutes go out in runs of `batch_minutes` rather than one at a time, which
+matters because the system prompt is ~3.4k characters and was previously
+re-sent with every single minute:
+
+| per minute | one call each | 20 per call |
+| --- | --- | --- |
+| system prompt | ~925 tok | ~60 tok |
+| the minute itself | ~60 tok | ~60 tok |
+| 1024px screenshot | ~780 tok | ~780 tok |
+| **input** | **~1765 tok** | **~900 tok** |
+
+So roughly **43% off a minute with a screenshot** and **~70% off one without**
+— a phone minute is nothing but the system prompt, which is why the phone was
+the expensive device. Output is unchanged either way: the same fields have to
+come back per minute.
+
+Every call logs what it actually cost (`N minute(s), X in / Y out`), so the
+real numbers are in `kubectl logs`, not in this table.
+
+The remaining levers, in order of size:
+
+- **`agent.width`.** The screenshot is ~85% of a batched minute's input.
+  768px instead of 1024px is ~45% fewer image tokens. Not changed by default,
+  because nobody has checked yet what it does to label quality.
+- **The model.** `minimax-m3` is the other vision model on the plan at
+  $0.30/$1.20, so ~63% cheaper than `qwen3.6-plus` on the same tokens. It emits
+  `<think>` blocks; the parser now strips those, so it is a one-line config
+  change — but again, unverified on real screens.
+- **The idle skip**, which is free and already there: a minute whose screen is
+  unchanged from the last one is recorded without an API call at all.
 
 ## Data
 
