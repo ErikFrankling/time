@@ -17,11 +17,34 @@ pub fn run(cfg: Arc<ServerConfig>) -> Result<()> {
     println!("db: {}", config::db_path()?.display());
 
     let addr = format!("0.0.0.0:{}", cfg.port);
-    let server =
-        tiny_http::Server::http(&addr).map_err(|e| anyhow::anyhow!("binding {addr}: {e}"))?;
+    let server = Arc::new(
+        tiny_http::Server::http(&addr).map_err(|e| anyhow::anyhow!("binding {addr}: {e}"))?,
+    );
     println!("listening on {addr}");
 
-    for mut req in server.incoming_requests() {
+    // A pool, not a loop. Classifying a frame blocks on the model for tens of
+    // seconds, and a single-threaded accept loop serves nothing else meanwhile
+    // -- health probes included, which is enough to get the pod restarted and
+    // the route pulled out from under it. Workers are cheap; being unreachable
+    // for the length of every model call is not.
+    let workers = 4;
+    let mut handles = Vec::with_capacity(workers);
+    for _ in 0..workers {
+        let (server, cfg, db, key) = (server.clone(), cfg.clone(), db.clone(), key.clone());
+        handles.push(std::thread::spawn(move || {
+            while let Ok(req) = server.recv() {
+                handle(&cfg, &db, &key, req);
+            }
+        }));
+    }
+    for h in handles {
+        let _ = h.join();
+    }
+    Ok(())
+}
+
+fn handle(cfg: &ServerConfig, db: &Mutex<Db>, key: &str, mut req: tiny_http::Request) {
+    {
         let is_ingest = req.url().starts_with("/v1/frame");
 
         if is_ingest {
@@ -29,7 +52,7 @@ pub fn run(cfg: Arc<ServerConfig>) -> Result<()> {
             let mut body = String::new();
             if req.as_reader().read_to_string(&mut body).is_err() {
                 let _ = req.respond(tiny_http::Response::from_string("bad body").with_status_code(400));
-                continue;
+                return;
             }
 
             let result = serde_json::from_str::<Frame>(&body)
@@ -37,7 +60,9 @@ pub fn run(cfg: Arc<ServerConfig>) -> Result<()> {
                 .and_then(|f| ingest(&cfg, &db, &key, f));
 
             let resp = match result {
-                Ok(ack) => tiny_http::Response::from_string(serde_json::to_string(&ack)?)
+                Ok(ack) => tiny_http::Response::from_string(
+                    serde_json::to_string(&ack).unwrap_or_else(|_| "{}".into()),
+                )
                     .with_header::<tiny_http::Header>(
                         "Content-Type: application/json".parse().unwrap(),
                     ),
@@ -78,7 +103,6 @@ pub fn run(cfg: Arc<ServerConfig>) -> Result<()> {
             );
         }
     }
-    Ok(())
 }
 
 /// Decide what a frame means and record it. Everything expensive happens here:
