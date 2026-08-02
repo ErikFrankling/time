@@ -247,14 +247,6 @@ pub fn api_key() -> Result<String> {
     Ok(k)
 }
 
-/// Shared token agents present when posting frames. Both sides read it from the
-/// environment; on the agent it can come from a systemd credential.
-pub fn ingest_token() -> Option<String> {
-    std::env::var("TIME_INGEST_TOKEN")
-        .ok()
-        .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty())
-}
 
 fn base_dir(kind: &str) -> Result<PathBuf> {
     let home = std::env::var("HOME").context("HOME not set")?;

@@ -11,10 +11,6 @@ use crate::web;
 pub fn run(cfg: Arc<ServerConfig>) -> Result<()> {
     // Fail at startup rather than an hour in, when the first frame arrives.
     let key = config::api_key()?;
-    let token = config::ingest_token();
-    if token.is_none() {
-        eprintln!("warning: TIME_INGEST_TOKEN unset — ingest is unauthenticated");
-    }
 
     // SQLite allows one writer; a mutex keeps concurrent agents from colliding.
     let db = Arc::new(Mutex::new(Db::open()?));
@@ -29,20 +25,6 @@ pub fn run(cfg: Arc<ServerConfig>) -> Result<()> {
         let is_ingest = req.url().starts_with("/v1/frame");
 
         if is_ingest {
-            let authed = match &token {
-                None => true,
-                Some(t) => req
-                    .headers()
-                    .iter()
-                    .any(|h| {
-                        h.field.equiv("Authorization")
-                            && h.value.as_str().trim_start_matches("Bearer ").trim() == t
-                    }),
-            };
-            if !authed {
-                let _ = req.respond(tiny_http::Response::from_string("unauthorized").with_status_code(401));
-                continue;
-            }
 
             let mut body = String::new();
             if req.as_reader().read_to_string(&mut body).is_err() {

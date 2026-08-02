@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 
 use crate::capture;
 use crate::input;
-use crate::config::{self, AgentConfig};
+use crate::config::AgentConfig;
 use crate::proto::{Frame, FrameAck};
 
 /// Build this minute's frame. The only decision the agent makes on its own is
@@ -59,10 +59,7 @@ pub fn post(cfg: &AgentConfig, frame: &Frame) -> Result<FrameAck> {
         .timeout(std::time::Duration::from_secs(90))
         .build()?;
 
-    let mut req = client.post(&url).json(frame);
-    if let Some(token) = config::ingest_token() {
-        req = req.bearer_auth(token);
-    }
+    let req = client.post(&url).json(frame);
 
     let resp = req.send().with_context(|| format!("posting to {url}"))?;
     let status = resp.status();

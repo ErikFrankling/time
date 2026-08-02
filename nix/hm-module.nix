@@ -28,19 +28,6 @@ let
     ]
   '';
 
-  # The token is a secret, so it can't be baked into the unit or the config
-  # file. Read it at start time from a file only this user can read.
-  start = pkgs.writeShellScript "time-agent-start" ''
-    ${lib.optionalString (cfg.tokenFile != null) ''
-      if [ ! -r ${cfg.tokenFile} ]; then
-        echo "time-agent: cannot read token file ${cfg.tokenFile}" >&2
-        exit 1
-      fi
-      TIME_INGEST_TOKEN=$(cat ${cfg.tokenFile})
-      export TIME_INGEST_TOKEN
-    ''}
-    exec ${cfg.package}/bin/time agent
-  '';
 in
 {
   options.services.time-agent = {
@@ -102,16 +89,6 @@ in
       '';
     };
 
-    tokenFile = lib.mkOption {
-      type = lib.types.nullOr lib.types.path;
-      default = null;
-      example = "/run/secrets/time-ingest-token";
-      description = ''
-        File containing the ingest token, read at service start. Point this at
-        a sops-nix secret owned by this user; never put the token in the Nix
-        store, which is world-readable.
-      '';
-    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -136,7 +113,9 @@ in
       };
 
       Service = {
-        ExecStart = "${start}";
+        # No credentials to load: the server is reachable only on the LAN and
+        # over the VPN, which is the whole access control.
+        ExecStart = "${cfg.package}/bin/time agent";
         # The server being down, the VPN dropping, or a compositor restart are
         # all expected over months of running. Always come back.
         Restart = "always";

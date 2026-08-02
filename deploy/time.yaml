@@ -81,11 +81,6 @@ spec:
                 secretKeyRef:
                   name: time-secrets
                   key: api-key
-            - name: TIME_INGEST_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: time-secrets
-                  key: ingest-token
             - name: TZ
               value: Europe/Stockholm
           ports:
