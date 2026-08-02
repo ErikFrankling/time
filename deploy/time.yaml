@@ -81,6 +81,9 @@ spec:
                 secretKeyRef:
                   name: time-secrets
                   key: api-key
+            # Typst writes a font/package cache; without this it tries $HOME.
+            - name: XDG_CACHE_HOME
+              value: /tmp/cache
             - name: TZ
               value: Europe/Stockholm
           ports:
@@ -120,6 +123,12 @@ spec:
             - mountPath: /config
               name: config
               readOnly: true
+            # The root filesystem is read-only, but rendering a PDF means
+            # writing a Typst source file and its SVGs somewhere first. A
+            # tmpfs keeps that posture rather than trading it away, and the
+            # scratch files are meant to be transient anyway.
+            - mountPath: /tmp
+              name: tmp
       volumes:
         - name: data
           persistentVolumeClaim:
@@ -127,6 +136,10 @@ spec:
         - name: config
           configMap:
             name: time-config
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 128Mi
 ---
 apiVersion: v1
 kind: Service
