@@ -92,12 +92,38 @@ pub fn workspace_count() -> u16 {
 
 /// Name of the monitor that currently has focus, so multi-monitor setups
 /// capture the screen actually being looked at rather than all of them.
+/// Outputs that exist for software rather than for a person to look at.
+///
+/// A computer-use setup adds a headless output and, on a machine with no
+/// physical display attached, it is the only one Hyprland reports -- and it is
+/// blank. Capturing it produced hours of uniform frames that hashed identically,
+/// so the unchanged-screen skip fired every minute and the day filled with
+/// confident `idle`. A blank screenshot is worse than none: it looks like an
+/// answer.
+const VIRTUAL_OUTPUTS: [&str; 4] = ["computer-use", "headless", "virtual", "dummy"];
+
+fn is_virtual_output(name: &str) -> bool {
+    let n = name.to_lowercase();
+    VIRTUAL_OUTPUTS.iter().any(|m| n.contains(m))
+}
+
+/// The monitor a person is actually looking at, if there is one.
+///
+/// None means every output is synthetic, and the caller sends the minute
+/// without an image rather than with a picture of nothing.
 pub fn focused_monitor() -> Option<String> {
     let v = hyprctl(&["monitors"]).ok()?;
     let arr = v.as_array()?;
-    arr.iter()
+    let real = || {
+        arr.iter().filter(|m| {
+            !m["name"]
+                .as_str()
+                .is_some_and(is_virtual_output)
+        })
+    };
+    real()
         .find(|m| m["focused"].as_bool().unwrap_or(false))
-        .or_else(|| arr.first())
+        .or_else(|| real().next())
         .and_then(|m| m["name"].as_str())
         .map(|s| s.to_string())
 }
@@ -105,10 +131,14 @@ pub fn focused_monitor() -> Option<String> {
 /// Screenshot the focused monitor and downscale it. The PNG from grim is piped
 /// through stdout and decoded in-memory -- nothing is ever written to disk.
 pub fn screenshot(width: u32) -> Result<DynamicImage> {
+    // Without -o, grim captures every output stitched together -- including the
+    // synthetic one this just declined to name. Bailing sends the minute with
+    // its window and input counts and no picture, which is honest, rather than
+    // a blank frame the classifier would read as an empty desk.
+    let mon = focused_monitor()
+        .context("no physical monitor to capture (every output looks synthetic)")?;
     let mut cmd = Command::new("grim");
-    if let Some(mon) = focused_monitor() {
-        cmd.arg("-o").arg(mon);
-    }
+    cmd.arg("-o").arg(mon);
     // "-" means stdout.
     let out = cmd.arg("-").output().context("running grim")?;
     if !out.status.success() {

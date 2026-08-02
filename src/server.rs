@@ -432,6 +432,13 @@ fn ingest(cfg: &ServerConfig, db: &Mutex<Db>, queue: &Queue, frame: Frame) -> Re
         if prev.ts + 60 == frame.ts
             && no_input
             && jpeg.is_some()
+            // A uniform image hashes to zero, so two blank captures "match" and
+            // the skip carries idle forward indefinitely. That is how a headless
+            // output filled a day with confident idle: one bad frame is a gap,
+            // an unbroken run of them is a fabricated day. Zero means no usable
+            // picture, not a picture that happens to be unchanged.
+            && phash != 0
+            && prev.phash != 0
             && capture::hamming(phash, prev.phash as u64) <= cfg.idle_distance
         {
             // A still screen with nobody touching it for minutes is idle, and

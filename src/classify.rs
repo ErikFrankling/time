@@ -240,7 +240,7 @@ fn item_context(item: &Item<'_>, n: usize, total: usize, prev: Option<&Previous<
     context
 }
 
-/// Label a run of consecutive minutes from one device in a single call.
+/// Label a run of minutes from one device, in time order, in a single call.
 ///
 /// One call for twenty minutes instead of twenty calls is not only twenty
 /// times fewer requests against a weekly allowance -- the long system prompt
