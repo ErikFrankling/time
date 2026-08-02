@@ -195,42 +195,64 @@ impl Db {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    /// Minutes per category. Counted over distinct timestamps so two machines
-    /// reporting the same minute cannot push a day past 24 hours.
+    /// One row per minute, choosing between machines that disagree.
+    ///
+    /// You are one person with several computers. If the laptop says browsing
+    /// while the desktop sits idle, you were browsing -- the idle machine is
+    /// not a second thing you were doing, it is the absence of you. Counting
+    /// both inflates the day past wall-clock and buries real activity under
+    /// idle time from whatever you happened to leave switched on.
+    ///
+    /// Precedence: real human input wins, because that is where you physically
+    /// were. Failing that, any activity beats idle. Ties break on device name
+    /// so the same minute always resolves the same way.
+    pub fn resolved(&self, from: i64, to: i64, f: &Filter) -> Result<Vec<Minute>> {
+        let rows = self.range(from, to, f)?;
+        let mut by_ts: std::collections::BTreeMap<i64, Minute> = Default::default();
+        for m in rows {
+            match by_ts.get(&m.ts) {
+                None => {
+                    by_ts.insert(m.ts, m);
+                }
+                Some(cur) => {
+                    if beats(&m, cur) {
+                        by_ts.insert(m.ts, m);
+                    }
+                }
+            }
+        }
+        Ok(by_ts.into_values().collect())
+    }
+
+    /// Minutes per category, after resolving machines that disagree.
     pub fn by_category(&self, from: i64, to: i64, f: &Filter) -> Result<Vec<(String, i64)>> {
-        self.group_by("category", from, to, f)
+        let mut counts: std::collections::HashMap<String, i64> = Default::default();
+        for m in self.resolved(from, to, f)? {
+            *counts.entry(m.category).or_default() += 1;
+        }
+        let mut v: Vec<_> = counts.into_iter().collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        Ok(v)
     }
 
+    /// Which machine the person was actually at, minute by minute --
+    /// not how long each box was merely powered on and reporting.
     pub fn by_device(&self, from: i64, to: i64, f: &Filter) -> Result<Vec<(String, i64)>> {
-        self.group_by("device", from, to, f)
+        let mut counts: std::collections::HashMap<String, i64> = Default::default();
+        for m in self.resolved(from, to, f)? {
+            *counts.entry(m.device).or_default() += 1;
+        }
+        let mut v: Vec<_> = counts.into_iter().collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        Ok(v)
     }
 
-    fn group_by(
-        &self,
-        col: &str,
-        from: i64,
-        to: i64,
-        f: &Filter,
-    ) -> Result<Vec<(String, i64)>> {
-        let (tail, args) = f.sql();
-        let sql = format!(
-            "SELECT {col}, COUNT(DISTINCT ts) FROM minute
-             WHERE ts >= ? AND ts < ?{tail}
-             GROUP BY {col} ORDER BY 2 DESC"
-        );
-        let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(
-            params(&[&from as &dyn rusqlite::ToSql, &to], &args).as_slice(),
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
-    }
 
     /// Foreground minutes per application, derived from the active window
     /// class. This is time actually spent in an app, not merely having it open.
     pub fn by_app(&self, from: i64, to: i64, f: &Filter) -> Result<Vec<(String, i64)>> {
         let mut counts: std::collections::HashMap<String, i64> = Default::default();
-        for m in self.range(from, to, f)? {
+        for m in self.resolved(from, to, f)? {
             if let Some(app) = m.app() {
                 *counts.entry(app.to_string()).or_default() += 1;
             }
@@ -244,7 +266,7 @@ impl Db {
     /// was running", which the foreground list cannot.
     pub fn open_apps(&self, from: i64, to: i64, f: &Filter) -> Result<Vec<(String, i64)>> {
         let mut counts: std::collections::HashMap<String, i64> = Default::default();
-        for m in self.range(from, to, f)? {
+        for m in self.resolved(from, to, f)? {
             for app in m.apps {
                 *counts.entry(app).or_default() += 1;
             }
@@ -255,47 +277,35 @@ impl Db {
     }
 
     pub fn by_project(&self, from: i64, to: i64, f: &Filter) -> Result<Vec<(String, i64)>> {
-        let (tail, args) = f.sql();
-        let sql = format!(
-            "SELECT project, COUNT(DISTINCT ts) FROM minute
-             WHERE ts >= ? AND ts < ? AND project IS NOT NULL AND project != ''{tail}
-             GROUP BY project ORDER BY 2 DESC"
-        );
-        let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(
-            params(&[&from as &dyn rusqlite::ToSql, &to], &args).as_slice(),
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        let mut counts: std::collections::HashMap<String, i64> = Default::default();
+        for m in self.resolved(from, to, f)? {
+            if let Some(p) = m.project.filter(|p| !p.trim().is_empty()) {
+                *counts.entry(p).or_default() += 1;
+            }
+        }
+        let mut v: Vec<_> = counts.into_iter().collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        Ok(v)
     }
 
+    /// Day totals over resolved minutes, so several machines cannot
+    /// push a day past wall-clock. Keys and pointer events are summed
+    /// across every device, since those are raw activity counts rather
+    /// than time and do not double-count.
     pub fn stats(&self, from: i64, to: i64, f: &Filter) -> Result<Stats> {
-        let (tail, args) = f.sql();
-        let sql = format!(
-            "SELECT COUNT(DISTINCT ts),
-                    COUNT(DISTINCT CASE WHEN keys > 0 OR mouse > 0 THEN ts END),
-                    COUNT(DISTINCT CASE WHEN category = 'idle' THEN ts END),
-                    COALESCE(SUM(classified), 0),
-                    COALESCE(SUM(keys), 0),
-                    COALESCE(SUM(mouse), 0),
-                    COUNT(DISTINCT device)
-             FROM minute WHERE ts >= ? AND ts < ?{tail}"
-        );
-        let mut stmt = self.conn.prepare(&sql)?;
-        Ok(stmt.query_row(
-            params(&[&from as &dyn rusqlite::ToSql, &to], &args).as_slice(),
-            |r| {
-                Ok(Stats {
-                    tracked: r.get(0)?,
-                    active: r.get(1)?,
-                    idle: r.get(2)?,
-                    classified: r.get(3)?,
-                    keys: r.get(4)?,
-                    mouse: r.get(5)?,
-                    devices: r.get(6)?,
-                })
-            },
-        )?)
+        let resolved = self.resolved(from, to, f)?;
+        let raw = self.range(from, to, f)?;
+        let devices: std::collections::HashSet<&str> =
+            raw.iter().map(|m| m.device.as_str()).collect();
+        Ok(Stats {
+            tracked: resolved.len() as i64,
+            active: resolved.iter().filter(|m| m.keys + m.mouse > 0).count() as i64,
+            idle: resolved.iter().filter(|m| m.category == "idle").count() as i64,
+            classified: raw.iter().filter(|m| m.classified).count() as i64,
+            keys: raw.iter().map(|m| m.keys as i64).sum(),
+            mouse: raw.iter().map(|m| m.mouse as i64).sum(),
+            devices: devices.len() as i64,
+        })
     }
 
     /// Minutes per (hour, category) for the stacked hourly chart, plus input
@@ -308,7 +318,7 @@ impl Db {
     ) -> Result<(Vec<Vec<(String, i64)>>, Vec<(i64, i64)>)> {
         let mut buckets: Vec<Vec<(String, i64)>> = vec![Vec::new(); 24];
         let mut input = vec![(0i64, 0i64); 24];
-        for m in self.range(from, to, f)? {
+        for m in self.resolved(from, to, f)? {
             let h = (((m.ts - from) / 3600).clamp(0, 23)) as usize;
             let slot = &mut buckets[h];
             match slot.iter_mut().find(|(c, _)| *c == m.category) {
@@ -351,4 +361,19 @@ fn row_to_minute(r: &rusqlite::Row) -> rusqlite::Result<Minute> {
         workspaces: r.get(12).unwrap_or(0),
         classified: r.get::<_, i32>(13).unwrap_or(0) != 0,
     })
+}
+
+/// True when `a` better represents what the person was doing than `b`.
+fn beats(a: &Minute, b: &Minute) -> bool {
+    let (ai, bi) = (a.keys + a.mouse, b.keys + b.mouse);
+    // Input is the strongest evidence of where the person physically is.
+    if ai != bi {
+        return ai > bi;
+    }
+    let (aidle, bidle) = (a.category == "idle", b.category == "idle");
+    if aidle != bidle {
+        return bidle;
+    }
+    // Same standing: keep it deterministic so a minute never flickers.
+    a.device < b.device
 }

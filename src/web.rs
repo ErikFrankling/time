@@ -384,6 +384,9 @@ pub fn page(cfg: &ServerConfig, db: &Db, q: &Query) -> Result<String> {
     let apps = db.by_app(from, to, f)?;
     let open = db.open_apps(from, to, f)?;
     let projects = db.by_project(from, to, f)?;
+    // The timeline shows raw per-device rows: when two machines disagree the
+    // summary above resolves it, but the detail below should still say plainly
+    // what each machine reported.
     let minutes = db.range(from, to, f)?;
     let stats = db.stats(from, to, f)?;
     let (buckets, _input) = db.hourly(from, to, f)?;
