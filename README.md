@@ -18,10 +18,21 @@ recorder.
   ─────────────────                  ────────────
   grim → downscale → POST  ───────►  dHash: did the screen change?
                                        no  → carry the label forward, free
-  no API key                           yes → model call → category/project/detail
-  no database                        SQLite on a PVC
-  no model calls                     serves the UI
+  no API key                           yes → store the row, queue it, reply
+  no database                                    ↓
+  no model calls                     classifier pool → model → UPDATE the row
+                                     SQLite on a PVC
+                                     serves the UI
 ```
+
+Ingest answers in milliseconds and never waits on the model. It used to, and a
+slow endpoint meant every request thread sat blocked for minutes — including
+the ones the health probe needed, which took the pod out of the load balancer
+and returned 503 to everybody. The row is written before the job is queued, so
+the queue is disposable: a restart re-reads anything still unlabelled.
+
+The phone posts its whole backlog to `/v1/frames` as one array; `/v1/frame`
+takes a single minute, which is all the desktop agent ever has.
 
 The agent is deliberately dumb. It holds no secret and makes no billable calls,
 so a laptop is never more than a capture device. Every decision that costs money
@@ -155,7 +166,9 @@ The server keeps the APK at `<data dir>/time.apk` with a `.json` sidecar, and
 re-downloads only when the release asset actually changes. If GitHub is
 unreachable it keeps serving what it has and says so on the landing page.
 Setting `TIME_APK_PATH` pins it to a file and turns fetching off entirely,
-which is how a locally-built APK gets served.
+which is how a locally-built APK gets served; `TIME_APK_VERSION`,
+`TIME_APK_VERSION_CODE` and `TIME_APK_SIGNING` describe that file, since
+nothing else can. `TIME_APK_REPO` and `TIME_GITHUB_API` move the source.
 
 ### Signing — do this before installing anything
 
@@ -170,33 +183,29 @@ would be releasing nothing. The debug build works, carries a `.debug`
 application ID, and is a dead end: it can never become the release build. The
 landing page and the release notes both say which key a given APK carries.
 
-Generate the key and hand it to Actions. **You have to run these** — the secrets
-must not pass through anything else. In `bash`, not fish:
+Generate the key and hand it to Actions:
 
 ```bash
-STOREPASS=$(openssl rand -base64 24)
-
-keytool -genkeypair \
-  -keystore ~/time-release.jks -storetype PKCS12 \
-  -storepass "$STOREPASS" -keypass "$STOREPASS" \
-  -alias time -keyalg RSA -keysize 4096 -validity 10000 \
-  -dname "CN=time, O=frankling.se, C=SE"
-
-base64 -w0 ~/time-release.jks | gh secret set KEYSTORE_BASE64 --repo ErikFrankling/time
-gh secret set KEYSTORE_PASSWORD --repo ErikFrankling/time --body "$STOREPASS"
-gh secret set KEY_PASSWORD      --repo ErikFrankling/time --body "$STOREPASS"
-gh secret set KEY_ALIAS         --repo ErikFrankling/time --body time
-
-echo "store this password somewhere durable: $STOREPASS"
+nix develop --command scripts/setup-signing.sh
 ```
 
-Then back up `~/time-release.jks` and that password somewhere that survives the
-laptop. Losing them means every phone reinstalls from scratch. The file is
+That makes a 4096-bit key, pushes all four secrets, verifies they landed, and
+prints the password once. It refuses to overwrite an existing keystore, because
+replacing the key that signed the installed app is how you brick updates for
+everyone running it.
+
+**Back up `~/time-release.jks` and the password** somewhere that survives the
+laptop. Losing either means every phone reinstalls from scratch. The file is
 gitignored (`*.jks`) and must never be committed.
 
-Re-run the workflow afterwards (`gh workflow run android.yml`), uninstall
-whatever debug build is on the phone, and install the release-signed one once.
-Every update after that is a notification and a tap.
+This one step is deliberately not in CI. Everything around a signing key is
+ceremony worth scripting, but a workflow that can *mint* a key is a workflow
+that can silently make every installed copy unupgradeable — so it is made once,
+by a person, who then backs it up.
+
+Afterwards: `gh workflow run android.yml`, uninstall whatever debug build is on
+the phone, and install the release-signed one once. Every update after that is a
+notification and a tap.
 
 ## Time per website
 

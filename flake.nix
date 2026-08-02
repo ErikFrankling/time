@@ -69,6 +69,10 @@
             pkgs.pkg-config
             pkgs.sqlite
             pkgs.jdk17
+            # keytool needs a source of randomness and gh needs to be present
+            # for scripts/setup-signing.sh to run entirely inside the shell.
+            pkgs.openssl
+            pkgs.gh
             pkgs.gradle
             android.androidsdk
           ] ++ runtimeDeps;
