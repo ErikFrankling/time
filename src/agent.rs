@@ -56,7 +56,7 @@ fn base64_encode(bytes: &[u8]) -> String {
 pub fn post(cfg: &AgentConfig, frame: &Frame) -> Result<FrameAck> {
     let url = format!("{}/v1/frame", cfg.server.trim_end_matches('/'));
     let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(90))
+        .timeout(std::time::Duration::from_secs(330))
         .build()?;
 
     let req = client.post(&url).json(frame);

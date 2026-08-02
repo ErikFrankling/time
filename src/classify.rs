@@ -167,29 +167,54 @@ pub fn classify(
     });
 
     let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(45))
+        // A full-screen image on a busy endpoint regularly takes well over a
+        // minute. Timing out does not save anything -- the minute is simply
+        // lost -- so wait rather than give up.
+        .timeout(std::time::Duration::from_secs(150))
         .build()?;
 
-    let resp = client
-        .post(&cfg.endpoint)
-        .bearer_auth(key)
-        .json(&body)
-        .send()
-        .context("calling the model endpoint")?;
+    // One retry, because these failures are transient far more often than not
+    // and a dropped minute leaves a permanent hole in the day.
+    let mut last_err = String::new();
+    for _ in 0..2 {
+        let sent = client
+            .post(&cfg.endpoint)
+            .bearer_auth(key)
+            .json(&body)
+            .send();
 
-    let status = resp.status();
-    let text = resp.text().unwrap_or_default();
-    if !status.is_success() {
-        bail!("model returned {}: {}", status, text.chars().take(400).collect::<String>());
+        let resp = match sent {
+            Ok(r) => r,
+            Err(e) => {
+                last_err = format!("calling the model endpoint: {e}");
+                continue;
+            }
+        };
+
+        let status = resp.status();
+        let text = resp.text().unwrap_or_default();
+        if !status.is_success() {
+            last_err = format!(
+                "model returned {status}: {}",
+                text.chars().take(400).collect::<String>()
+            );
+            // A refusal is deterministic; retrying just spends the allowance
+            // twice for the same answer.
+            if status.as_u16() < 500 && status.as_u16() != 429 {
+                break;
+            }
+            continue;
+        }
+
+        let v: serde_json::Value = serde_json::from_str(&text).with_context(|| {
+            format!("parsing response: {}", text.chars().take(400).collect::<String>())
+        })?;
+        let content = v["choices"][0]["message"]["content"]
+            .as_str()
+            .context("no content in model response")?;
+        return parse_label(content, cfg);
     }
-
-    let v: serde_json::Value = serde_json::from_str(&text)
-        .with_context(|| format!("parsing response: {}", text.chars().take(400).collect::<String>()))?;
-    let content = v["choices"][0]["message"]["content"]
-        .as_str()
-        .context("no content in model response")?;
-
-    parse_label(content, cfg)
+    bail!("{last_err}");
 }
 
 /// Models wrap JSON in prose or fences often enough that trusting the raw body
