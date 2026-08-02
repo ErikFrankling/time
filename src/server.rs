@@ -147,19 +147,34 @@ fn ingest(cfg: &ServerConfig, db: &Mutex<Db>, key: &str, frame: Frame) -> Result
         return Ok(ack(m, false));
     }
 
-    let Some(image_b64) = frame.image.as_deref() else {
-        anyhow::bail!("frame has neither an image nor the blocked flag");
-    };
-    let jpeg = {
-        use base64::Engine;
-        base64::engine::general_purpose::STANDARD
-            .decode(image_b64)
-            .context("decoding frame image")?
+    // A phone cannot screenshot itself, so an image-less frame is normal
+    // rather than broken -- as long as it says what was on screen.
+    if frame.image.is_none() && frame.window.trim().is_empty() {
+        anyhow::bail!("frame has no image, no window and is not marked blocked");
+    }
+
+    let jpeg = match frame.image.as_deref() {
+        Some(b64) => {
+            use base64::Engine;
+            Some(
+                base64::engine::general_purpose::STANDARD
+                    .decode(b64)
+                    .context("decoding frame image")?,
+            )
+        }
+        None => None,
     };
 
-    let img = image::load_from_memory(&jpeg).context("decoding frame JPEG")?;
-    let phash = capture::dhash(&img);
-    drop(img);
+    // No image means no perceptual hash, so the free skip below simply
+    // never fires for those devices -- correct, since there is no screen
+    // to compare.
+    let phash = match &jpeg {
+        Some(j) => {
+            let img = image::load_from_memory(j).context("decoding frame JPEG")?;
+            capture::dhash(&img)
+        }
+        None => 0,
+    };
 
     // Unchanged screen AND no human input means nothing new to classify. Both
     // halves matter: a screen can sit still while someone reads, and it can
@@ -169,6 +184,7 @@ fn ingest(cfg: &ServerConfig, db: &Mutex<Db>, key: &str, frame: Frame) -> Result
     if let Some(prev) = &last {
         if prev.ts + 60 == frame.ts
             && no_input
+            && jpeg.is_some()
             && capture::hamming(phash, prev.phash as u64) <= cfg.idle_distance
         {
             // A still screen with nobody touching it for minutes is idle, and
@@ -229,7 +245,7 @@ fn ingest(cfg: &ServerConfig, db: &Mutex<Db>, key: &str, frame: Frame) -> Result
         mouse: frame.mouse,
         note: frame.note.as_deref(),
     };
-    let label = classify::classify(cfg, key, &jpeg, &frame.window, presence, prev)?;
+    let label = classify::classify(cfg, key, jpeg.as_deref(), &frame.window, presence, prev)?;
 
     let m = Minute {
         ts: frame.ts,

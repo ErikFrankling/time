@@ -111,10 +111,14 @@ Respond with JSON only, no markdown fence:
     )
 }
 
+/// `jpeg` is None for devices that cannot produce a screenshot -- a phone,
+/// where Android forbids silent capture entirely. There the foreground app name
+/// carries most of the signal anyway: "Instagram" says what you were doing in a
+/// way "Firefox" never does on a desktop.
 pub fn classify(
     cfg: &ServerConfig,
     key: &str,
-    jpeg: &[u8],
+    jpeg: Option<&[u8]>,
     window: &str,
     presence: Presence<'_>,
     prev: Option<Previous<'_>>,
@@ -148,10 +152,17 @@ pub fn classify(
     }
     context.push_str("\n\nClassify this minute.");
 
-    let data_url = format!(
-        "data:image/jpeg;base64,{}",
-        base64::engine::general_purpose::STANDARD.encode(jpeg)
-    );
+    // Text-only when there is no screenshot. On a phone the foreground
+    // app name is most of the signal anyway.
+    let content = match jpeg {
+        Some(j) => serde_json::json!([
+            { "type": "text", "text": context },
+            { "type": "image_url", "image_url": { "url": format!(
+                "data:image/jpeg;base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(j)) } }
+        ]),
+        None => serde_json::json!(context),
+    };
 
     let body = serde_json::json!({
         "model": cfg.model,
@@ -159,10 +170,7 @@ pub fn classify(
         "max_tokens": 300,
         "messages": [
             { "role": "system", "content": system_prompt(cfg) },
-            { "role": "user", "content": [
-                { "type": "text", "text": context },
-                { "type": "image_url", "image_url": { "url": data_url } }
-            ]}
+            { "role": "user", "content": content }
         ]
     });
 
