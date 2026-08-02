@@ -21,11 +21,16 @@ impl Window {
 
     /// Case-insensitive substring match against class and title.
     pub fn blocked(&self, blocklist: &[String]) -> bool {
-        let hay = format!("{} {}", self.class, self.title).to_lowercase();
-        blocklist
-            .iter()
-            .any(|b| !b.is_empty() && hay.contains(&b.to_lowercase()))
+        matches(&format!("{} {}", self.class, self.title), blocklist)
     }
+}
+
+/// Case-insensitive substring match, the shape every list in the config takes.
+pub fn matches(hay: &str, needles: &[String]) -> bool {
+    let hay = hay.to_lowercase();
+    needles
+        .iter()
+        .any(|n| !n.is_empty() && hay.contains(&n.to_lowercase()))
 }
 
 fn hyprctl(args: &[&str]) -> Result<serde_json::Value> {

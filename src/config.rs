@@ -33,6 +33,13 @@ pub struct AgentConfig {
     #[serde(default = "default_blocklist")]
     pub blocklist: Vec<String>,
 
+    /// Window classes that count as a browser, matched case-insensitively as
+    /// substrings. The browser extension keeps reporting its front tab even
+    /// while minimised, so this list is what decides when that tab is what the
+    /// person was actually looking at.
+    #[serde(default = "default_browsers")]
+    pub browsers: Vec<String>,
+
     /// Free-text note about this machine, handed to the model as context.
     /// Use it for things the screen alone would mislead on, e.g. that this
     /// box runs AI computer-use sessions that repaint the screen unattended.
@@ -65,6 +72,40 @@ pub struct ServerConfig {
 
     #[serde(default = "default_idle_distance")]
     pub idle_distance: u32,
+
+    /// Directories searched for git repositories. The search stops at the first
+    /// `.git` on a path, so listing a parent of everything is the intent.
+    #[serde(default = "default_code_roots")]
+    pub code_roots: Vec<String>,
+
+    /// Substrings matched against commit author name and email to decide which
+    /// commits are yours. Empty means "whatever `user.email` each repository is
+    /// configured with", which is right on a personal machine.
+    #[serde(default)]
+    pub code_authors: Vec<String>,
+
+    /// GitHub login, for pull requests, issues and reviews. None disables that
+    /// half; the local git scan is unaffected.
+    #[serde(default)]
+    pub github_user: Option<String>,
+
+    /// How far back a collection run looks. Commits are retrospective and a
+    /// laptop may be shut for a week, so a run overlaps well past the last one.
+    #[serde(default = "default_code_days")]
+    pub code_days: i64,
+
+    /// Which coding agents to read telemetry from. Two of the three sources are
+    /// private on-disk formats with no stability promise, so a tool whose parser
+    /// has started lying can be dropped from the run here rather than by
+    /// shipping a new binary.
+    #[serde(default = "default_agent_tools")]
+    pub agent_tools: Vec<String>,
+
+    /// How far back an agent run looks. Separate from `code_days` because the
+    /// windows cost very different amounts: a month of git log is a few seconds,
+    /// a month of transcripts is well over a gigabyte of JSONL.
+    #[serde(default = "default_agent_days")]
+    pub agent_days: i64,
 }
 
 impl Default for AgentConfig {
@@ -74,8 +115,15 @@ impl Default for AgentConfig {
             device: default_device(),
             width: default_width(),
             blocklist: default_blocklist(),
+            browsers: default_browsers(),
             note: None,
         }
+    }
+}
+
+impl AgentConfig {
+    pub fn is_browser(&self, class: &str) -> bool {
+        crate::capture::matches(class, &self.browsers)
     }
 }
 
@@ -88,8 +136,37 @@ impl Default for ServerConfig {
             port: default_port(),
             idle_after_secs: default_idle_after_secs(),
             idle_distance: default_idle_distance(),
+            code_roots: default_code_roots(),
+            code_authors: Vec::new(),
+            github_user: None,
+            code_days: default_code_days(),
+            agent_tools: default_agent_tools(),
+            agent_days: default_agent_days(),
         }
     }
+}
+
+fn default_code_roots() -> Vec<String> {
+    vec!["~/projects".into()]
+}
+
+fn default_code_days() -> i64 {
+    30
+}
+
+fn default_agent_tools() -> Vec<String> {
+    [
+        crate::agents::TOOL_CLAUDE,
+        crate::agents::TOOL_OPENCODE,
+        crate::agents::TOOL_CODEX,
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+fn default_agent_days() -> i64 {
+    14
 }
 
 fn default_server_url() -> String {
@@ -116,6 +193,13 @@ fn default_blocklist() -> Vec<String> {
     .iter()
     .map(|s| s.to_string())
     .collect()
+}
+
+fn default_browsers() -> Vec<String> {
+    ["firefox", "zen", "librewolf", "chromium", "chrome", "brave"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
 }
 
 fn default_categories() -> Vec<String> {
@@ -181,6 +265,18 @@ blocklist = [
   "private",
 ]
 
+# Also matched against the site in the front browser tab, so a bank listed here
+# suppresses the screenshot as well as the domain.
+
+# Time per website comes from ActivityWatch's browser extension, which posts the
+# front tab to 127.0.0.1:5600 -- the agent answers there. Install it once from
+# https://addons.mozilla.org/firefox/addon/aw-watcher-web/ and accept the
+# consent prompt. Only the host is ever kept: dn.se, never the article.
+#
+# The extension reports its tab whether or not the browser is in front, so a
+# window class from this list must have focus before the tab counts.
+browsers = ["firefox", "zen", "librewolf", "chromium", "chrome", "brave"]
+
 # The server runs in the cluster. It holds the API key, calls the model, owns
 # the database, and serves the UI.
 [server]
@@ -213,6 +309,37 @@ idle_distance = 3
 # Seconds without human input after which an unchanged screen is called idle
 # outright rather than inheriting the previous label.
 idle_after_secs = 300
+
+# `time collect` reads how much you actually produced -- commits, diffs, pull
+# requests -- and joins it to the timeline. Run it nightly; commit timestamps
+# are retrospective, so there is nothing to gain from running it more often.
+#
+# Repositories are found by walking these roots and stopping at the first .git.
+code_roots = ["~/projects"]
+
+# Substrings matched against commit author name and email. Leave empty to use
+# whatever user.email each repository is configured with.
+code_authors = []
+
+# For pull requests, issues and reviews. The token is never read from this
+# file: it comes from TIME_GITHUB_TOKEN, or from `gh auth token` locally.
+# github_user = "your-login"
+
+# How far back each run looks. Overlap is free -- rows are replaced, not added.
+code_days = 30
+
+# `time agents` reads what the coding agents did -- sessions, prompts, tokens,
+# how many ran at once -- from their own records, on the machine they ran on.
+# Also nightly, and also idempotent.
+#
+# Only opencode keeps a real database. claude and codex are read out of private
+# on-disk JSONL that upstream can change without notice, so drop a name from
+# this list if its numbers start looking wrong.
+agent_tools = ["claude", "opencode", "codex"]
+
+# Shorter than code_days on purpose: a month of transcripts is over a gigabyte
+# to re-read, where a month of git log is seconds.
+agent_days = 14
 "#;
 
 impl Config {

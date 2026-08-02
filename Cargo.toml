@@ -8,6 +8,10 @@ anyhow = "1"
 base64 = "0.22"
 chrono = "0.4"
 evdev = "0.12"
+# Default features pull in libssh2/openssl for network transports. Nothing here
+# ever fetches -- repositories are read off the local disk -- so the C TLS stack
+# is pure build cost and a pure CVE surface.
+git2 = { version = "0.21", default-features = false }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
@@ -15,6 +19,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tiny_http = "0.12"
 toml = "0.8"
+# Host extraction. Already in the tree via reqwest, and getting ports, IPv6
+# literals and punycode right by hand is a bug farm for no benefit.
+url = "2"
 
 [profile.release]
 opt-level = 2

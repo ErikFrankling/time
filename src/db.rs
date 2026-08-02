@@ -13,6 +13,8 @@ pub struct Minute {
     pub project: Option<String>,
     pub detail: Option<String>,
     pub window: Option<String>,
+    /// Host of the focused browser tab this minute, never a full URL.
+    pub domain: Option<String>,
     pub phash: i64,
     pub model: Option<String>,
     pub keys: u32,
@@ -55,11 +57,15 @@ pub struct Filter {
     pub category: Option<String>,
     pub device: Option<String>,
     pub app: Option<String>,
+    pub domain: Option<String>,
 }
 
 impl Filter {
     pub fn is_empty_pub(&self) -> bool {
-        self.category.is_none() && self.device.is_none() && self.app.is_none()
+        self.category.is_none()
+            && self.device.is_none()
+            && self.app.is_none()
+            && self.domain.is_none()
     }
 
     /// Build the SQL tail and its bound values together, so a filter can never
@@ -80,6 +86,10 @@ impl Filter {
             sql.push_str(" AND window LIKE ?");
             args.push(Box::new(format!("{a}%")));
         }
+        if let Some(d) = &self.domain {
+            sql.push_str(" AND domain = ?");
+            args.push(Box::new(d.clone()));
+        }
         (sql, args)
     }
 }
@@ -94,7 +104,7 @@ fn params<'a>(
 }
 
 const COLS: &str = "ts, device, category, project, detail, window, phash, model, \
-                    keys, mouse, idle_secs, apps, workspaces, classified, tags";
+                    keys, mouse, idle_secs, apps, workspaces, classified, tags, domain";
 
 impl Db {
     pub fn open() -> Result<Self> {
@@ -128,6 +138,7 @@ impl Db {
             ("workspaces", "INTEGER NOT NULL DEFAULT 0"),
             ("classified", "INTEGER NOT NULL DEFAULT 0"),
             ("tags", "TEXT"),
+            ("domain", "TEXT"),
         ] {
             let exists: bool = conn
                 .prepare("SELECT 1 FROM pragma_table_info('minute') WHERE name = ?1")?
@@ -136,6 +147,74 @@ impl Db {
                 conn.execute_batch(&format!("ALTER TABLE minute ADD COLUMN {col} {decl};"))?;
             }
         }
+
+        // Output, kept well away from the minute table. Different grain (a day,
+        // not a minute), different truth (retrospective and re-derivable rather
+        // than a one-shot observation), so a collection run can be re-run over
+        // the same window as often as it likes without disturbing anything.
+        //
+        // `source` is part of the key because git and GitHub both count commits
+        // and neither is wrong -- only local clones have line counts and private
+        // repositories, only GitHub has pull requests and reviews.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS code_day (
+                day           TEXT NOT NULL,
+                source        TEXT NOT NULL,
+                repo          TEXT NOT NULL,
+                commits       INTEGER NOT NULL DEFAULT 0,
+                added         INTEGER NOT NULL DEFAULT 0,
+                removed       INTEGER NOT NULL DEFAULT 0,
+                files         INTEGER NOT NULL DEFAULT 0,
+                prs_opened    INTEGER NOT NULL DEFAULT 0,
+                prs_merged    INTEGER NOT NULL DEFAULT 0,
+                issues_opened INTEGER NOT NULL DEFAULT 0,
+                issues_closed INTEGER NOT NULL DEFAULT 0,
+                reviews       INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (day, source, repo)
+             );
+             CREATE INDEX IF NOT EXISTS code_day_day ON code_day(day);",
+        )?;
+
+        // What the agents did, kept as far away from the minute table as the
+        // code rows are and for the same reason: re-derivable totals over a
+        // whole day, not a one-shot observation of a minute.
+        //
+        // `tool` is part of the key because three tools count tokens three
+        // different ways, and a schema that let them merge would invite exactly
+        // the blind sum the collector refuses to do.
+        //
+        // The minute rows are per (ts, device, tool) rather than resolved down
+        // to one row: two tools running in the same minute is the interesting
+        // case, not a conflict to be broken.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS agent_day (
+                day            TEXT NOT NULL,
+                device         TEXT NOT NULL,
+                tool           TEXT NOT NULL,
+                project        TEXT NOT NULL,
+                sessions       INTEGER NOT NULL DEFAULT 0,
+                prompts        INTEGER NOT NULL DEFAULT 0,
+                prompt_chars   INTEGER NOT NULL DEFAULT 0,
+                prompt_p50     INTEGER NOT NULL DEFAULT 0,
+                prompt_p90     INTEGER NOT NULL DEFAULT 0,
+                tokens_in      INTEGER NOT NULL DEFAULT 0,
+                tokens_out     INTEGER NOT NULL DEFAULT 0,
+                cache_read     INTEGER NOT NULL DEFAULT 0,
+                cache_write    INTEGER NOT NULL DEFAULT 0,
+                active_minutes INTEGER NOT NULL DEFAULT 0,
+                peak_parallel  INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (day, device, tool, project)
+             );
+             CREATE INDEX IF NOT EXISTS agent_day_day ON agent_day(day);
+             CREATE TABLE IF NOT EXISTS agent_minute (
+                ts       INTEGER NOT NULL,
+                device   TEXT NOT NULL,
+                tool     TEXT NOT NULL,
+                sessions INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (ts, device, tool)
+             );
+             CREATE INDEX IF NOT EXISTS agent_minute_ts ON agent_minute(ts);",
+        )?;
         Ok(Self { conn })
     }
 
@@ -143,8 +222,8 @@ impl Db {
         self.conn.execute(
             "INSERT OR REPLACE INTO minute
                (ts, device, category, project, detail, window, phash, model,
-                keys, mouse, idle_secs, apps, workspaces, classified, tags)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+                keys, mouse, idle_secs, apps, workspaces, classified, tags, domain)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
             rusqlite::params![
                 m.ts,
                 m.device,
@@ -161,6 +240,7 @@ impl Db {
                 m.workspaces,
                 m.classified as i32,
                 serde_json::to_string(&m.tags).unwrap_or_else(|_| "[]".into()),
+                m.domain,
             ],
         )?;
         Ok(())
@@ -274,6 +354,25 @@ impl Db {
         Ok(v)
     }
 
+    /// Foreground minutes per website host. "Firefox" as an app answers
+    /// nothing -- two hours in it could be work or dn.se, and this is the
+    /// column that tells them apart.
+    ///
+    /// Idle minutes are left out. A browser parked on a page overnight is not
+    /// eight hours spent on that site, and this list exists to answer "where
+    /// did the evening go", which only counts while someone was there.
+    pub fn by_domain(&self, from: i64, to: i64, f: &Filter) -> Result<Vec<(String, i64)>> {
+        let mut counts: std::collections::HashMap<String, i64> = Default::default();
+        for m in self.resolved(from, to, f)?.into_iter().filter(|m| m.category != "idle") {
+            if let Some(d) = m.domain.filter(|d| !d.trim().is_empty()) {
+                *counts.entry(d).or_default() += 1;
+            }
+        }
+        let mut v: Vec<_> = counts.into_iter().collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        Ok(v)
+    }
+
     /// Minutes each app was *open*, whether or not it had focus. Answers "what
     /// was running", which the foreground list cannot.
     pub fn open_apps(&self, from: i64, to: i64, f: &Filter) -> Result<Vec<(String, i64)>> {
@@ -375,6 +474,7 @@ fn row_to_minute(r: &rusqlite::Row) -> rusqlite::Result<Minute> {
         tags: r.get::<_, Option<String>>(14).ok().flatten()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default(),
+        domain: r.get(15).unwrap_or(None),
     })
 }
 
@@ -468,13 +568,161 @@ impl Db {
     }
 }
 
+const CODE_COLS: &str = "day, source, repo, commits, added, removed, files, \
+                         prs_opened, prs_merged, issues_opened, issues_closed, reviews";
+
+impl Db {
+    /// Record a collection run. Replacing rather than adding is what makes a
+    /// run idempotent: the collector re-reads a whole window every night, and
+    /// yesterday's numbers must not double when it does.
+    pub fn put_code(&self, rows: &[crate::code::CodeDay]) -> Result<usize> {
+        for r in rows {
+            self.conn.execute(
+                &format!(
+                    "INSERT OR REPLACE INTO code_day ({CODE_COLS}) \
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)"
+                ),
+                rusqlite::params![
+                    r.day,
+                    r.source,
+                    r.repo,
+                    r.commits,
+                    r.added,
+                    r.removed,
+                    r.files,
+                    r.prs_opened,
+                    r.prs_merged,
+                    r.issues_opened,
+                    r.issues_closed,
+                    r.reviews,
+                ],
+            )?;
+        }
+        Ok(rows.len())
+    }
+
+    /// Every row between two local dates, inclusive.
+    pub fn code_between(&self, from: &str, to: &str) -> Result<Vec<crate::code::CodeDay>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {CODE_COLS} FROM code_day WHERE day >= ?1 AND day <= ?2 ORDER BY day, repo"
+        ))?;
+        let rows = stmt.query_map([from, to], |r| {
+            Ok(crate::code::CodeDay {
+                day: r.get(0)?,
+                source: r.get(1)?,
+                repo: r.get(2)?,
+                commits: r.get(3)?,
+                added: r.get(4)?,
+                removed: r.get(5)?,
+                files: r.get(6)?,
+                prs_opened: r.get(7)?,
+                prs_merged: r.get(8)?,
+                issues_opened: r.get(9)?,
+                issues_closed: r.get(10)?,
+                reviews: r.get(11)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+}
+
+const AGENT_COLS: &str = "day, device, tool, project, sessions, prompts, prompt_chars, \
+                          prompt_p50, prompt_p90, tokens_in, tokens_out, cache_read, \
+                          cache_write, active_minutes, peak_parallel";
+
+impl Db {
+    /// Record an agent-telemetry run. Replacing rather than adding, exactly as
+    /// `put_code` does: a nightly job re-reads a window that overlaps the last
+    /// one, and re-reading a transcript must not double the tokens it reports.
+    pub fn put_agents(&self, r: &crate::proto::AgentReport) -> Result<usize> {
+        for d in &r.days {
+            self.conn.execute(
+                &format!(
+                    "INSERT OR REPLACE INTO agent_day ({AGENT_COLS}) \
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)"
+                ),
+                rusqlite::params![
+                    d.day,
+                    d.device,
+                    d.tool,
+                    d.project,
+                    d.sessions,
+                    d.prompts,
+                    d.prompt_chars,
+                    d.prompt_p50,
+                    d.prompt_p90,
+                    d.tokens_in,
+                    d.tokens_out,
+                    d.cache_read,
+                    d.cache_write,
+                    d.active_minutes,
+                    d.peak_parallel,
+                ],
+            )?;
+        }
+        for m in &r.minutes {
+            self.conn.execute(
+                "INSERT OR REPLACE INTO agent_minute (ts, device, tool, sessions) \
+                 VALUES (?1,?2,?3,?4)",
+                rusqlite::params![m.ts, m.device, m.tool, m.sessions],
+            )?;
+        }
+        Ok(r.days.len() + r.minutes.len())
+    }
+
+    /// Every agent day row between two local dates, inclusive.
+    pub fn agent_days(&self, from: &str, to: &str) -> Result<Vec<crate::agents::AgentDay>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {AGENT_COLS} FROM agent_day WHERE day >= ?1 AND day <= ?2 \
+             ORDER BY day, tool, project"
+        ))?;
+        let rows = stmt.query_map([from, to], |r| {
+            Ok(crate::agents::AgentDay {
+                day: r.get(0)?,
+                device: r.get(1)?,
+                tool: r.get(2)?,
+                project: r.get(3)?,
+                sessions: r.get(4)?,
+                prompts: r.get(5)?,
+                prompt_chars: r.get(6)?,
+                prompt_p50: r.get(7)?,
+                prompt_p90: r.get(8)?,
+                tokens_in: r.get(9)?,
+                tokens_out: r.get(10)?,
+                cache_read: r.get(11)?,
+                cache_write: r.get(12)?,
+                active_minutes: r.get(13)?,
+                peak_parallel: r.get(14)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Agent minutes in a unix-second range. One row per (minute, device, tool),
+    /// so the caller can both count distinct minutes and add up concurrency.
+    pub fn agent_minutes(&self, from: i64, to: i64) -> Result<Vec<crate::agents::AgentMinute>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT ts, device, tool, sessions FROM agent_minute \
+             WHERE ts >= ?1 AND ts < ?2 ORDER BY ts",
+        )?;
+        let rows = stmt.query_map([from, to], |r| {
+            Ok(crate::agents::AgentMinute {
+                ts: r.get(0)?,
+                device: r.get(1)?,
+                tool: r.get(2)?,
+                sessions: r.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+}
+
 /// A run of consecutive minutes in one category.
 #[derive(Debug, Clone)]
 pub struct Block {
     pub start: i64,
     pub minutes: i64,
     pub category: String,
-    pub project: Option<String>,
 }
 
 /// What the day looked like as blocks rather than totals.
@@ -521,7 +769,6 @@ impl Db {
                         start: m.ts,
                         minutes: 1,
                         category: m.category,
-                        project: m.project,
                     });
                 }
                 _ => {
@@ -530,7 +777,6 @@ impl Db {
                         start: m.ts,
                         minutes: 1,
                         category: m.category,
-                        project: m.project,
                     });
                 }
             }

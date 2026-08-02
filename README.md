@@ -84,7 +84,34 @@ export TIME_INGEST_TOKEN=<the token from above>
 | `time agent` | screenshot and post every minute |
 | `time server` | classify incoming frames, store, serve the UI |
 | `time once` | post a single minute and print what came back — use this to check labels |
+| `time collect` | read commits, diffs and pull requests, post them to the server |
+| `time agents` | read what the coding agents did, post it to the server |
 | `time config` | print config and database paths |
+
+## Time per website
+
+"Firefox — 4h" answers nothing. Two hours on dn.se and two on a bug tracker are
+different days, and no window title on Wayland contains a domain.
+
+The browser is the only thing that knows, so it has to volunteer it.
+ActivityWatch's browser extension already does exactly that, and the agent
+answers the three endpoints it posts to on `127.0.0.1:5600`:
+
+1. Install [ActivityWatch Web Watcher][aw] in every browser you use. It is on
+   AMO, so Firefox forks — Zen included — take it as-is.
+2. Accept its consent prompt once. To skip the click, grant it up front with a
+   managed-storage manifest at
+   `~/.mozilla/managed-storage/{ef87d84c-2127-493f-b952-5b4e744245bc}.json`:
+   `{"name":"{ef87d84c-2127-493f-b952-5b4e744245bc}","type":"storage","data":{"consentOfflineDataCollection":true}}`
+3. Nothing else. The agent is already listening; there is no ActivityWatch
+   server to run.
+
+Only the host is ever taken from the URL, and only into memory — `dn.se`, never
+which article. The extension keeps reporting its front tab while minimised, so
+the domain is only recorded for minutes where the compositor says a browser
+(`agent.browsers`) actually had focus.
+
+[aw]: https://addons.mozilla.org/firefox/addon/aw-watcher-web/
 
 ## Configuration
 
@@ -94,6 +121,10 @@ side reads only its own, so the same file works everywhere.
 - **`agent.blocklist`** — substring match on window class and title. Enforced on
   the client, so a matching screen is never even encoded, let alone sent.
   Password managers and Signal are in there by default.
+  It matches the browser's front tab too, so a bank listed here suppresses the
+  screenshot as well as the domain.
+- **`agent.browsers`** — window classes that count as a browser, and so decide
+  when the reported tab is what you were actually looking at.
 - **`agent.width`** — downscale before sending. The cost dial.
 - **`server.categories`** — the list that becomes the chart. `idle` and `other`
   always render grey; the rest get one of 8 colourblind-checked colours in list
@@ -104,6 +135,75 @@ side reads only its own, so the same file works everywhere.
 
 Secrets come from the environment only, never the config file: `TIME_API_KEY`
 (server) and `TIME_INGEST_TOKEN` (both).
+
+## What you actually shipped
+
+The minute table answers *where the day went*. It cannot answer *whether any of
+it was worth anything* — an editor full of code looks the same whether you
+shipped a feature or stared at it. So `time collect` reads the other half:
+
+```bash
+time collect            # last 30 days, posted to the server
+time collect 7 --dry-run   # print it instead, to check the numbers
+```
+
+Two sources, kept apart in the `code_day` table because neither can replace the
+other:
+
+- **local git** (`git2`/libgit2) — commits, lines added and removed, files
+  touched, per repository per day. The only place diffs exist, and the only
+  place private and client repositories show up at all.
+- **GitHub** (one GraphQL call) — pull requests opened and merged, issues
+  opened and closed, reviews given. None of those leave a trace in a clone.
+
+GitHub reports private work as a bare `restrictedContributionsCount` with no
+repository, no day and no diff — 819 of a recent month's contributions here.
+That number is exactly the gap the local scan exists to fill, so the two commit
+counts are never added together.
+
+Lines are counted per file, and a file that changed by more than 10k lines in
+one commit is skipped along with lock files and vendored trees: one refresh of a
+checked-in data dump is 650k lines, which is more than a month of real writing
+and would flatten every other day in the chart to a single pixel.
+
+Run it nightly — commit timestamps are retrospective, so there is nothing to
+gain from running it more often. The home-manager module has a timer for it:
+
+```nix
+services.time-agent.collect = {
+  enable = true;
+  roots = [ "~/projects" ];
+  githubUser = "your-login";
+};
+```
+
+The scan runs where the repositories are, not where the server is, and posts to
+`/v1/code` the same way the agent posts frames. The GitHub token comes from
+`TIME_GITHUB_TOKEN`, or from `gh`'s own credentials if it is logged in — never
+from the config file.
+
+## How much of it was the agents
+
+A screenshot of an editor looks the same whether you wrote the line or watched
+one appear, so the minute table cannot separate the two. `time agents` counts
+the other side from the tools' own records:
+
+```bash
+time agents             # last 14 days, posted to the server
+time agents 3 --dry-run    # print it instead, to check the numbers
+```
+
+Three sources into `agent_day` and `agent_minute`, per tool per project per day:
+**opencode** from its own SQLite database, **claude** and **codex** from the
+JSONL transcripts under `~/.claude/projects` and `~/.codex/sessions`. Those two
+are private on-disk formats with no stability promise — `~/.claude/history.jsonl`
+silently stopped being written mid-2026 — so each parser is best-effort and a
+tool whose format has moved can be dropped from `agent_tools` without a rebuild.
+
+Token counts are never summed across tools: the three of them count cached input
+three different ways. The dashboard reports elapsed agent time as *distinct
+minutes*, not summed session minutes — several sessions overlap constantly, and
+adding them up produces days longer than a day.
 
 ## Cost
 
@@ -132,6 +232,9 @@ about:
 
 - The blocklist is a hard gate, enforced client-side — blocked windows are never
   captured, and the window title isn't sent either.
+- Browsing is recorded as a host and nothing more. Paths and query strings are
+  the half of a URL that leaks, they never leave the agent's memory, and a
+  blocklisted domain blocks the whole minute rather than just the domain field.
 - The model is pinned. Notably it is **not** DeepSeek V4 Flash, the one model on
   the Go plan documented as training on submitted data.
 - No screenshot is ever written to disk, on either side. It exists in memory

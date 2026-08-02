@@ -66,7 +66,7 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             val from = maxOf(ctx.watermark - 120_000L, floor)
 
             val events = Usage.query(ctx, from, now) ?: return Result.retry()
-            val frames = Usage.frames(ctx, Usage.sessions(events))
+            val frames = Usage.frames(ctx, Usage.sessions(Usage.drain(events)))
             if (frames.isEmpty()) {
                 ctx.lastSync = now
                 return Result.success()
@@ -98,9 +98,12 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
                     put("blocked", false)
                     put("keys", 0)
                     put("mouse", 0)
-                    put("idle_secs", f.idleSecs)
                     put("workspaces", 0)
                     put("apps", JSONArray(f.apps))
+                    // Omitted rather than zeroed: the field is optional on the
+                    // server and absence reads as "unknown", which is what a
+                    // phone actually knows.
+                    f.idleSecs?.let { put("idle_secs", it) }
                     f.note?.let { put("note", it) }
                 }.toString()
 

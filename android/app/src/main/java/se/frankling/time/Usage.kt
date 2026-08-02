@@ -10,12 +10,23 @@ import android.os.Process
 /** A contiguous stretch with one app in the foreground. */
 data class Session(val pkg: String, val start: Long, val end: Long)
 
+/**
+ * One system event, flattened.
+ *
+ * UsageEvents cannot be constructed outside the framework, so the state machine
+ * below reads this instead and stays testable on a plain JVM. Getting that logic
+ * wrong is the difference between a real day and a fabricated one, so it has to
+ * be checkable without an emulator.
+ */
+data class Ev(val type: Int, val pkg: String, val ts: Long)
+
 /** One minute of phone activity, matching the server's Frame shape. */
 data class MinuteFrame(
     val ts: Long,
     val window: String,
     val apps: List<String>,
-    val idleSecs: Int,
+    /** Null, always: Android exposes no seconds-since-last-touch to an app. */
+    val idleSecs: Int?,
     val note: String?,
 )
 
@@ -55,7 +66,7 @@ object Usage {
      * The trailing open session is deliberately not emitted — its duration is
      * not known yet, and emitting it would duplicate on the next run.
      */
-    fun sessions(events: UsageEvents): List<Session> {
+    fun sessions(events: List<Ev>): List<Session> {
         val out = mutableListOf<Session>()
         var openPkg: String? = null
         var openStart = 0L
@@ -69,23 +80,32 @@ object Usage {
             if (d in 1_000..(4 * 3600_000L)) out.add(Session(p, openStart, end))
         }
 
+        for (e in events) {
+            when (e.type) {
+                UsageEvents.Event.ACTIVITY_RESUMED -> {
+                    // Re-resume of the same app keeps the earlier start.
+                    if (openPkg == e.pkg) continue
+                    close(e.ts)
+                    openPkg = e.pkg
+                    openStart = e.ts
+                }
+                UsageEvents.Event.ACTIVITY_PAUSED ->
+                    if (openPkg == e.pkg) close(e.ts)
+                UsageEvents.Event.SCREEN_NON_INTERACTIVE,
+                UsageEvents.Event.KEYGUARD_SHOWN,
+                UsageEvents.Event.DEVICE_SHUTDOWN -> close(e.ts)
+            }
+        }
+        return out
+    }
+
+    /** Drain the framework's cursor into something the state machine can read. */
+    fun drain(events: UsageEvents): List<Ev> {
+        val out = mutableListOf<Ev>()
         val e = UsageEvents.Event()
         while (events.hasNextEvent()) {
             events.getNextEvent(e)
-            when (e.eventType) {
-                UsageEvents.Event.ACTIVITY_RESUMED -> {
-                    // Re-resume of the same app keeps the earlier start.
-                    if (openPkg == e.packageName) continue
-                    close(e.timeStamp)
-                    openPkg = e.packageName
-                    openStart = e.timeStamp
-                }
-                UsageEvents.Event.ACTIVITY_PAUSED ->
-                    if (openPkg == e.packageName) close(e.timeStamp)
-                UsageEvents.Event.SCREEN_NON_INTERACTIVE,
-                UsageEvents.Event.KEYGUARD_SHOWN,
-                UsageEvents.Event.DEVICE_SHUTDOWN -> close(e.timeStamp)
-            }
+            out.add(Ev(e.eventType, e.packageName, e.timeStamp))
         }
         return out
     }
@@ -123,9 +143,13 @@ object Usage {
                 ts = ts,
                 window = "${label(winner)} — $winner",
                 apps = pkgs.keys.sorted(),
-                // No screen means no way to know how long since a touch; the
-                // foreground app changing is the only presence signal there is.
-                idleSecs = 0,
+                // There is no way to know how long since a touch here, and 0
+                // would be a lie the server cannot see through: paired with the
+                // zero key and pointer counts a phone always sends, it claims
+                // both "input this instant" and "no input this minute". These
+                // frames are reconstructed hours after the fact, so that skews
+                // every one of them towards present. Unknown is the truth.
+                idleSecs = null,
                 note = null,
             )
         }

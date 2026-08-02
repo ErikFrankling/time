@@ -70,7 +70,11 @@ suggests a person is consuming something, label that, not \"idle\".
 - Recent input with an idle-looking screen usually means they are still there.
 
 If the idle time is unknown, say so in your reasoning by leaning on the screen \
-and previous label, and be more cautious about claiming active work.
+and previous label, and be more cautious about claiming active work. Zero key \
+presses and zero pointer movements are then no information either -- the same \
+device that cannot time the last input usually cannot count them, and a phone \
+reports neither. Treat them as unknown, not as evidence nobody was there; what \
+is in the foreground is the whole signal.
 
 ## One minute, several things
 
@@ -120,6 +124,7 @@ pub fn classify(
     key: &str,
     jpeg: Option<&[u8]>,
     window: &str,
+    domain: Option<&str>,
     presence: Presence<'_>,
     prev: Option<Previous<'_>>,
 ) -> Result<Label> {
@@ -131,8 +136,11 @@ pub fn classify(
     context.push_str(&format!("Machine: {}\n", presence.device));
     match presence.idle_secs {
         Some(s) => context.push_str(&format!("Seconds since last human input: {s}\n")),
+        // "no input device readable" was written for a desktop whose evdev read
+        // failed. A phone has no such device to begin with and never will, so
+        // the phrasing has to cover both without implying a fault.
         None => context.push_str(
-            "Seconds since last human input: UNKNOWN (no input device readable)\n",
+            "Seconds since last human input: UNKNOWN (this device does not report it)\n",
         ),
     }
     context.push_str(&format!(
@@ -140,6 +148,12 @@ pub fn classify(
         presence.keys, presence.mouse
     ));
     context.push_str(&format!("Active window: {window}"));
+    // "Firefox" tells the model nothing; the site being read tells it almost
+    // everything, and reading it off the screenshot is guesswork the browser
+    // itself can answer exactly.
+    if let Some(d) = domain.filter(|d| !d.trim().is_empty()) {
+        context.push_str(&format!("\nFocused browser tab is on: {d}"));
+    }
 
     if let Some(p) = prev {
         context.push_str(&format!("\nPrevious minute: category={}", p.category));

@@ -6,6 +6,7 @@ use crate::classify;
 use crate::config::{self, ServerConfig};
 use crate::db::{Db, Minute};
 use crate::proto::{Frame, FrameAck};
+use crate::report;
 use crate::web;
 
 pub fn run(cfg: Arc<ServerConfig>) -> Result<()> {
@@ -47,6 +48,61 @@ fn handle(cfg: &ServerConfig, db: &Mutex<Db>, key: &str, mut req: tiny_http::Req
     {
         let is_ingest = req.url().starts_with("/v1/frame");
 
+        if req.url().starts_with("/v1/code") {
+            let mut body = String::new();
+            if req.as_reader().read_to_string(&mut body).is_err() {
+                let _ = req.respond(tiny_http::Response::from_string("bad body").with_status_code(400));
+                return;
+            }
+            let result = serde_json::from_str::<crate::proto::CodeReport>(&body)
+                .context("parsing code report")
+                .and_then(|r| {
+                    let db = db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
+                    db.put_code(&r.days)
+                });
+            let resp = match result {
+                Ok(n) => tiny_http::Response::from_string(format!("stored {n} rows\n")),
+                Err(e) => {
+                    eprintln!("code: {e:#}");
+                    tiny_http::Response::from_string(format!("{e:#}")).with_status_code(500)
+                }
+            };
+            let _ = req.respond(resp);
+            return;
+        }
+
+        if req.url().starts_with("/v1/agents") {
+            let mut body = String::new();
+            if req.as_reader().read_to_string(&mut body).is_err() {
+                let _ = req.respond(tiny_http::Response::from_string("bad body").with_status_code(400));
+                return;
+            }
+            let result = serde_json::from_str::<crate::proto::AgentReport>(&body)
+                .context("parsing agent report")
+                .and_then(|r| {
+                    let db = db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
+                    db.put_agents(&r)
+                });
+            let resp = match result {
+                Ok(n) => tiny_http::Response::from_string(format!("stored {n} rows\n")),
+                Err(e) => {
+                    eprintln!("agents: {e:#}");
+                    tiny_http::Response::from_string(format!("{e:#}")).with_status_code(500)
+                }
+            };
+            let _ = req.respond(resp);
+            return;
+        }
+
+        // Sideloading is the only distribution channel this app has, so the
+        // server that receives the frames also hands out the APK that sends
+        // them -- one URL to type into a phone, no store, no third party.
+        let path = req.url().split('?').next().unwrap_or("/").to_string();
+        if path == "/app" || path == "/app/" {
+            let _ = req.respond(app_response(&path));
+            return;
+        }
+
         if is_ingest {
 
             let mut body = String::new();
@@ -87,8 +143,14 @@ fn handle(cfg: &ServerConfig, db: &Mutex<Db>, key: &str, mut req: tiny_http::Req
                     category: param("cat").map(|v| urldecode(&v)),
                     device: param("dev").map(|v| urldecode(&v)),
                     app: param("app").map(|v| urldecode(&v)),
+                    domain: param("dom").map(|v| urldecode(&v)),
                 },
             };
+
+            if url.starts_with("/report.pdf") {
+                let _ = req.respond(report_response(cfg, db, &q, param("range").as_deref()));
+                return;
+            }
 
             let body = db
                 .lock()
@@ -101,6 +163,41 @@ fn handle(cfg: &ServerConfig, db: &Mutex<Db>, key: &str, mut req: tiny_http::Req
                     "Content-Type: text/html; charset=utf-8".parse().unwrap(),
                 ),
             );
+        }
+    }
+}
+
+/// Read the numbers under the lock, typeset with it released.
+///
+/// Typst is a subprocess and takes long enough to matter; holding the database
+/// mutex across it would stall every agent posting a frame, for the sake of a
+/// report nobody is waiting on but the one person who clicked. The worker
+/// itself is occupied either way, which is what the other three are for.
+fn report_response(
+    cfg: &ServerConfig,
+    db: &Mutex<Db>,
+    q: &web::Query,
+    range: Option<&str>,
+) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
+    let range = report::Range::parse(range);
+    let built = db
+        .lock()
+        .map_err(|e| anyhow::anyhow!("db lock: {e}"))
+        .and_then(|db| report::collect(cfg, &db, range, q.day, &q.filter))
+        .and_then(|data| Ok((data.filename(), report::render(cfg, &data)?)));
+
+    match built {
+        Ok((name, pdf)) => tiny_http::Response::from_data(pdf)
+            .with_header::<tiny_http::Header>("Content-Type: application/pdf".parse().unwrap())
+            .with_header::<tiny_http::Header>(
+                format!("Content-Disposition: attachment; filename=\"{name}\"")
+                    .parse()
+                    .unwrap(),
+            ),
+        Err(e) => {
+            eprintln!("report: {e:#}");
+            tiny_http::Response::from_data(format!("report failed: {e:#}").into_bytes())
+                .with_status_code(500)
         }
     }
 }
@@ -133,6 +230,9 @@ fn ingest(cfg: &ServerConfig, db: &Mutex<Db>, key: &str, frame: Frame) -> Result
             project: None,
             detail: Some("blocked window — not captured".into()),
             window: None,
+            // A blocked minute records nothing about itself, the site least
+            // of all -- that is the whole point of the blocklist.
+            domain: None,
             phash: 0,
             keys: frame.keys,
             mouse: frame.mouse,
@@ -218,6 +318,7 @@ fn ingest(cfg: &ServerConfig, db: &Mutex<Db>, key: &str, frame: Frame) -> Result
                 project,
                 detail: Some(detail),
                 window: Some(frame.window),
+                domain: frame.domain.clone(),
                 phash: phash as i64,
                 keys: frame.keys,
                 mouse: frame.mouse,
@@ -258,7 +359,15 @@ fn ingest(cfg: &ServerConfig, db: &Mutex<Db>, key: &str, frame: Frame) -> Result
         mouse: frame.mouse,
         note: frame.note.as_deref(),
     };
-    let label = classify::classify(cfg, key, jpeg.as_deref(), &frame.window, presence, prev)?;
+    let label = classify::classify(
+        cfg,
+        key,
+        jpeg.as_deref(),
+        &frame.window,
+        frame.domain.as_deref(),
+        presence,
+        prev,
+    )?;
 
     let m = Minute {
         ts: frame.ts,
@@ -267,6 +376,7 @@ fn ingest(cfg: &ServerConfig, db: &Mutex<Db>, key: &str, frame: Frame) -> Result
         project: label.project,
         detail: label.detail,
         window: Some(frame.window),
+        domain: frame.domain.clone(),
         phash: phash as i64,
         keys: frame.keys,
         mouse: frame.mouse,
@@ -289,6 +399,116 @@ fn ack(m: Minute, classified: bool) -> FrameAck {
         detail: m.detail,
         classified,
     }
+}
+
+/// Where the APK to serve lives. Defaults inside the data volume so the
+/// deployment can drop a build next to the database without extra plumbing.
+fn apk_path() -> std::path::PathBuf {
+    std::env::var("TIME_APK_PATH")
+        .unwrap_or_else(|_| "/data/time.apk".into())
+        .into()
+}
+
+/// The APK's own versionName is only in its binary manifest, and pulling in an
+/// AXML parser to read one string is not worth it. The build that publishes the
+/// APK knows the version already, so it says so here.
+fn apk_version() -> String {
+    std::env::var("TIME_APK_VERSION").unwrap_or_else(|_| env!("CARGO_PKG_VERSION").into())
+}
+
+/// `/app` is the APK itself; `/app/` is the page you point a phone at.
+fn app_response(path: &str) -> tiny_http::ResponseBox {
+    let apk = apk_path();
+
+    if path == "/app" {
+        let file = match std::fs::File::open(&apk) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("apk: {}: {e}", apk.display());
+                return tiny_http::Response::from_string("no APK published\n")
+                    .with_status_code(404)
+                    .boxed();
+            }
+        };
+        // tiny_http switches to chunked above 32 KB, which drops the
+        // Content-Length and leaves a 25 MB download with no progress bar on a
+        // phone. The length is known here, so say it.
+        let len = file.metadata().ok().map(|m| m.len() as usize);
+        return tiny_http::Response::new(
+            tiny_http::StatusCode(200),
+            Vec::new(),
+            file,
+            len,
+            None,
+        )
+            .with_chunked_threshold(usize::MAX)
+            .with_header::<tiny_http::Header>(
+                "Content-Type: application/vnd.android.package-archive"
+                    .parse()
+                    .unwrap(),
+            )
+            // Without a filename Chrome on Android saves it as "app", and the
+            // package installer refuses anything not ending in .apk.
+            .with_header::<tiny_http::Header>(
+                format!(
+                    "Content-Disposition: attachment; filename=\"time-{}.apk\"",
+                    apk_version()
+                )
+                .parse()
+                .unwrap(),
+            )
+            .boxed();
+    }
+
+    let built = std::fs::metadata(&apk).ok().map(|m| {
+        let secs = m
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        (m.len(), secs)
+    });
+
+    let body = match built {
+        Some((bytes, secs)) => {
+            use chrono::TimeZone;
+            let when = chrono::Local
+                .timestamp_opt(secs, 0)
+                .single()
+                .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_default();
+            format!(
+                "<p class=\"v\">v{}</p>\
+                 <p class=\"meta\">{:.1} MB · built {}</p>\
+                 <p><a class=\"dl\" href=\"/app\">Download APK</a></p>\
+                 <p class=\"meta\">Android blocks installs from unknown sources until you \
+                  allow it for your browser. After installing, open the app and grant \
+                  usage access — nothing is reported without it.</p>",
+                web::esc(&apk_version()),
+                bytes as f64 / 1_048_576.0,
+                web::esc(&when),
+            )
+        }
+        None => "<p class=\"meta\">No APK has been published on this server yet.</p>".to_string(),
+    };
+
+    tiny_http::Response::from_string(format!(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
+<title>time — Android app</title><style>\
+:root {{ color-scheme: light dark; }}\
+body {{ margin:0; padding:40px 24px; font:16px/1.55 ui-sans-serif,system-ui,sans-serif; \
+  max-width:520px; margin:0 auto; }}\
+h1 {{ font-size:22px; margin:0 0 4px; }}\
+.v {{ margin:0 0 24px; opacity:.6; font-variant-numeric:tabular-nums; }}\
+.meta {{ font-size:13px; opacity:.6; }}\
+.dl {{ display:block; text-align:center; padding:14px; border:1px solid currentColor; \
+  border-radius:10px; text-decoration:none; color:inherit; font-weight:600; margin:24px 0; }}\
+</style></head><body><h1>time</h1>{body}<p><a href=\"/\">← dashboard</a></p></body></html>"
+    ))
+    .with_header::<tiny_http::Header>("Content-Type: text/html; charset=utf-8".parse().unwrap())
+    .boxed()
 }
 
 /// Minimal percent-decoding for query values.

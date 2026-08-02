@@ -17,6 +17,18 @@ let
       lib.concatStringsSep " " (lib.filter (x: x != "" && !lib.isList x) (builtins.split "[[:space:]]+" s))
     );
 
+  # The collector settings live under [server] because that is where the code
+  # reads them, but they are used here, on the workstation: the repositories are
+  # on this disk and the database is in the cluster, so the scan has to run on
+  # this side and post its results like the agent does.
+  collectToml = lib.optionalString cfg.collect.enable ''
+
+    [server]
+    code_roots = [${lib.concatMapStringsSep ", " (r: ''"${r}"'') cfg.collect.roots}]
+    code_days = ${toString cfg.collect.days}
+    ${lib.optionalString (cfg.collect.githubUser != null) ''github_user = "${cfg.collect.githubUser}"''}
+  '';
+
   agentToml = pkgs.writeText "time-config.toml" ''
     [agent]
     server = "${cfg.server}"
@@ -26,6 +38,7 @@ let
     blocklist = [
     ${lib.concatMapStringsSep "\n" (b: ''  "${b}",'') cfg.blocklist}
     ]
+    ${collectToml}
   '';
 
 in
@@ -77,6 +90,52 @@ in
       '';
     };
 
+    collect = {
+      enable = lib.mkEnableOption ''
+        the nightly output collector. Reads commits and diffs out of the local
+        clones and pull requests out of GitHub, and posts a per-day summary to
+        the same server. Nightly is enough: a commit timestamp never changes
+      '';
+
+      roots = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ "~/projects" ];
+        description = ''
+          Directories walked for git repositories. The walk stops at the first
+          `.git` on a path, so naming a parent of everything is the intent.
+        '';
+      };
+
+      githubUser = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = ''
+          GitHub login, for pull requests, issues and reviews. The token is
+          never configured here: it comes from TIME_GITHUB_TOKEN, or from the
+          `gh` CLI's own credentials if it is logged in.
+        '';
+      };
+
+      days = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 30;
+        description = ''
+          How far back each run looks. Overlapping runs are free -- rows are
+          replaced, not added -- so this is sized for a laptop that was shut
+          for a fortnight rather than for the gap since last night.
+        '';
+      };
+    };
+
+    agents = {
+      enable = lib.mkEnableOption ''
+        the nightly agent-session summary. Reads local Claude Code, codex and
+        opencode session state and posts per-day and per-minute totals, so
+        "how much of that was me" becomes answerable. Reads only counts and
+        lengths -- never prompt or response text
+      '';
+    };
+
     note = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = null;
@@ -125,6 +184,55 @@ in
       };
 
       Install.WantedBy = [ "graphical-session.target" ];
+    };
+
+    systemd.user.services.time-collect = lib.mkIf cfg.collect.enable {
+      Unit.Description = "collect committed output and post it to the time server";
+      Service = {
+        Type = "oneshot";
+        ExecStart = "${cfg.package}/bin/time collect";
+        # Needs `git` for nothing and `gh` for its stored credentials. A user
+        # unit does not inherit the login shell's PATH, so say where to look.
+        Environment = [ "PATH=%h/.nix-profile/bin:/run/current-system/sw/bin" ];
+        Slice = "background.slice";
+        Nice = 15;
+      };
+    };
+
+    systemd.user.timers.time-collect = lib.mkIf cfg.collect.enable {
+      Unit.Description = "nightly output collection";
+      Timer = {
+        OnCalendar = "*-*-* 03:30:00";
+        # A laptop asleep at half three still gets its numbers, late.
+        Persistent = true;
+        RandomizedDelaySec = "20m";
+      };
+      Install.WantedBy = [ "timers.target" ];
+    };
+
+    systemd.user.services.time-agents = lib.mkIf cfg.agents.enable {
+      Unit.Description = "summarise AI agent sessions and post them to the time server";
+      Service = {
+        Type = "oneshot";
+        ExecStart = "${cfg.package}/bin/time agents";
+        Slice = "background.slice";
+        # Transcripts run to gigabytes, so this reads a lot more than the git
+        # collector does. Keep it well out of the way of anything interactive.
+        Nice = 19;
+        IOSchedulingClass = "idle";
+      };
+    };
+
+    systemd.user.timers.time-agents = lib.mkIf cfg.agents.enable {
+      Unit.Description = "nightly agent-session summary";
+      Timer = {
+        # After the git collector rather than alongside it: both walk large
+        # trees and there is nothing to gain from doing it at the same time.
+        OnCalendar = "*-*-* 04:00:00";
+        Persistent = true;
+        RandomizedDelaySec = "20m";
+      };
+      Install.WantedBy = [ "timers.target" ];
     };
   };
 }
