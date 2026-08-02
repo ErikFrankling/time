@@ -9,8 +9,6 @@ on:
 jobs:
   apk:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -23,22 +21,37 @@ jobs:
         with:
           gradle-version: "8.11.1"
 
+      # The signing secrets are read into the environment first: the `secrets`
+      # context is not available in a step-level `if`, so the decision of
+      # whether to sign has to be made inside a script rather than by the
+      # workflow parser. Absent secrets produce an unsigned APK rather than a
+      # failed build, so a fork or a fresh clone still gets something.
       - name: Decode keystore
-        if: ${{ secrets.KEYSTORE_BASE64 != '' }}
-        run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > "$RUNNER_TEMP/release.jks"
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            echo "KEYSTORE_PATH=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+          else
+            echo "no keystore secret; building unsigned"
+          fi
+
+      - name: Test
+        working-directory: android
+        run: gradle --no-daemon testDebugUnitTest
 
       - name: Build
         working-directory: android
         env:
-          # Absent on a fork or before the secret exists; the build then
-          # produces an unsigned APK rather than failing.
-          KEYSTORE_PATH: ${{ secrets.KEYSTORE_BASE64 != '' && format('{0}/release.jks', runner.temp) || '' }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: gradle --no-daemon assembleRelease
+        run: gradle --no-daemon assembleRelease assembleDebug
 
       - uses: actions/upload-artifact@v4
         with:
           name: time-apk
-          path: android/app/build/outputs/apk/release/*.apk
+          path: |
+            android/app/build/outputs/apk/release/*.apk
+            android/app/build/outputs/apk/debug/*.apk
