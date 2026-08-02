@@ -124,7 +124,7 @@ fn default_categories() -> Vec<String> {
 }
 
 fn default_model() -> String {
-    "mimo-v2-omni".into()
+    "qwen3.6-plus".into()
 }
 
 fn default_endpoint() -> String {
@@ -188,7 +188,7 @@ categories = [
   "other",
 ]
 
-model = "mimo-v2-omni"
+model = "qwen3.6-plus"
 endpoint = "https://opencode.ai/zen/go/v1/chat/completions"
 port = 7373
 idle_distance = 3
