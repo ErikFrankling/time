@@ -1,7 +1,7 @@
 use anyhow::Result;
-use std::sync::Arc;
 
-use crate::config::Config;
+
+use crate::config::ServerConfig;
 use crate::db::Db;
 
 /// Categorical slots 1-8 live as `--series-N` custom properties in the CSS
@@ -14,7 +14,7 @@ use crate::db::Db;
 ///
 /// `idle` and `other` are absence-of-activity, not series. Giving them a neutral
 /// keeps the eight real hues for things worth distinguishing.
-fn slot_for(cfg: &Config, category: &str) -> Option<usize> {
+fn slot_for(cfg: &ServerConfig, category: &str) -> Option<usize> {
     if category == "idle" || category == "other" {
         return None;
     }
@@ -25,7 +25,7 @@ fn slot_for(cfg: &Config, category: &str) -> Option<usize> {
         .filter(|i| *i < 8)
 }
 
-fn css_var(cfg: &Config, category: &str) -> String {
+fn css_var(cfg: &ServerConfig, category: &str) -> String {
     match slot_for(cfg, category) {
         Some(i) => format!("var(--series-{})", i + 1),
         None if category == "idle" => "var(--neutral-idle)".into(),
@@ -64,7 +64,7 @@ fn day_bounds(offset: i64) -> (i64, i64) {
 /// Donut. Slices are emitted in config order, never sorted by size, so a
 /// category keeps its colour and its neighbours from one day to the next --
 /// which is also what keeps adjacency on the validated pairlist.
-fn donut(cfg: &Config, totals: &[(String, i64)]) -> String {
+fn donut(cfg: &ServerConfig, totals: &[(String, i64)]) -> String {
     let total: i64 = totals.iter().map(|(_, n)| n).sum();
     if total == 0 {
         return String::new();
@@ -140,7 +140,7 @@ fn donut(cfg: &Config, totals: &[(String, i64)]) -> String {
     )
 }
 
-fn page(cfg: &Config, db: &Db, offset: i64) -> Result<String> {
+pub fn page(cfg: &ServerConfig, db: &Db, offset: i64) -> Result<String> {
     let (from, to) = day_bounds(offset);
     let totals = db.totals(from, to)?;
     let minutes = db.range(from, to)?;
@@ -285,31 +285,4 @@ h2 {{ font-size:13px; text-transform:uppercase; letter-spacing:.07em;
 </main></body></html>"#,
         donut(cfg, &totals)
     ))
-}
-
-pub fn serve(cfg: Arc<Config>) -> Result<()> {
-    let addr = format!("127.0.0.1:{}", cfg.port);
-    let server = tiny_http::Server::http(&addr)
-        .map_err(|e| anyhow::anyhow!("binding {addr}: {e}"))?;
-    println!("ui: http://{addr}");
-
-    for req in server.incoming_requests() {
-        let offset = req
-            .url()
-            .split_once("d=")
-            .and_then(|(_, v)| v.split('&').next())
-            .and_then(|v| v.parse::<i64>().ok())
-            .unwrap_or(0)
-            .clamp(0, 3650);
-
-        let body = Db::open()
-            .and_then(|db| page(&cfg, &db, offset))
-            .unwrap_or_else(|e| format!("<pre>error: {}</pre>", esc(&e.to_string())));
-
-        let header = "Content-Type: text/html; charset=utf-8".parse().unwrap();
-        let _ = req.respond(
-            tiny_http::Response::from_string(body).with_header::<tiny_http::Header>(header),
-        );
-    }
-    Ok(())
 }

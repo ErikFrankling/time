@@ -1,0 +1,169 @@
+# Server deployment for the homelab k3s cluster.
+#
+# The secret is NOT in this file and must never be. Create it out of band:
+#
+#   kubectl -n homelab create secret generic time-secrets \
+#     --from-literal=api-key='<opencode key>' \
+#     --from-literal=ingest-token="$(openssl rand -hex 32)"
+#
+# See README.md for the full walkthrough.
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: time-data
+  namespace: homelab
+  annotations:
+    # The database is the only thing that can't be reconstructed. Keep Flux
+    # (and anything else doing a prune) away from it.
+    kustomize.toolkit.fluxcd.io/prune: disabled
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+  storageClassName: local-path
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: time-config
+  namespace: homelab
+data:
+  config.toml: |
+    # Only the [server] section is read here. Agents keep their own config.
+    [server]
+    categories = [
+      "work_neptune",
+      "work_husk",
+      "work_personal",
+      "kth",
+      "comms",
+      "browsing",
+      "youtube",
+      "twitter",
+      "idle",
+      "other",
+    ]
+    model = "mimo-v2-omni"
+    endpoint = "https://opencode.ai/zen/go/v1/chat/completions"
+    port = 7373
+    idle_distance = 3
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: time
+  namespace: homelab
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: time
+  strategy:
+    # SQLite on a ReadWriteOnce volume: never two writers at once.
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: time
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: time
+          image: ghcr.io/erikfrankling/time:latest
+          imagePullPolicy: Always
+          args: ["server"]
+          env:
+            - name: TIME_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: time-secrets
+                  key: api-key
+            - name: TIME_INGEST_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: time-secrets
+                  key: ingest-token
+            - name: TZ
+              value: Europe/Stockholm
+          ports:
+            - containerPort: 7373
+              name: http
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
+          resources:
+            limits:
+              cpu: "1"
+              memory: 512Mi
+            requests:
+              cpu: 25m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - mountPath: /data
+              name: data
+            - mountPath: /config
+              name: config
+              readOnly: true
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: time-data
+        - name: config
+          configMap:
+            name: time-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: time
+  namespace: homelab
+spec:
+  selector:
+    app.kubernetes.io/name: time
+  ports:
+    - name: http
+      port: 80
+      protocol: TCP
+      targetPort: http
+---
+# lan-only matches the existing middleware used by AdGuard and the Traefik
+# dashboard: reachable from the LAN and the 10.8.0.0/24 VPN, nothing else.
+# This endpoint receives screenshots, so it must never be internet-facing.
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: time
+  namespace: homelab
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - kind: Rule
+      match: Host(`time.erikfrankling.duckdns.org`)
+      middlewares:
+        - name: lan-only
+      services:
+        - name: time
+          port: 80

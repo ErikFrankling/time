@@ -4,16 +4,43 @@ use std::path::PathBuf;
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
-    /// Categories the model must choose from. `other` is appended automatically
-    /// if missing -- without a legal escape hatch the model forces bad fits into
-    /// real categories, which quietly poisons the pie chart.
-    pub categories: Vec<String>,
+    #[serde(default)]
+    pub agent: AgentConfig,
+    #[serde(default)]
+    pub server: ServerConfig,
+}
+
+/// The agent is deliberately dumb: screenshot, active window, POST. It holds no
+/// API key, makes no model calls, and keeps no database. Everything that costs
+/// money or needs a secret lives on the server.
+#[derive(Debug, Deserialize)]
+pub struct AgentConfig {
+    /// Base URL of the server, e.g. "https://time.example.org".
+    #[serde(default = "default_server_url")]
+    pub server: String,
+
+    /// Name this machine reports as.
+    #[serde(default = "default_device")]
+    pub device: String,
+
+    /// Width to downscale screenshots to before sending.
+    #[serde(default = "default_width")]
+    pub width: u32,
 
     /// Window classes/titles that suppress capture entirely (case-insensitive
-    /// substring match). These minutes are recorded, but no screenshot is taken
-    /// and nothing is sent anywhere.
+    /// substring match). Enforced on the client so a blocked screen is never
+    /// encoded, never leaves the machine, and never reaches the server.
     #[serde(default = "default_blocklist")]
     pub blocklist: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ServerConfig {
+    /// Categories the model must choose from. `other` is appended automatically
+    /// if missing -- without a legal escape hatch the model forces bad fits into
+    /// real categories, which quietly poisons the chart.
+    #[serde(default = "default_categories")]
+    pub categories: Vec<String>,
 
     #[serde(default = "default_model")]
     pub model: String,
@@ -21,16 +48,46 @@ pub struct Config {
     #[serde(default = "default_endpoint")]
     pub endpoint: String,
 
-    /// Width to downscale screenshots to before sending. The cost dial.
-    #[serde(default = "default_width")]
-    pub width: u32,
-
     #[serde(default = "default_port")]
     pub port: u16,
 
     /// dHash Hamming distance below which a minute counts as "screen unchanged".
     #[serde(default = "default_idle_distance")]
     pub idle_distance: u32,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            server: default_server_url(),
+            device: default_device(),
+            width: default_width(),
+            blocklist: default_blocklist(),
+        }
+    }
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            categories: default_categories(),
+            model: default_model(),
+            endpoint: default_endpoint(),
+            port: default_port(),
+            idle_distance: default_idle_distance(),
+        }
+    }
+}
+
+fn default_server_url() -> String {
+    "http://127.0.0.1:7373".into()
+}
+
+fn default_device() -> String {
+    std::env::var("HOSTNAME")
+        .ok()
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| "unknown".into())
 }
 
 fn default_blocklist() -> Vec<String> {
@@ -42,6 +99,24 @@ fn default_blocklist() -> Vec<String> {
         "gnome-keyring",
         "polkit",
         "private",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+fn default_categories() -> Vec<String> {
+    [
+        "work_neptune",
+        "work_husk",
+        "work_personal",
+        "kth",
+        "comms",
+        "browsing",
+        "youtube",
+        "twitter",
+        "idle",
+        "other",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -68,7 +143,32 @@ fn default_idle_distance() -> u32 {
     3
 }
 
-pub const DEFAULT_CONFIG: &str = r#"# Categories for the daily chart. Edit freely -- this list is the whole point.
+pub const DEFAULT_CONFIG: &str = r#"# The agent runs on each machine you use. It screenshots, and posts. That's all
+# it does -- no API key, no database, no model calls.
+[agent]
+server = "http://127.0.0.1:7373"
+device = "pc"
+
+# Downscale width before sending. The cost dial.
+width = 1024
+
+# Substring match against the active window class and title. Enforced here, on
+# the client, so a matching screen is never encoded and never leaves the machine.
+blocklist = [
+  "vaultwarden",
+  "bitwarden",
+  "keepass",
+  "signal",
+  "gnome-keyring",
+  "polkit",
+  "private",
+]
+
+# The server runs in the cluster. It holds the API key, calls the model, owns
+# the database, and serves the UI.
+[server]
+
+# Categories for the chart. Edit freely -- this list is the whole point.
 #
 # `idle` and `other` are always available and always render grey; they are
 # absence-of-activity rather than things worth telling apart. Everything else
@@ -88,24 +188,8 @@ categories = [
   "other",
 ]
 
-# Substring match against the active window class and title. Matching windows
-# are never screenshotted and never leave the machine.
-blocklist = [
-  "vaultwarden",
-  "bitwarden",
-  "keepass",
-  "signal",
-  "gnome-keyring",
-  "polkit",
-  "private",
-]
-
 model = "mimo-v2-omni"
 endpoint = "https://opencode.ai/zen/go/v1/chat/completions"
-
-# Downscale width before sending. Lower = cheaper, less legible small text.
-width = 1024
-
 port = 7373
 idle_distance = 3
 "#;
@@ -120,34 +204,35 @@ impl Config {
             std::fs::write(&path, DEFAULT_CONFIG)?;
             eprintln!("wrote default config to {}", path.display());
         }
-        let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("reading {}", path.display()))?;
-        let mut cfg: Config = toml::from_str(&text)
-            .with_context(|| format!("parsing {}", path.display()))?;
+        let text =
+            std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        let mut cfg: Config =
+            toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
 
-        if !cfg.categories.iter().any(|c| c == "other") {
-            cfg.categories.push("other".into());
+        if !cfg.server.categories.iter().any(|c| c == "other") {
+            cfg.server.categories.push("other".into());
         }
         Ok(cfg)
     }
+}
 
-    pub fn api_key(&self) -> Result<String> {
-        // Env var first so it can come from a systemd credential or sops file
-        // without ever being written into the config.
-        if let Ok(k) = std::env::var("TIME_API_KEY") {
-            if !k.trim().is_empty() {
-                return Ok(k.trim().to_string());
-            }
-        }
-        let path = key_path()?;
-        let k = std::fs::read_to_string(&path).with_context(|| {
-            format!(
-                "no API key: set TIME_API_KEY or write it to {}",
-                path.display()
-            )
-        })?;
-        Ok(k.trim().to_string())
-    }
+/// Model API key. Server-side only, and never read from the config file -- it
+/// comes from the environment so it can be a Kubernetes secret.
+pub fn api_key() -> Result<String> {
+    let k = std::env::var("TIME_API_KEY")
+        .context("TIME_API_KEY is not set (on the cluster this comes from the time-secrets secret)")?;
+    let k = k.trim().to_string();
+    anyhow::ensure!(!k.is_empty(), "TIME_API_KEY is empty");
+    Ok(k)
+}
+
+/// Shared token agents present when posting frames. Both sides read it from the
+/// environment; on the agent it can come from a systemd credential.
+pub fn ingest_token() -> Option<String> {
+    std::env::var("TIME_INGEST_TOKEN")
+        .ok()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
 }
 
 fn base_dir(kind: &str) -> Result<PathBuf> {
@@ -156,15 +241,18 @@ fn base_dir(kind: &str) -> Result<PathBuf> {
 }
 
 pub fn config_path() -> Result<PathBuf> {
+    if let Ok(p) = std::env::var("TIME_CONFIG") {
+        return Ok(PathBuf::from(p));
+    }
     Ok(base_dir(".config")?.join("config.toml"))
 }
 
-pub fn key_path() -> Result<PathBuf> {
-    Ok(base_dir(".config")?.join("api-key"))
-}
-
 pub fn data_dir() -> Result<PathBuf> {
-    let dir = base_dir(".local/share")?;
+    // In the cluster this is a mounted PVC; locally it's under $HOME.
+    let dir = match std::env::var("TIME_DATA_DIR") {
+        Ok(d) => PathBuf::from(d),
+        Err(_) => base_dir(".local/share")?,
+    };
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
 }

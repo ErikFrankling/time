@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use base64::Engine;
 use serde::Deserialize;
 
-use crate::config::Config;
+use crate::config::ServerConfig;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Label {
@@ -22,7 +22,7 @@ pub struct Previous<'a> {
     pub detail: Option<&'a str>,
 }
 
-fn system_prompt(cfg: &Config) -> String {
+fn system_prompt(cfg: &ServerConfig) -> String {
     format!(
         "You classify what a software developer is doing, one minute at a time, \
 from a screenshot of their screen.
@@ -53,7 +53,7 @@ Respond with JSON only, no markdown fence:
 }
 
 pub fn classify(
-    cfg: &Config,
+    cfg: &ServerConfig,
     key: &str,
     jpeg: &[u8],
     window: &str,
@@ -117,7 +117,7 @@ pub fn classify(
 
 /// Models wrap JSON in prose or fences often enough that trusting the raw body
 /// is a guaranteed source of intermittent failures. Take the outermost braces.
-fn parse_label(content: &str, cfg: &Config) -> Result<Label> {
+fn parse_label(content: &str, cfg: &ServerConfig) -> Result<Label> {
     let start = content.find('{');
     let end = content.rfind('}');
     let json = match (start, end) {
