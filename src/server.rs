@@ -145,16 +145,36 @@ fn ingest(cfg: &ServerConfig, db: &Mutex<Db>, key: &str, frame: Frame) -> Result
             && no_input
             && capture::hamming(phash, prev.phash as u64) <= cfg.idle_distance
         {
+            // A still screen with nobody touching it for minutes is idle, and
+            // saying so needs no model -- it is a fact, not a judgment.
+            // Without this the last real label propagates forever and an
+            // empty room reads as a full working day.
+            let long_gone = frame
+                .idle_secs
+                .is_some_and(|s| s >= cfg.idle_after_secs);
+
+            let (category, project, detail) = if long_gone || prev.category == "idle" {
+                (
+                    "idle".to_string(),
+                    None,
+                    "screen unchanged, no input".to_string(),
+                )
+            } else {
+                // A short pause is still the same activity -- thinking,
+                // reading a paragraph -- so carry the label.
+                (
+                    prev.category.clone(),
+                    prev.project.clone(),
+                    "screen unchanged".to_string(),
+                )
+            };
+
             let m = Minute {
                 ts: frame.ts,
                 device: frame.device,
-                category: if prev.category == "idle" {
-                    "idle".into()
-                } else {
-                    prev.category.clone()
-                },
-                project: prev.project.clone(),
-                detail: Some("screen unchanged".into()),
+                category,
+                project,
+                detail: Some(detail),
                 window: Some(frame.window),
                 phash: phash as i64,
                 model: None,

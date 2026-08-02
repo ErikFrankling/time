@@ -49,6 +49,7 @@ data:
     endpoint = "https://opencode.ai/zen/go/v1/chat/completions"
     port = 7373
     idle_distance = 3
+    idle_after_secs = 300
 ---
 apiVersion: apps/v1
 kind: Deployment

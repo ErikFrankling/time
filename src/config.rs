@@ -58,6 +58,11 @@ pub struct ServerConfig {
     pub port: u16,
 
     /// dHash Hamming distance below which a minute counts as "screen unchanged".
+    /// Seconds without human input after which an unchanged screen counts as
+    /// idle outright, instead of carrying the previous label forward.
+    #[serde(default = "default_idle_after_secs")]
+    pub idle_after_secs: u32,
+
     #[serde(default = "default_idle_distance")]
     pub idle_distance: u32,
 }
@@ -81,6 +86,7 @@ impl Default for ServerConfig {
             model: default_model(),
             endpoint: default_endpoint(),
             port: default_port(),
+            idle_after_secs: default_idle_after_secs(),
             idle_distance: default_idle_distance(),
         }
     }
@@ -146,6 +152,10 @@ fn default_port() -> u16 {
     7373
 }
 
+fn default_idle_after_secs() -> u32 {
+    300
+}
+
 fn default_idle_distance() -> u32 {
     3
 }
@@ -199,6 +209,10 @@ model = "qwen3.6-plus"
 endpoint = "https://opencode.ai/zen/go/v1/chat/completions"
 port = 7373
 idle_distance = 3
+
+# Seconds without human input after which an unchanged screen is called idle
+# outright rather than inheriting the previous label.
+idle_after_secs = 300
 "#;
 
 impl Config {
