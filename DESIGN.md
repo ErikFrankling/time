@@ -70,9 +70,18 @@ clicking a slice worth doing.
   the Go plan, $0.40/$2.00 per M, 262K context.
 - **Endpoint:** `https://opencode.ai/zen/go/v1/chat/completions`,
   OpenAI-compatible, Bearer auth.
-- **Never fall back to DeepSeek V4 Flash** — it's the one Go model documented as
-  training on submitted data, and this is sending it my screen. Pin the model,
-  fail rather than substitute.
+- **Text model:** `deepseek-v4-flash`, $0.14/$0.28 per M against qwen's
+  $0.50/$3.00. It is text-only, so it serves the batches that carry no
+  screenshot — every phone batch, and anything the sweep picks up after the
+  image is gone. `model_for` routes on the payload, so a batch containing even
+  one image goes to the vision model; a picture of my screen cannot reach a
+  text-only endpoint by accident.
+- **The training rule, corrected.** The model documented as training on
+  submitted data is `deepseek-v4-flash-free`, a separate ID that the Go plan
+  does not offer at all. The paid `deepseek-v4-flash` is zero-retention like the
+  rest of the plan. The old rule here conflated the two and blocked a model that
+  was never the risk. The rule that still holds: **never use a `-free` model
+  ID** — that suffix, not the vendor, is what marks the training exception.
 
 Prompt is roughly: here are the categories, here's the active window, here's what
 you said the previous minute was, here's the screenshot — pick one category,

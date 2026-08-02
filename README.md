@@ -375,10 +375,13 @@ The remaining levers, in order of size:
 - **`agent.width`.** The screenshot is ~85% of a batched minute's input.
   768px instead of 1024px is ~45% fewer image tokens. Not changed by default,
   because nobody has checked yet what it does to label quality.
-- **The model.** `minimax-m3` is the other vision model on the plan at
+- **The vision model.** `minimax-m3` is the other vision model on the plan at
   $0.30/$1.20, so ~63% cheaper than `qwen3.6-plus` on the same tokens. It emits
   `<think>` blocks; the parser now strips those, so it is a one-line config
   change — but again, unverified on real screens.
+- **`server.model_text`**, already there: batches with no screenshot go to
+  `deepseek-v4-flash` at $0.14/$0.28 rather than qwen's $0.50/$3.00 — 3.6x
+  cheaper in, 10.7x cheaper out, on the majority of minutes.
 - **The idle skip**, which is free and already there: a minute whose screen is
   unchanged from the last one is recorded without an API call at all.
 
@@ -404,8 +407,12 @@ about:
 - Browsing is recorded as a host and nothing more. Paths and query strings are
   the half of a URL that leaks, they never leave the agent's memory, and a
   blocklisted domain blocks the whole minute rather than just the domain field.
-- The model is pinned. Notably it is **not** DeepSeek V4 Flash, the one model on
-  the Go plan documented as training on submitted data.
+- Both models are pinned, and no `-free` model ID is used. That suffix is what
+  marks the plan's training exception: `deepseek-v4-flash-free` may use
+  submitted data to improve the model, while the paid `deepseek-v4-flash` this
+  uses for text is zero-retention like the rest of the plan.
+- Only the vision model can ever receive a screenshot. The text model is chosen
+  from the payload, and any batch holding an image routes to the vision model.
 - No screenshot is ever written to disk, on either side. It exists in memory
   between capture and the model call, and that's it.
 - The ingest route is LAN/VPN only.

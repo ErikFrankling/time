@@ -47,6 +47,17 @@ const SWEEP_SECS: i64 = 24 * 3600;
 /// 1953 minutes pending and no process that would ever pick them up.
 const SWEEP_EVERY: Duration = Duration::from_secs(600);
 
+/// How many times a minute may be offered to the model before the sweep leaves
+/// it alone. A minute that comes back unlabelled twice is usually one the model
+/// will never label, and the sweep is otherwise a loop that pays for the same
+/// refusal every ten minutes forever.
+const MAX_ATTEMPTS: u32 = 3;
+
+/// How many pending rows the free package-map pass considers per sweep. Larger
+/// than `CAPACITY` because none of these cost a call -- the bound is only there
+/// to keep one sweep from holding the database lock across the whole history.
+const FREE_PASS: usize = 2000;
+
 /// One minute waiting for a label.
 ///
 /// The JPEG rides along in memory because it is deliberately never written
@@ -248,9 +259,9 @@ pub fn start(cfg: Arc<ServerConfig>, db: Arc<Mutex<Db>>, key: String) -> Arc<Que
     // On its own thread so a slow or large database cannot delay the listener.
     // Being reachable is the whole point of this change.
     {
-        let (db, queue) = (db.clone(), queue.clone());
+        let (cfg, db, queue) = (cfg.clone(), db.clone(), queue.clone());
         std::thread::spawn(move || loop {
-            match sweep(&db, &queue) {
+            match sweep(&cfg, &db, &queue) {
                 Ok(0) => {}
                 Ok(n) => eprintln!("classifier: requeued {n} unlabelled minute(s)"),
                 Err(e) => eprintln!("classifier: sweep: {e:#}"),
@@ -329,16 +340,52 @@ fn collect(cfg: &ServerConfig, queue: &Queue) {
 /// allowance was closed for. Their screenshots are gone, so these are
 /// classified from the window and presence alone, which is the same
 /// information a phone ever sends.
-fn sweep(db: &Mutex<Db>, queue: &Queue) -> Result<usize, anyhow::Error> {
+fn sweep(cfg: &ServerConfig, db: &Mutex<Db>, queue: &Queue) -> Result<usize, anyhow::Error> {
     // A pending row is pending until it is labelled, in-flight ones included,
     // so sweeping over live work would queue every minute twice.
     if !queue.idle() {
         return Ok(0);
     }
+
+    // The free pass first, and over the whole history rather than the model's
+    // window: a phone minute whose package names the activity costs nothing to
+    // resolve, and the rows that predate this shortcut would otherwise sit
+    // pending forever behind a paid call they never needed. On a real database
+    // this was two thirds of everything waiting.
+    let stale = {
+        let db = db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
+        // Deliberately not filtered by attempts: those count failed *calls*,
+        // and a lookup that costs nothing should still rescue a row the model
+        // has already given up on.
+        db.pending_since(0, FREE_PASS, u32::MAX)?
+    };
+    let mut freed = 0;
+    for m in &stale {
+        let Some(window) = m.window.as_deref() else { continue };
+        let Some(cat) = crate::classify::from_package(cfg, window) else { continue };
+        let label = crate::classify::Label {
+            category: cat.clone(),
+            project: None,
+            detail: Some(format!("{window} (by app)")),
+            tags: vec![cat],
+        };
+        let put = db
+            .lock()
+            .map_err(|e| anyhow::anyhow!("db lock: {e}"))
+            .and_then(|db| db.label(&m.device, m.ts, &label, "package-map"));
+        match put {
+            Ok(_) => freed += 1,
+            Err(e) => eprintln!("classifier: package-map {} {}: {e:#}", m.device, m.ts),
+        }
+    }
+    if freed > 0 {
+        eprintln!("classifier: labelled {freed} minute(s) from the package map, no call made");
+    }
+
     let since = chrono::Utc::now().timestamp() - SWEEP_SECS;
     let rows = {
         let db = db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
-        db.pending_since(since, CAPACITY)?
+        db.pending_since(since, CAPACITY, MAX_ATTEMPTS)?
     };
     let n = rows.len();
     for m in rows {
@@ -405,6 +452,18 @@ fn run(cfg: &ServerConfig, db: &Mutex<Db>, key: &str, queue: &Queue, batch: Vec<
                 queue.pause_for(rl.retry_after);
             } else {
                 eprintln!("classify {device} {}..{}: {e:#}", span.0, span.1);
+                // A rate limit is the allowance's fault and these minutes will
+                // succeed later untouched, but any other failure is very often
+                // the batch itself -- an answer that will not parse however
+                // many times it is bought. Count it against the rows.
+                let sent: Vec<i64> = batch.iter().map(|j| j.ts).collect();
+                if let Err(e) = db
+                    .lock()
+                    .map_err(|e| anyhow::anyhow!("db lock: {e}"))
+                    .and_then(|db| db.bump_attempts(&device, &sent))
+                {
+                    eprintln!("classify {device}: recording failed attempts: {e:#}");
+                }
             }
             return;
         }
@@ -414,10 +473,11 @@ fn run(cfg: &ServerConfig, db: &Mutex<Db>, key: &str, queue: &Queue, batch: Vec<
     // size is worth changing needs the endpoint's own count and not an
     // estimate of how many tokens an image is worth.
     eprintln!(
-        "classifier: {device} {}..{} {} minute(s), {} in / {} out ({} in per minute)",
+        "classifier: {device} {}..{} {} minute(s) via {}, {} in / {} out ({} in per minute)",
         span.0,
         span.1,
         batch.len(),
+        usage.model,
         usage.prompt,
         usage.completion,
         usage.prompt / batch.len().max(1) as u64,
@@ -427,6 +487,7 @@ fn run(cfg: &ServerConfig, db: &Mutex<Db>, key: &str, queue: &Queue, batch: Vec<
     // minute out of twenty would otherwise shift every label after it onto
     // the wrong minute, which is worse than leaving them pending.
     let wanted: std::collections::HashSet<i64> = batch.iter().map(|j| j.ts).collect();
+    let mut got = std::collections::HashSet::new();
     let mut stored = 0;
     for (ts, label) in &labels {
         if !wanted.contains(ts) {
@@ -436,18 +497,31 @@ fn run(cfg: &ServerConfig, db: &Mutex<Db>, key: &str, queue: &Queue, batch: Vec<
         let put = db
             .lock()
             .map_err(|e| anyhow::anyhow!("db lock: {e}"))
-            .and_then(|db| db.label(&device, *ts, label, &cfg.model));
+            .and_then(|db| db.label(&device, *ts, label, &usage.model));
         match put {
-            Ok(_) => stored += 1,
+            Ok(_) => {
+                stored += 1;
+                got.insert(*ts);
+            }
             Err(e) => eprintln!("storing label for {device} {ts}: {e:#}"),
         }
     }
     if stored < batch.len() {
-        // Left pending on purpose; the sweep will offer them again.
+        // Left pending on purpose; the sweep will offer them again -- but only
+        // a few times, so a minute this model cannot label stops being a
+        // standing charge.
+        let missed: Vec<i64> = batch.iter().map(|j| j.ts).filter(|ts| !got.contains(ts)).collect();
         eprintln!(
             "classify {device}: {} of {} minute(s) came back unlabelled",
-            batch.len() - stored,
+            missed.len(),
             batch.len()
         );
+        if let Err(e) = db
+            .lock()
+            .map_err(|e| anyhow::anyhow!("db lock: {e}"))
+            .and_then(|db| db.bump_attempts(&device, &missed))
+        {
+            eprintln!("classify {device}: recording failed attempts: {e:#}");
+        }
     }
 }

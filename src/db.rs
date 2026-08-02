@@ -145,6 +145,7 @@ impl Db {
             ("tags", "TEXT"),
             ("domain", "TEXT"),
             ("pending", "INTEGER NOT NULL DEFAULT 0"),
+            ("attempts", "INTEGER NOT NULL DEFAULT 0"),
         ] {
             let exists: bool = conn
                 .prepare("SELECT 1 FROM pragma_table_info('minute') WHERE name = ?1")?
@@ -292,13 +293,40 @@ impl Db {
 
     /// Minutes still owed a label, newest first so a truncated sweep picks up
     /// the ones a person is most likely to be looking at.
-    pub fn pending_since(&self, since: i64, limit: usize) -> Result<Vec<Minute>> {
+    ///
+    /// Rows that have already been offered `max_attempts` times are skipped. A
+    /// minute the model will not label is not rare -- a truncated array, a
+    /// dropped entry, an unparseable answer -- and without this it stays
+    /// pending, gets re-sent every sweep, and is billed again every ten minutes
+    /// for as long as the process runs.
+    pub fn pending_since(
+        &self,
+        since: i64,
+        limit: usize,
+        max_attempts: u32,
+    ) -> Result<Vec<Minute>> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {COLS} FROM minute WHERE pending = 1 AND ts >= ?1 \
-             ORDER BY ts DESC LIMIT ?2"
+             AND attempts < ?3 ORDER BY ts DESC LIMIT ?2"
         ))?;
-        let rows = stmt.query_map(rusqlite::params![since, limit as i64], row_to_minute)?;
+        let rows = stmt.query_map(
+            rusqlite::params![since, limit as i64, max_attempts],
+            row_to_minute,
+        )?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Record that these minutes were sent to the model and did not come back
+    /// with a label. Counted per row rather than per batch: a batch that half
+    /// succeeds should not penalise the half that worked.
+    pub fn bump_attempts(&self, device: &str, timestamps: &[i64]) -> Result<()> {
+        for ts in timestamps {
+            self.conn.execute(
+                "UPDATE minute SET attempts = attempts + 1 WHERE device = ?1 AND ts = ?2",
+                rusqlite::params![device, ts],
+            )?;
+        }
+        Ok(())
     }
 
     pub fn get(&self, device: &str, ts: i64) -> Result<Option<Minute>> {

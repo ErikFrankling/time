@@ -45,7 +45,14 @@ data:
       "idle",
       "other",
     ]
+    # Two models, picked per call by whether the batch carries screenshots.
+    # `model` needs vision and is priced for it; `model_text` serves the phone,
+    # which cannot screenshot itself and reports most of the minutes.
+    #
+    # Never point model_text at a "-free" ID: those are the ones whose data may
+    # be used for training. The paid IDs are zero-retention.
     model = "qwen3.6-plus"
+    model_text = "deepseek-v4-flash"
     endpoint = "https://opencode.ai/zen/go/v1/chat/completions"
     port = 7373
     idle_distance = 3

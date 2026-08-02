@@ -58,6 +58,13 @@ pub struct ServerConfig {
     #[serde(default = "default_model")]
     pub model: String,
 
+    /// Model for batches that carry no screenshot -- a phone, or any minute the
+    /// sweep picks up after its image is gone. Split from `model` because vision
+    /// is the expensive half of the plan and most minutes do not need it: a
+    /// text-only model is a third of the input price and a tenth of the output.
+    #[serde(default = "default_model_text")]
+    pub model_text: String,
+
     #[serde(default = "default_endpoint")]
     pub endpoint: String,
 
@@ -152,6 +159,7 @@ impl Default for ServerConfig {
         Self {
             categories: default_categories(),
             model: default_model(),
+            model_text: default_model_text(),
             endpoint: default_endpoint(),
             port: default_port(),
             idle_after_secs: default_idle_after_secs(),
@@ -269,6 +277,15 @@ fn default_model() -> String {
     "qwen3.6-plus".into()
 }
 
+/// `deepseek-v4-flash` is text-only, so it can never be reached from a batch
+/// carrying a screenshot -- which is what makes it safe to use here at all.
+/// The model documented as training on submitted data is the separate
+/// `deepseek-v4-flash-free` ID, which the Go plan does not offer; the paid one
+/// is zero-retention like the rest of the plan.
+fn default_model_text() -> String {
+    "deepseek-v4-flash".into()
+}
+
 fn default_endpoint() -> String {
     "https://opencode.ai/zen/go/v1/chat/completions".into()
 }
@@ -357,7 +374,15 @@ categories = [
   "other",
 ]
 
+# Two models, chosen per call by whether the batch carries screenshots.
+# `model` must have vision; `model_text` need not, and is much cheaper, which
+# matters because the phone -- which cannot screenshot itself at all -- reports
+# far more minutes than the desktops do.
+#
+# Do not point `model_text` at a "-free" model ID. Those are the ones whose
+# submitted data may be used for training; the paid IDs are zero-retention.
 model = "qwen3.6-plus"
+model_text = "deepseek-v4-flash"
 endpoint = "https://opencode.ai/zen/go/v1/chat/completions"
 port = 7373
 idle_distance = 3

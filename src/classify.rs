@@ -83,6 +83,9 @@ impl std::error::Error for RateLimited {}
 pub struct Usage {
     pub prompt: u64,
     pub completion: u64,
+    /// Which model actually answered. The caller cannot assume `cfg.model` any
+    /// more -- the batch decides -- and the label row records what judged it.
+    pub model: String,
 }
 
 fn system_prompt(cfg: &ServerConfig) -> String {
@@ -240,6 +243,22 @@ fn item_context(item: &Item<'_>, n: usize, total: usize, prev: Option<&Previous<
     context
 }
 
+/// Which model gets this batch.
+///
+/// Vision is what makes the expensive model necessary, so a batch without a
+/// single screenshot -- every phone batch, and everything the sweep picks up
+/// after the image is gone -- goes to the cheap text model instead. Decided
+/// from the payload rather than the device name, so a desktop whose capture
+/// failed is routed correctly too, and so a text-only model can never be sent
+/// a picture of the user's screen by accident.
+fn model_for<'a>(cfg: &'a ServerConfig, items: &[Item<'_>]) -> &'a str {
+    if items.iter().any(|i| i.jpeg.is_some()) {
+        &cfg.model
+    } else {
+        &cfg.model_text
+    }
+}
+
 /// Label a run of minutes from one device, in time order, in a single call.
 ///
 /// One call for twenty minutes instead of twenty calls is not only twenty
@@ -290,8 +309,10 @@ pub fn classify(
         ),
     }));
 
+    let model = model_for(cfg, items);
+
     let body = serde_json::json!({
-        "model": cfg.model,
+        "model": model,
         "temperature": 0,
         // Per minute, plus headroom for a reasoning model's preamble. Too low
         // truncates the array and costs the whole batch, which is far more
@@ -323,7 +344,15 @@ pub fn classify(
         let resp = match sent {
             Ok(r) => r,
             Err(e) => {
+                let timed_out = e.is_timeout();
                 last_err = format!("calling the model endpoint: {e}");
+                // A timeout is not a failed call, only an unheard one: the
+                // endpoint has very likely already generated the answer and
+                // charged for it. Retrying pays a second time for a batch the
+                // sweep will offer again anyway.
+                if timed_out {
+                    break;
+                }
                 continue;
             }
         };
@@ -367,6 +396,7 @@ pub fn classify(
         let usage = Usage {
             prompt: v["usage"]["prompt_tokens"].as_u64().unwrap_or(0),
             completion: v["usage"]["completion_tokens"].as_u64().unwrap_or(0),
+            model: model.to_string(),
         };
         return Ok((parse_labels(content, cfg)?, usage));
     }
@@ -530,6 +560,40 @@ mod tests {
             .unwrap();
         assert_eq!(out[0].1.category, "other");
         assert_eq!(out[0].1.tags, vec!["other".to_string()]);
+    }
+
+    fn item(ts: i64, jpeg: Option<&'static [u8]>) -> Item<'static> {
+        Item {
+            ts,
+            jpeg,
+            window: "w",
+            domain: None,
+            presence: Presence {
+                device: "d",
+                idle_secs: None,
+                keys: 0,
+                mouse: 0,
+                note: None,
+            },
+        }
+    }
+
+    #[test]
+    fn a_batch_without_pictures_goes_to_the_cheap_model() {
+        let cfg = cfg();
+        assert_eq!(model_for(&cfg, &[item(1, None), item(2, None)]), cfg.model_text);
+    }
+
+    /// The safety half of the split: a text-only model must never be handed a
+    /// screenshot, so one image in the batch is enough to route the whole call
+    /// to the vision model.
+    #[test]
+    fn one_picture_sends_the_whole_batch_to_the_vision_model() {
+        let cfg = cfg();
+        assert_eq!(
+            model_for(&cfg, &[item(1, None), item(2, Some(b"jpeg"))]),
+            cfg.model
+        );
     }
 
     #[test]
