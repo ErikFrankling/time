@@ -135,11 +135,14 @@ fn ingest(cfg: &ServerConfig, db: &Mutex<Db>, key: &str, frame: Frame) -> Result
     let phash = capture::dhash(&img);
     drop(img);
 
-    // Unchanged screen means nothing new to classify. Carry the label forward
-    // when the machine was already in use, call it idle otherwise. This skip is
-    // what keeps the model bill sane.
+    // Unchanged screen AND no human input means nothing new to classify. Both
+    // halves matter: a screen can sit still while someone reads, and it can
+    // change constantly with nobody there. Only when neither moved is the
+    // minute genuinely uninteresting enough to skip the model.
+    let no_input = frame.keys == 0 && frame.mouse == 0;
     if let Some(prev) = &last {
         if prev.ts + 60 == frame.ts
+            && no_input
             && capture::hamming(phash, prev.phash as u64) <= cfg.idle_distance
         {
             let m = Minute {
@@ -166,7 +169,14 @@ fn ingest(cfg: &ServerConfig, db: &Mutex<Db>, key: &str, frame: Frame) -> Result
         project: l.project.as_deref(),
         detail: l.detail.as_deref(),
     });
-    let label = classify::classify(cfg, key, &jpeg, &frame.window, prev)?;
+    let presence = classify::Presence {
+        device: &frame.device,
+        idle_secs: frame.idle_secs,
+        keys: frame.keys,
+        mouse: frame.mouse,
+        note: frame.note.as_deref(),
+    };
+    let label = classify::classify(cfg, key, &jpeg, &frame.window, presence, prev)?;
 
     let m = Minute {
         ts: frame.ts,

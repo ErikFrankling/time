@@ -1,15 +1,17 @@
 use anyhow::{Context, Result};
 
 use crate::capture;
+use crate::input;
 use crate::config::{self, AgentConfig};
 use crate::proto::{Frame, FrameAck};
 
 /// Build this minute's frame. The only decision the agent makes on its own is
 /// the blocklist -- and it errs toward sending nothing.
-pub fn build_frame(cfg: &AgentConfig) -> Result<Frame> {
+pub fn build_frame(cfg: &AgentConfig, input: &input::Monitor) -> Result<Frame> {
     let now = chrono::Local::now().timestamp();
     let ts = now - (now % 60);
     let window = capture::active_window();
+    let snap = input.take();
 
     if window.blocked(&cfg.blocklist) {
         return Ok(Frame {
@@ -18,6 +20,10 @@ pub fn build_frame(cfg: &AgentConfig) -> Result<Frame> {
             window: String::new(), // the title itself may be sensitive
             image: None,
             blocked: true,
+            idle_secs: snap.idle_secs,
+            keys: snap.keys,
+            mouse: snap.mouse,
+            note: cfg.note.clone(),
         });
     }
 
@@ -31,6 +37,10 @@ pub fn build_frame(cfg: &AgentConfig) -> Result<Frame> {
         window: window.describe(),
         image: Some(base64_encode(&jpeg)),
         blocked: false,
+        idle_secs: snap.idle_secs,
+        keys: snap.keys,
+        mouse: snap.mouse,
+        note: cfg.note.clone(),
     })
 }
 
@@ -62,9 +72,10 @@ pub fn post(cfg: &AgentConfig, frame: &Frame) -> Result<FrameAck> {
 }
 
 pub fn run(cfg: &AgentConfig) -> Result<()> {
+    let input = input::Monitor::start();
     println!("agent {} -> {}", cfg.device, cfg.server);
     loop {
-        match build_frame(cfg).and_then(|f| post(cfg, &f)) {
+        match build_frame(cfg, &input).and_then(|f| post(cfg, &f)) {
             Ok(ack) => println!(
                 "{} [{}]{} {}",
                 chrono::Local::now().format("%H:%M"),

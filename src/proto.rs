@@ -25,6 +25,24 @@ pub struct Frame {
     /// tell "nothing on screen worth sending" apart from "screenshot failed".
     #[serde(default)]
     pub blocked: bool,
+
+    /// Seconds since the last *human* input event on this machine. None when
+    /// the agent could not read any input device, which the server must treat
+    /// as "unknown" rather than "active" -- silently assuming presence is how
+    /// you end up logging an empty room as work.
+    #[serde(default)]
+    pub idle_secs: Option<u32>,
+
+    /// Human key presses and pointer movements during this minute. Counts only;
+    /// which keys were pressed is never captured.
+    #[serde(default)]
+    pub keys: u32,
+    #[serde(default)]
+    pub mouse: u32,
+
+    /// Free-text note about this machine, passed to the model as context.
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

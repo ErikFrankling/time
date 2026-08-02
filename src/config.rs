@@ -32,6 +32,12 @@ pub struct AgentConfig {
     /// encoded, never leaves the machine, and never reaches the server.
     #[serde(default = "default_blocklist")]
     pub blocklist: Vec<String>,
+
+    /// Free-text note about this machine, handed to the model as context.
+    /// Use it for things the screen alone would mislead on, e.g. that this
+    /// box runs AI computer-use sessions that repaint the screen unattended.
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -63,6 +69,7 @@ impl Default for AgentConfig {
             device: default_device(),
             width: default_width(),
             blocklist: default_blocklist(),
+            note: None,
         }
     }
 }

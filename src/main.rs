@@ -1,5 +1,6 @@
 mod agent;
 mod capture;
+mod input;
 mod classify;
 mod config;
 mod db;
@@ -31,7 +32,12 @@ fn main() -> Result<()> {
         "agent" => agent::run(&cfg.agent),
         "server" => server::run(Arc::new(cfg.server)),
         "once" => {
-            let frame = agent::build_frame(&cfg.agent)?;
+            // Give the input threads a moment to attach before sampling, or a
+            // one-shot run always reports zero keys and looks like an empty
+            // room.
+            let input = input::Monitor::start();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let frame = agent::build_frame(&cfg.agent, &input)?;
             let ack = agent::post(&cfg.agent, &frame)?;
             println!(
                 "[{}]{} {} — {}",
