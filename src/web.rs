@@ -116,9 +116,151 @@ impl Query {
     }
 }
 
+/// Two-ring sunburst: inner ring is what you were mainly doing, outer ring is
+/// what was going on alongside it. Coding for 5h reads as one inner slice; the
+/// 3h of it spent with YouTube on is an outer segment nested inside that slice.
+///
+/// The outer ring is drawn in the *companion's* colour, so YouTube-while-coding
+/// is visibly YouTube. Undivided time keeps the parent colour, dimmed, so a
+/// solid-looking ring means focus and a stripey one means distraction.
+fn sunburst(
+    cfg: &ServerConfig,
+    q: &Query,
+    layers: &[(String, i64, Vec<(Vec<String>, i64)>)],
+) -> String {
+    let total: i64 = layers.iter().map(|(_, n, _)| n).sum();
+    if total == 0 {
+        return String::new();
+    }
+
+    // Inner ring follows config order so a category keeps its colour and its
+    // neighbours day to day, which is what keeps adjacency on the validated
+    // pairlist.
+    let mut ordered: Vec<&(String, i64, Vec<(Vec<String>, i64)>)> = Vec::new();
+    for cat in cfg.categories.iter() {
+        if let Some(l) = layers.iter().find(|(c, _, _)| c == cat) {
+            ordered.push(l);
+        }
+    }
+    for l in layers {
+        if !ordered.iter().any(|o| o.0 == l.0) {
+            ordered.push(l);
+        }
+    }
+
+    let (cx, cy) = (150.0_f64, 150.0_f64);
+    let (r_in, r_mid, r_gap, r_out) = (62.0_f64, 104.0_f64, 107.0_f64, 132.0_f64);
+    let mut inner = String::new();
+    let mut outer = String::new();
+    let mut labels = String::new();
+    let mut angle = -std::f64::consts::FRAC_PI_2;
+
+    let arc = |r0: f64, r1: f64, a0: f64, a1: f64| {
+        let large = if a1 - a0 > std::f64::consts::PI { 1 } else { 0 };
+        let p = |r: f64, a: f64| (cx + r * a.cos(), cy + r * a.sin());
+        let (x0, y0) = p(r1, a0);
+        let (x1, y1) = p(r1, a1);
+        let (x2, y2) = p(r0, a1);
+        let (x3, y3) = p(r0, a0);
+        format!(
+            "M{x0:.2},{y0:.2} A{r1},{r1} 0 {large} 1 {x1:.2},{y1:.2} \
+             L{x2:.2},{y2:.2} A{r0},{r0} 0 {large} 0 {x3:.2},{y3:.2} Z"
+        )
+    };
+
+    for (cat, n, segs) in ordered {
+        let frac = *n as f64 / total as f64;
+        let sweep = (frac * std::f64::consts::TAU).min(std::f64::consts::TAU - 0.001);
+        let gap = if frac > 0.995 { 0.0 } else { 0.016 };
+        let (a0, a1) = (angle + gap / 2.0, angle + sweep - gap / 2.0);
+        let cat_start = angle;
+        angle += sweep;
+        if a1 <= a0 {
+            continue;
+        }
+
+        let selected = q.filter.category.as_deref() == Some(cat.as_str());
+        inner.push_str(&format!(
+            "<a href=\"{}\"><path d=\"{}\" fill=\"{}\" class=\"slice{}\">\
+             <title>{} — {} ({:.0}%) · click to drill in</title></path></a>",
+            esc(&q.toggle("cat", &q.filter.category, cat)),
+            arc(r_in, r_mid, a0, a1),
+            css_var(cfg, cat),
+            if selected { " on" } else { "" },
+            esc(cat),
+            fmt_hm(*n),
+            frac * 100.0
+        ));
+
+        // Outer segments subdivide this slice only, so they always sum to it.
+        let mut sub = cat_start;
+        for (with, sn) in segs {
+            let sfrac = *sn as f64 / total as f64;
+            let ssweep = (sfrac * std::f64::consts::TAU).min(std::f64::consts::TAU - 0.001);
+            let (b0, b1) = (sub + gap / 2.0, sub + ssweep - gap / 2.0);
+            sub += ssweep;
+            if b1 <= b0 {
+                continue;
+            }
+            let (fill, label, op) = if with.is_empty() {
+                (css_var(cfg, cat), "undivided".to_string(), "0.28")
+            } else {
+                (
+                    css_var(cfg, &with[0]),
+                    with.join(" + "),
+                    "1",
+                )
+            };
+            outer.push_str(&format!(
+                "<path d=\"{}\" fill=\"{fill}\" fill-opacity=\"{op}\">\
+                 <title>{} while {} — {} ({:.0}% of {})</title></path>",
+                arc(r_gap, r_out, b0, b1),
+                esc(cat),
+                esc(&label),
+                fmt_hm(*sn),
+                *sn as f64 / *n as f64 * 100.0,
+                esc(cat)
+            ));
+        }
+
+        if frac >= 0.08 {
+            let mid = (a0 + a1) / 2.0;
+            let (lx, ly) = (
+                cx + (r_in + r_mid) / 2.0 * mid.cos(),
+                cy + (r_in + r_mid) / 2.0 * mid.sin(),
+            );
+            labels.push_str(&format!(
+                "<text x=\"{lx:.1}\" y=\"{ly:.1}\" class=\"slice-label\">{:.0}%</text>",
+                frac * 100.0
+            ));
+        }
+    }
+
+    let centre = match &q.filter.category {
+        Some(c) => format!(
+            "<text x=\"150\" y=\"144\" class=\"center-top\">{}</text>\
+             <text x=\"150\" y=\"164\" class=\"center-sub\">{}</text>",
+            fmt_hm(total),
+            esc(c)
+        ),
+        None => format!(
+            "<text x=\"150\" y=\"146\" class=\"center-top\">{}</text>\
+             <text x=\"150\" y=\"166\" class=\"center-sub\">tracked</text>",
+            fmt_hm(total)
+        ),
+    };
+
+    format!(
+        "<svg viewBox=\"0 0 300 300\" role=\"img\" \
+         aria-label=\"Time by category, with concurrent activity\">\
+         {inner}{outer}{labels}{centre}</svg>"
+    )
+}
+
 /// Donut. Slices are emitted in config order, never sorted by size, so a
 /// category keeps its colour and its neighbours from one day to the next --
 /// which is also what keeps adjacency on the validated pairlist.
+#[allow(dead_code)]
 fn donut(cfg: &ServerConfig, q: &Query, totals: &[(String, i64)]) -> String {
     let total: i64 = totals.iter().map(|(_, n)| n).sum();
     if total == 0 {
@@ -380,6 +522,7 @@ pub fn page(cfg: &ServerConfig, db: &Db, q: &Query) -> Result<String> {
     let f = &q.filter;
 
     let cats = db.by_category(from, to, f)?;
+    let layers = db.layered(from, to, f)?;
     let devices = db.by_device(from, to, f)?;
     let apps = db.by_app(from, to, f)?;
     let open = db.open_apps(from, to, f)?;
@@ -578,7 +721,7 @@ h2 {{ font-size:12px; text-transform:uppercase; letter-spacing:.07em;
 
 <h2>Timeline</h2>{timeline}
 </main></body></html>"#,
-        donut = donut(cfg, q, &cats),
+        donut = sunburst(cfg, q, &layers),
         hourly = hourly_chart(cfg, &buckets),
         app_bars = bar_list(q, &apps, total, 12, "app", &f.app, "var(--series-1)"),
         open_bars = bar_list(q, &open, total, 12, "app", &f.app, "var(--series-3)"),

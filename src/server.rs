@@ -117,6 +117,7 @@ fn ingest(cfg: &ServerConfig, db: &Mutex<Db>, key: &str, frame: Frame) -> Result
             workspaces: frame.workspaces,
             classified: false,
             model: None,
+            tags: vec!["other".to_string()],
         };
         db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?.insert(&m)?;
         return Ok(ack(m, false));
@@ -184,6 +185,7 @@ fn ingest(cfg: &ServerConfig, db: &Mutex<Db>, key: &str, frame: Frame) -> Result
                 apps: frame.apps.clone(),
                 workspaces: frame.workspaces,
                 classified: false,
+                tags: prev.tags.clone(),
                 model: None,
             };
             db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?.insert(&m)?;
@@ -219,6 +221,7 @@ fn ingest(cfg: &ServerConfig, db: &Mutex<Db>, key: &str, frame: Frame) -> Result
         apps: frame.apps.clone(),
         workspaces: frame.workspaces,
         classified: true,
+        tags: label.tags.clone(),
         model: Some(cfg.model.clone()),
     };
     db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?.insert(&m)?;

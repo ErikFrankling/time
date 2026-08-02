@@ -21,6 +21,8 @@ pub struct Minute {
     pub apps: Vec<String>,
     pub workspaces: u16,
     pub classified: bool,
+    /// Everything active this minute, including the primary category.
+    pub tags: Vec<String>,
 }
 
 impl Minute {
@@ -92,7 +94,7 @@ fn params<'a>(
 }
 
 const COLS: &str = "ts, device, category, project, detail, window, phash, model, \
-                    keys, mouse, idle_secs, apps, workspaces, classified";
+                    keys, mouse, idle_secs, apps, workspaces, classified, tags";
 
 impl Db {
     pub fn open() -> Result<Self> {
@@ -125,6 +127,7 @@ impl Db {
             ("apps", "TEXT"),
             ("workspaces", "INTEGER NOT NULL DEFAULT 0"),
             ("classified", "INTEGER NOT NULL DEFAULT 0"),
+            ("tags", "TEXT"),
         ] {
             let exists: bool = conn
                 .prepare("SELECT 1 FROM pragma_table_info('minute') WHERE name = ?1")?
@@ -140,8 +143,8 @@ impl Db {
         self.conn.execute(
             "INSERT OR REPLACE INTO minute
                (ts, device, category, project, detail, window, phash, model,
-                keys, mouse, idle_secs, apps, workspaces, classified)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+                keys, mouse, idle_secs, apps, workspaces, classified, tags)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
             rusqlite::params![
                 m.ts,
                 m.device,
@@ -157,6 +160,7 @@ impl Db {
                 serde_json::to_string(&m.apps).unwrap_or_else(|_| "[]".into()),
                 m.workspaces,
                 m.classified as i32,
+                serde_json::to_string(&m.tags).unwrap_or_else(|_| "[]".into()),
             ],
         )?;
         Ok(())
@@ -215,9 +219,17 @@ impl Db {
                     by_ts.insert(m.ts, m);
                 }
                 Some(cur) => {
-                    if beats(&m, cur) {
-                        by_ts.insert(m.ts, m);
-                    }
+                    // Union the tags before choosing a winner: doing
+                    // one thing on each machine is still two things
+                    // happening, even though only one is the primary.
+                    let mut merged = cur.tags.clone();
+                    merged.extend(m.tags.iter().cloned());
+                    merged.sort();
+                    merged.dedup();
+                    let win = beats(&m, cur);
+                    let mut keep = if win { m } else { cur.clone() };
+                    keep.tags = merged;
+                    by_ts.insert(keep.ts, keep);
                 }
             }
         }
@@ -360,6 +372,9 @@ fn row_to_minute(r: &rusqlite::Row) -> rusqlite::Result<Minute> {
             .unwrap_or_default(),
         workspaces: r.get(12).unwrap_or(0),
         classified: r.get::<_, i32>(13).unwrap_or(0) != 0,
+        tags: r.get::<_, Option<String>>(14).ok().flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default(),
     })
 }
 
@@ -376,4 +391,56 @@ fn beats(a: &Minute, b: &Minute) -> bool {
     }
     // Same standing: keep it deterministic so a minute never flickers.
     a.device < b.device
+}
+
+impl Db {
+}
+
+impl Db {
+    /// Two-level breakdown for the sunburst: each primary category, and within
+    /// it what else was going on at the same time.
+    ///
+    /// Each minute lands in exactly one inner slice and exactly one outer
+    /// segment, so the rings line up. A minute with several companions becomes
+    /// one combined segment ("youtube + music") rather than being counted
+    /// twice, which would make the outer ring wider than its parent and the
+    /// chart a lie.
+    pub fn layered(
+        &self,
+        from: i64,
+        to: i64,
+        f: &Filter,
+    ) -> Result<Vec<(String, i64, Vec<(Vec<String>, i64)>)>> {
+        let mut outer: std::collections::HashMap<(String, Vec<String>), i64> = Default::default();
+        let mut totals: std::collections::HashMap<String, i64> = Default::default();
+        for m in self.resolved(from, to, f)? {
+            *totals.entry(m.category.clone()).or_default() += 1;
+            let mut with: Vec<String> =
+                m.tags.iter().filter(|t| **t != m.category).cloned().collect();
+            with.sort();
+            *outer.entry((m.category.clone(), with)).or_default() += 1;
+        }
+
+        let mut cats: Vec<(String, i64)> = totals.into_iter().collect();
+        cats.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+
+        Ok(cats
+            .into_iter()
+            .map(|(cat, total)| {
+                let mut segs: Vec<(Vec<String>, i64)> = outer
+                    .iter()
+                    .filter(|((c, _), _)| *c == cat)
+                    .map(|((_, w), n)| (w.clone(), *n))
+                    .collect();
+                // Undivided time first, then companions by size.
+                segs.sort_by(|a, b| {
+                    a.0.is_empty()
+                        .cmp(&b.0.is_empty())
+                        .reverse()
+                        .then(b.1.cmp(&a.1))
+                });
+                (cat, total, segs)
+            })
+            .collect())
+    }
 }

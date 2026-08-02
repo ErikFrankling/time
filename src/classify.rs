@@ -11,6 +11,11 @@ pub struct Label {
     pub project: Option<String>,
     #[serde(default)]
     pub detail: Option<String>,
+    /// Everything happening this minute, not just the main thing. Coding with
+    /// music on is two tags and one category, which is what makes "how often do
+    /// I work distracted" answerable at all.
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 /// The previous minute's label, passed back into the next call. One string, and
@@ -67,6 +72,22 @@ suggests a person is consuming something, label that, not \"idle\".
 If the idle time is unknown, say so in your reasoning by leaning on the screen \
 and previous label, and be more cautious about claiming active work.
 
+## One minute, several things
+
+People do more than one thing at once. Coding with music playing, writing
+with YouTube on a second monitor, reading docs while a chat window sits open
+and active.
+
+- \"category\" is the ONE thing that best describes the minute -- what they
+would say they were doing. Time is accounted against this, so it must be
+singular.
+- \"tags\" lists EVERYTHING going on, including the category itself. If code
+is being written while a video plays, that is category \"work_personal\" with
+tags [\"work_personal\", \"youtube\"].
+- Only tag what is genuinely active. A minimised window or an idle tab is not
+an activity. Audible media, a visible video, a live chat all count.
+- Tags must come from the same category list. Nothing invented.
+
 ## The other fields
 
 - \"project\" is the repository, course, or topic if you can identify one, else \
@@ -81,7 +102,7 @@ was editing files in the terminal\".
 activity, reuse the same category and project.
 
 Respond with JSON only, no markdown fence:
-{{\"category\": \"...\", \"project\": \"...\" or null, \"detail\": \"...\"}}",
+{{\"category\": \"...\", \"tags\": [\"...\"], \"project\": \"...\" or null, \"detail\": \"...\"}}",
         cfg.categories
             .iter()
             .map(|c| format!("- {c}"))
@@ -192,6 +213,22 @@ fn parse_label(content: &str, cfg: &ServerConfig) -> Result<Label> {
     } else {
         "other".into()
     };
+
+    // Drop invented tags for the same reason as the category: a phantom tag
+    // would show up as real concurrent activity that never happened.
+    label.tags = label
+        .tags
+        .iter()
+        .map(|t| t.trim().to_lowercase())
+        .filter(|t| cfg.categories.iter().any(|c| c.to_lowercase() == *t))
+        .collect();
+    // The category is always part of what was happening, even if the model
+    // omitted it from the list.
+    if !label.tags.contains(&label.category) {
+        label.tags.push(label.category.clone());
+    }
+    label.tags.sort();
+    label.tags.dedup();
 
     label.project = label.project.filter(|s| !s.trim().is_empty());
     label.detail = label.detail.filter(|s| !s.trim().is_empty());
