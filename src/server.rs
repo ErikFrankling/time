@@ -360,6 +360,45 @@ fn ingest(cfg: &ServerConfig, db: &Mutex<Db>, queue: &Queue, frame: Frame) -> Re
     // change constantly with nobody there. Only when neither moved is the
     // minute genuinely uninteresting enough to skip the model.
     let no_input = frame.keys == 0 && frame.mouse == 0;
+
+    // A screenshotless device -- a phone -- has one signal, and if it has not
+    // changed there is nothing a model could add. Half an hour on one app is
+    // thirty identical minutes, and paying for thirty judgements of the same
+    // fact is how a first sync filled the classifier queue and got its work
+    // dropped. Carry the label instead.
+    if jpeg.is_none() && !frame.blocked {
+        if let Some(prev) = &last {
+            if prev.ts + 60 == frame.ts
+                && prev.window.as_deref() == Some(frame.window.as_str())
+                && prev.classified
+            {
+                let m = Minute {
+                    ts: frame.ts,
+                    device: frame.device,
+                    category: prev.category.clone(),
+                    project: prev.project.clone(),
+                    detail: prev.detail.clone(),
+                    window: Some(frame.window),
+                    domain: None,
+                    phash: 0,
+                    keys: frame.keys,
+                    mouse: frame.mouse,
+                    idle_secs: frame.idle_secs,
+                    apps: frame.apps,
+                    workspaces: frame.workspaces,
+                    classified: false,
+                    pending: false,
+                    model: None,
+                    tags: prev.tags.clone(),
+                };
+                db.lock()
+                    .map_err(|e| anyhow::anyhow!("db lock: {e}"))?
+                    .insert(&m)?;
+                return Ok(ack(m, false, false));
+            }
+        }
+    }
+
     if let Some(prev) = &last {
         if prev.ts + 60 == frame.ts
             && no_input

@@ -137,7 +137,12 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             // for a window that no longer exists. Overlap slightly, because
             // recent events can be truncated, and let the server dedupe on
             // (device, ts).
-            val floor = now - 6 * 24 * 3600_000L
+            // A fresh install has no watermark. Backfilling the full six days
+            // the system retains means thousands of minutes and a model call
+            // for each, to reconstruct days nobody asked about. Start shallow;
+            // an existing install keeps its watermark and loses nothing.
+            val floor = if (ctx.watermark == 0L) now - 6 * 3600_000L
+                        else now - 6 * 24 * 3600_000L
             val from = maxOf(ctx.watermark - 120_000L, floor)
 
             val events = Usage.query(ctx, from, now) ?: return Result.retry()
@@ -188,6 +193,20 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
      * which really does have exactly one minute to send.
      */
     private fun post(ctx: Context, frames: List<MinuteFrame>) {
+        // Chunked because the server caps a batch, and a first sync after a
+        // fresh install can hold days of minutes. Sent whole it is rejected,
+        // the watermark never advances, and the next run rebuilds the same
+        // oversized batch -- a deadlock that never resolves itself.
+        //
+        // The watermark moves after each accepted chunk, so an interrupted run
+        // resumes rather than starting the whole backlog again.
+        for (chunk in frames.chunked(CHUNK)) {
+            postChunk(ctx, chunk)
+            with(Prefs) { ctx.watermark = chunk.last().ts * 1000 }
+        }
+    }
+
+    private fun postChunk(ctx: Context, frames: List<MinuteFrame>) {
         with(Prefs) {
             val base = ctx.server.trimEnd('/')
             val body = JSONArray().apply {
@@ -232,6 +251,9 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
     }
 
     companion object {
+        /** Below the server's per-batch cap, with room to spare. */
+        const val CHUNK = 500
+
         const val PERIODIC = "sync"
         const val ONCE = "sync-now"
 
