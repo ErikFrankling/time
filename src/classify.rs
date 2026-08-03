@@ -321,7 +321,7 @@ pub fn classify(
         // 200 left about 6% headroom at a batch of twenty -- and an overrun
         // does not truncate one label, it loses the whole batch. Unused
         // headroom is free: this caps the reply, it does not reserve anything.
-        "max_tokens": 400 * items.len() + 512,
+        "max_tokens": per_minute_budget(model) * items.len() as u32 + 2048,
         "messages": [
             { "role": "system", "content": system_prompt(cfg) },
             { "role": "user", "content": serde_json::Value::Array(content) }
@@ -394,15 +394,39 @@ pub fn classify(
         let v: serde_json::Value = serde_json::from_str(&text).with_context(|| {
             format!("parsing response: {}", text.chars().take(400).collect::<String>())
         })?;
-        let content = v["choices"][0]["message"]["content"]
-            .as_str()
-            .context("no content in model response")?;
+        let msg = &v["choices"][0]["message"];
+        let content = msg["content"].as_str().unwrap_or("");
+        // A reasoning model splits its reply in two, and which half the answer
+        // lands in is the gateway's decision, not ours: normally the JSON is in
+        // `content` and the narration in `reasoning_content`, but a reply that
+        // stops early can leave `content` empty with the whole answer stranded
+        // in the other field. Reading only the first field threw away a batch
+        // whose labels were right there.
+        let reasoning = msg["reasoning_content"].as_str().unwrap_or("");
         let usage = Usage {
             prompt: v["usage"]["prompt_tokens"].as_u64().unwrap_or(0),
             completion: v["usage"]["completion_tokens"].as_u64().unwrap_or(0),
             model: model.to_string(),
         };
-        return Ok((parse_labels(content, cfg)?, usage));
+        match parse_labels(content, cfg) {
+            Ok(rows) => return Ok((rows, usage)),
+            Err(e) => match parse_labels(reasoning, cfg) {
+                Ok(rows) if !rows.is_empty() => return Ok((rows, usage)),
+                // Neither field held an array. Say enough to tell the three
+                // causes apart without ever logging the reply itself, which
+                // describes what was on screen.
+                _ => {
+                    last_err = format!(
+                        "{e} (finish_reason={}, content={}B, reasoning={}B, completion={} tokens)",
+                        v["choices"][0]["finish_reason"].as_str().unwrap_or("?"),
+                        content.len(),
+                        reasoning.len(),
+                        usage.completion,
+                    );
+                    continue;
+                }
+            },
+        }
     }
     bail!("{last_err}");
 }
@@ -430,12 +454,20 @@ fn strip_reasoning(content: &str) -> &str {
 /// is a guaranteed source of intermittent failures. Take the outermost
 /// brackets, and accept a bare object for the batch-of-one case.
 fn parse_labels(content: &str, cfg: &ServerConfig) -> Result<Vec<(i64, Label)>> {
-    let content = strip_reasoning(content);
+    // An unterminated think block strips to nothing. That is right when the
+    // narration ran out of budget mid-sentence, and wrong when a stray "<think"
+    // appears after an array that was already complete -- so only accept the
+    // stripped form if it still has something to parse.
+    let stripped = strip_reasoning(content);
+    let content = if stripped.trim().is_empty() { content } else { stripped };
     let json = match (content.find('['), content.rfind(']')) {
         (Some(s), Some(e)) if e > s => &content[s..=e],
         _ => match (content.find('{'), content.rfind('}')) {
             (Some(s), Some(e)) if e > s => &content[s..=e],
-            _ => bail!("no JSON in model output: {content}"),
+            // Not the reply itself: it describes what was on the user's screen,
+            // and this line goes to a pod log. The caller appends the shape of
+            // the response, which is what actually diagnoses this.
+            _ => bail!("no JSON in model output"),
         },
     };
 
@@ -605,5 +637,28 @@ mod tests {
         let out = parse_labels(r#"{"ts":42,"category":"idle"}"#, &cfg()).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].0, 42);
+    }
+}
+
+/// Output tokens to allow per minute in a batch.
+///
+/// A reasoning model spends its budget thinking before it writes anything, and
+/// that thinking counts against `max_tokens` even though it arrives in a
+/// separate `reasoning_content` field that this code never reads. One minute
+/// fits in a small budget; twenty starve, and the model returns an empty
+/// `content` having spent everything on deliberation -- which reads here as
+/// "no JSON in model output" and loses the whole batch.
+///
+/// The cap reserves nothing and is not billed unless used, so the reasoning
+/// budget is deliberately generous.
+fn per_minute_budget(model: &str) -> u32 {
+    // Named rather than inferred: a model that reasons is a property of the
+    // model, and guessing from the id would silently mis-size a new one.
+    const REASONING: [&str; 3] = ["deepseek", "minimax", "think"];
+    let m = model.to_lowercase();
+    if REASONING.iter().any(|r| m.contains(r)) {
+        1500
+    } else {
+        400
     }
 }
