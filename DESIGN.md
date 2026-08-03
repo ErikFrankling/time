@@ -121,6 +121,26 @@ which sends no image at all, was paying ~925 tokens of system prompt to say
 sixty tokens' worth of "Instagram was in the foreground"; that is where the
 saving actually landed.
 
+**Reasoning is not the place to save money — measured, not assumed.**
+`deepseek-v4-flash` emits ~945 output tokens per minute against qwen's ~204,
+almost all of it reasoning, and output is the larger half of the bill. The
+endpoint honours `reasoning_effort: "none"` (and `thinking: {type: "disabled"}`),
+which halves output tokens with the JSON still complete — so the saving is real
+and available.
+
+It was still rejected. On ten varied minutes, eight labels were identical with
+and without. The two that differed were both `cargo build` running with 65s and
+125s of idle time and zero input: with reasoning, `idle`; without,
+`work_personal`. That is precisely the "what was THE PERSON doing" distinction
+§3 calls the whole job, and getting it wrong inflates the working day with time
+spent away from the desk. The reasoning tokens buy presence judgement, so they
+stay.
+
+(One trap for whoever re-tests this: an example schema written as `{"ts": 0}`
+makes the model return positional indices 0..n instead of carrying the real
+timestamps back. Keep the example a realistic-looking unix timestamp. The first
+run of this experiment "found" a correctness bug that was entirely the probe's.)
+
 The unplanned benefit is quality: the model now sees a run rather than twenty
 unrelated frames, which is the context it needed to tell "reading" from "left
 the room" — the distinction §3 says is the whole job.
