@@ -65,10 +65,13 @@ in
 
     width = lib.mkOption {
       type = lib.types.ints.positive;
-      default = 1024;
+      default = 768;
       description = ''
         Downscale width before sending. This is the cost dial -- larger is
-        more legible to the model and more expensive per minute.
+        more legible to the model and more expensive per minute. It stops
+        buying accuracy well before 1024: 768 and 1024 labelled the same
+        twelve minutes identically over six runs each, so the default sits
+        at the narrow end.
       '';
     };
 

@@ -290,8 +290,13 @@ fn default_endpoint() -> String {
     "https://opencode.ai/zen/go/v1/chat/completions".into()
 }
 
+/// Measured rather than guessed. 768, 896 and 1024 labelled the same twelve
+/// minutes identically over six runs each -- including the minute whose only
+/// evidence of a second activity was a video playing in a window the active
+/// window title never mentions. The wider frame was paying a third more input
+/// tokens for answers that did not change.
 fn default_width() -> u32 {
-    1024
+    768
 }
 
 fn default_port() -> u16 {
@@ -323,8 +328,10 @@ pub const DEFAULT_CONFIG: &str = r#"# The agent runs on each machine you use. It
 server = "http://127.0.0.1:7373"
 device = "pc"
 
-# Downscale width before sending. The cost dial.
-width = 1024
+# Downscale width before sending. The cost dial, and it bottoms out sooner than
+# it looks: 768 and 1024 gave identical labels over six runs of the same twelve
+# minutes, so the wider frame was a third more input tokens for the same answers.
+width = 768
 
 # Substring match against the active window class and title. Enforced here, on
 # the client, so a matching screen is never encoded and never leaves the machine.

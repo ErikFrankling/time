@@ -317,7 +317,11 @@ pub fn classify(
         // Per minute, plus headroom for a reasoning model's preamble. Too low
         // truncates the array and costs the whole batch, which is far more
         // expensive than the few unused tokens this leaves on the table.
-        "max_tokens": 200 * items.len() + 512,
+        // Measured peak is 212 tokens for a minute with a long detail line, so
+        // 200 left about 6% headroom at a batch of twenty -- and an overrun
+        // does not truncate one label, it loses the whole batch. Unused
+        // headroom is free: this caps the reply, it does not reserve anything.
+        "max_tokens": 400 * items.len() + 512,
         "messages": [
             { "role": "system", "content": system_prompt(cfg) },
             { "role": "user", "content": serde_json::Value::Array(content) }
