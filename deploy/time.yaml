@@ -38,7 +38,12 @@ data:
       "work_husk",
       "work_personal",
       "kth",
+      # Messaging: Discord, Signal, Slack, mail. Named for what it is, since
+      # a one-word category nobody chose is a category nobody trusts.
       "comms",
+      # Spotify and anything else playing audio. Without this, listening had
+      # nowhere to land and was being counted as messaging.
+      "music",
       "browsing",
       "youtube",
       "twitter",

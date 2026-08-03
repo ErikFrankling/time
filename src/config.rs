@@ -210,7 +210,7 @@ fn default_phone_categories() -> Vec<String> {
         "com.google.android.gm=comms",
         "com.android.chrome=browsing",
         "org.mozilla=browsing",
-        "com.spotify=other",
+        "com.spotify=music",
         "com.netflix=netflix",
     ]
     .iter()
