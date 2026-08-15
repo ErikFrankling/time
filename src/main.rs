@@ -29,7 +29,7 @@ const USAGE: &str = "time — minute-by-minute activity tracking
                 (--wait-for-browser waits out one extension heartbeat first)
   time collect  read commits, diffs and pull requests, post them to the server
   time agents   read what the coding agents did, post it to the server
-  time reclassify <days> [--device NAME] [--model NAME] [--endpoint URL]
+  time reclassify <days> [--pending] [--device NAME] [--model NAME] [--endpoint URL]
                 [--run-id ID] [--limit N] [--apply]
                 re-judge stored minutes from the kept screenshots; results go
                 to the minute_trial table for comparison unless --apply, which
@@ -178,6 +178,7 @@ fn main() -> Result<()> {
                 let flag = args[i].as_str();
                 match flag {
                     "--apply" => opts.apply = true,
+                    "--pending" => opts.pending_only = true,
                     "--device" | "--model" | "--endpoint" | "--run-id" | "--limit" => {
                         i += 1;
                         let v = args

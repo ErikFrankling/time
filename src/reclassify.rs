@@ -27,6 +27,10 @@ pub struct Opts {
     pub run_id: Option<String>,
     pub apply: bool,
     pub limit: Option<usize>,
+    /// Only rows the classifier never labelled (classified = 0). The cheap
+    /// way to work through an outage backlog without re-buying every good
+    /// label in the window.
+    pub pending_only: bool,
 }
 
 pub fn run(mut cfg: ServerConfig, opts: Opts) -> Result<()> {
@@ -52,7 +56,10 @@ pub fn run(mut cfg: ServerConfig, opts: Opts) -> Result<()> {
     };
     // Everything, idle included: a backtest exists to second-guess old
     // judgments, and "was this really idle" is one of the judgments.
-    let rows = db.range(from, now + 60, &filter)?;
+    let mut rows = db.range(from, now + 60, &filter)?;
+    if opts.pending_only {
+        rows.retain(|m| !m.classified);
+    }
     anyhow::ensure!(
         !rows.is_empty(),
         "no minutes in the last {} day(s)",
