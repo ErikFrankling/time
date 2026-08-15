@@ -75,7 +75,12 @@ pub fn app_of(cfg: &ServerConfig, m: &Minute) -> Option<String> {
     if let Some(t) = m.tags.iter().find(|t| !listed(t)) {
         return Some(t.clone());
     }
-    if let Some(p) = m.project.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+    if let Some(p) = m
+        .project
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    {
         return Some(p.to_lowercase());
     }
     if let Some(a) = m.app() {
@@ -279,11 +284,7 @@ impl Query {
 ///
 /// Every arc carries data-cat/data-app for the inspector panel; the href
 /// underneath is the old category-filter toggle, kept as the no-JS fallback.
-fn sunburst(
-    cfg: &ServerConfig,
-    q: &Query,
-    layers: &[(String, i64, Vec<(String, i64)>)],
-) -> String {
+fn sunburst(cfg: &ServerConfig, q: &Query, layers: &[(String, i64, Vec<(String, i64)>)]) -> String {
     let total: i64 = layers.iter().map(|(_, n, _)| n).sum();
     if total == 0 {
         return String::new();
@@ -1061,6 +1062,7 @@ const PANEL_JS: &str = r#"
       total = document.getElementById('ptotal'), swatch = document.getElementById('pswatch'),
       back = document.getElementById('pback'), closeBtn = document.getElementById('pclose');
   var scope = null; /* {cat, app} — app null = whole category, "" = unattributed */
+  var hideT = 0; /* pending hide from a dismiss; a reopen must cancel it */
 
   function hm(n) { var h = Math.floor(n / 60), m = n % 60;
     return h > 0 ? h + 'h ' + m + 'm' : m + 'm'; }
@@ -1158,12 +1160,16 @@ const PANEL_JS: &str = r#"
   function open(cat, app) {
     scope = { cat: cat, app: app };
     render();
-    if (panel.hidden) {
-      panel.hidden = false; bg.hidden = false;
-      document.body.classList.add('panel-open');
+    clearTimeout(hideT);
+    var entering = panel.hidden;
+    panel.hidden = false; bg.hidden = false;
+    document.body.classList.add('panel-open');
+    if (entering) {
       requestAnimationFrame(function () {
         panel.classList.add('show'); bg.classList.add('show');
       });
+    } else {
+      panel.classList.add('show'); bg.classList.add('show');
     }
     closeBtn.focus();
   }
@@ -1172,7 +1178,7 @@ const PANEL_JS: &str = r#"
     scope = null;
     panel.classList.remove('show'); bg.classList.remove('show');
     document.body.classList.remove('panel-open');
-    setTimeout(function () { panel.hidden = true; bg.hidden = true; }, 190);
+    hideT = setTimeout(function () { panel.hidden = true; bg.hidden = true; }, 190);
   }
 
   document.addEventListener('click', function (e) {
@@ -1550,7 +1556,12 @@ mod tests {
     fn app_of_prefers_the_first_off_list_tag() {
         let cfg = cfg();
         // "comms" and "youtube" are categories; "discord" is the app.
-        let minute = m("comms", &["comms", "discord", "youtube"], Some("time"), None);
+        let minute = m(
+            "comms",
+            &["comms", "discord", "youtube"],
+            Some("time"),
+            None,
+        );
         assert_eq!(app_of(&cfg, &minute).as_deref(), Some("discord"));
 
         // No off-list tag: the project carries the app by prompt convention.

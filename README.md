@@ -276,6 +276,30 @@ the domain is only recorded for minutes where the compositor says a browser
 
 [aw]: https://addons.mozilla.org/firefox/addon/aw-watcher-web/
 
+## Drill-down
+
+The sunburst's outer ring splits every category by **app**: comms is not one
+arc but discord, snapchat and whatsapp as tints of the same hue — the family
+colour still reads at a glance, the tint answers "which one". Tints are picked
+by name hash, so an app keeps its tint from one day to the next.
+
+Clicking any arc — a category or an app segment — opens an inspector panel
+(right-hand drawer on a desktop, bottom sheet on a phone) listing what
+happened in it: contiguous runs with start–end times, duration, device, app,
+the minute's `detail` sentence and its tags. A category panel starts with a
+per-app breakdown; tapping an app narrows to it, `‹` goes back, `✕`, Escape
+or the backdrop closes. The panel works entirely off the day's rows shipped
+with the page — no extra requests. With scripting off, the arcs fall back to
+the old category-filter links.
+
+Which app a minute belongs to is a convention, not a column. In order: the
+first **off-list tag** wins (the prompt asks the model to always tag the
+specific app/service/site as a lowercase word, and for `other` the first tag
+is the invented category); then `project` (comms/streaming/social minutes
+carry the app name there, also by prompt convention); then the window class;
+then the browser domain. Minutes none of those can name render as one dimmed
+"unattributed" segment.
+
 ## Configuration
 
 `~/.config/time/config.toml` has an `[agent]` and a `[server]` section; each
