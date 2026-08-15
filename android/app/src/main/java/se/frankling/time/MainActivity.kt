@@ -1,5 +1,6 @@
 package se.frankling.time
 
+import android.app.usage.UsageStatsManager
 import android.net.Uri
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -16,8 +17,10 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.core.content.IntentCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.work.WorkInfo
@@ -29,10 +32,13 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import se.frankling.time.Prefs.askedBatteryExemption
 import se.frankling.time.Prefs.device
 import se.frankling.time.Prefs.lastAttempt
 import se.frankling.time.Prefs.lastError
 import se.frankling.time.Prefs.lastErrorDetail
+import se.frankling.time.Prefs.lastGapEnd
+import se.frankling.time.Prefs.lastGapStart
 import se.frankling.time.Prefs.lastSync
 import se.frankling.time.Prefs.server
 
@@ -41,9 +47,18 @@ class MainActivity : ComponentActivity() {
     private val askNotifications =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
+    // The hibernation screen is documented as needing startActivityForResult;
+    // the result itself is meaningless, the screen state is re-read on resume.
+    private val hibernationSettings =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Both legs, every open: the worker in case its spec died, the service
+        // in case a force-stop or crash took it down. A foreground activity is
+        // always an allowed start context.
         SyncWorker.schedule(this)
+        SyncService.start(this)
 
         // The update prompt is the only notification this app posts, and the
         // grant is cheap to ask for once at first launch.
@@ -54,10 +69,31 @@ class MainActivity : ComponentActivity() {
             askNotifications.launch(android.Manifest.permission.POST_NOTIFICATIONS)
         }
 
-        // The periodic work has a 30-minute period, so
-        // without this the first half hour after granting access looks exactly
-        // like a broken app.
-        if (lastSync == 0L && Usage.hasAccess(this)) SyncWorker.once(this)
+        // First run: offer the battery exemption straight away rather than as
+        // a button someone has to notice. It is what lets the worker restart
+        // the service from the background and what stops standby-bucket decay.
+        // Once — a declined dialog re-shown on every open is nagware.
+        val pm = getSystemService(PowerManager::class.java)
+        if (pm?.isIgnoringBatteryOptimizations(packageName) == false && !askedBatteryExemption) {
+            askedBatteryExemption = true
+            try {
+                startActivity(
+                    Intent(
+                        Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                        Uri.parse("package:$packageName")
+                    )
+                )
+            } catch (_: Exception) {
+            }
+        }
+
+        // Any stale state — first run, a dead schedule, a week in a drawer —
+        // triggers an immediate catch-up rather than waiting for the periodic.
+        // 35 minutes: one period plus slack, so a healthy schedule never trips
+        // it and anything unhealthy heals the moment the app is opened.
+        if (lastSync < System.currentTimeMillis() - 35 * 60_000L && Usage.hasAccess(this)) {
+            SyncWorker.once(this)
+        }
 
         setContent { MaterialTheme { Screen() } }
     }
@@ -90,6 +126,15 @@ class MainActivity : ComponentActivity() {
         val attempted = remember(key) { lastAttempt }
         val err = remember(key) { lastError }
         val detail = remember(key) { lastErrorDetail }
+        val gapStart = remember(key) { lastGapStart }
+        val gapEnd = remember(key) { lastGapEnd }
+        val bucket = remember(key) {
+            try {
+                getSystemService(UsageStatsManager::class.java)?.appStandbyBucket
+            } catch (_: Exception) {
+                null
+            }
+        }
 
         val running = once.any { it.state == WorkInfo.State.RUNNING } ||
             periodic.any { it.state == WorkInfo.State.RUNNING }
@@ -147,15 +192,31 @@ class MainActivity : ComponentActivity() {
 
             HorizontalDivider()
 
-            SyncStatus(running, granted, synced, attempted, err, detail, nextRun)
+            SyncStatus(running, granted, synced, attempted, err, detail, nextRun, gapStart, gapEnd)
 
-            // Optional, and the single biggest thing available for keeping the
-            // schedule honest. An app opened once a week decays to the RARE
-            // standby bucket, where the whole quota is three job sessions a day
-            // -- so a thirty-minute period quietly becomes eight-hourly. The
-            // exemption pins the app to EXEMPTED, which stops the decay and
-            // lets jobs run through Doze. One dialog, no notification, no
-            // service; strictly a better trade than a foreground service.
+            HorizontalDivider()
+
+            // The states that decide whether background sync actually happens,
+            // all in one place — this is the page that gets read when the
+            // chart has a hole in it.
+            Text("Background health", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "Standby bucket: ${bucketName(bucket)}",
+                style = MaterialTheme.typography.bodyMedium
+            )
+            Text(
+                if (batteryExempt) "Battery exemption: granted"
+                else "Battery exemption: NOT granted",
+                style = MaterialTheme.typography.bodyMedium
+            )
+
+            // The single biggest thing available for keeping the schedule
+            // honest. An app opened once a week decays to the RARE standby
+            // bucket, where the whole quota is three job sessions a day -- so
+            // a thirty-minute period quietly becomes eight-hourly. The
+            // exemption pins the app to EXEMPTED, which stops the decay, lets
+            // jobs run through Doze, and allows the worker to restart the
+            // sync service from the background.
             if (!batteryExempt) {
                 OutlinedButton(
                     onClick = {
@@ -169,11 +230,35 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxWidth()
                 ) { Text("Sync more often (exempt from battery limits)") }
                 Text(
-                    "Optional. Without it Android throttles the sync to roughly three " +
-                        "times a day once the app has gone a couple of days unopened.",
+                    "Without it Android throttles the sync to roughly three " +
+                        "times a day once the app has gone a couple of days unopened, " +
+                        "and the sync service cannot be restarted from the background.",
                     style = MaterialTheme.typography.bodySmall
                 )
             }
+
+            // Hibernation is the slowest of the killers: months unopened and
+            // Android revokes every permission — usage access included — and
+            // force-stops the app. There is no API to read or clear the state
+            // directly, only this settings screen.
+            OutlinedButton(
+                onClick = {
+                    try {
+                        hibernationSettings.launch(
+                            IntentCompat.createManageUnusedAppRestrictionsIntent(
+                                this@MainActivity, packageName
+                            )
+                        )
+                    } catch (_: Exception) {
+                    }
+                },
+                modifier = Modifier.fillMaxWidth()
+            ) { Text("Exempt from app hibernation") }
+            Text(
+                "Turn off “Pause app activity if unused”, or months of " +
+                    "not opening this screen ends with Android revoking usage access.",
+                style = MaterialTheme.typography.bodySmall
+            )
 
             Button(
                 onClick = { SyncWorker.once(this@MainActivity) },
@@ -203,6 +288,32 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /** "2 min ago (Aug 15, 14:02)" — relative first, absolute for the record. */
+    private fun ago(t: Long): String {
+        val full = SimpleDateFormat("MMM d, HH:mm", Locale.getDefault()).format(Date(t))
+        val d = System.currentTimeMillis() - t
+        val rel = when {
+            d < 60_000L -> "just now"
+            d < 3600_000L -> "${d / 60_000} min ago"
+            d < 24 * 3600_000L -> "${d / 3600_000} h ago"
+            else -> "${d / (24 * 3600_000L)} days ago"
+        }
+        return "$rel ($full)"
+    }
+
+    private fun bucketName(bucket: Int?): String = when (bucket) {
+        null -> "unknown"
+        // 5 is STANDBY_BUCKET_EXEMPTED, @SystemApi so no public constant, but
+        // it is what the battery exemption pins the app to and worth naming.
+        5 -> "exempted — never throttled"
+        UsageStatsManager.STANDBY_BUCKET_ACTIVE -> "active"
+        UsageStatsManager.STANDBY_BUCKET_WORKING_SET -> "working set"
+        UsageStatsManager.STANDBY_BUCKET_FREQUENT -> "frequent"
+        UsageStatsManager.STANDBY_BUCKET_RARE -> "rare — jobs throttled to ~3/day"
+        UsageStatsManager.STANDBY_BUCKET_RESTRICTED -> "restricted — jobs ~1/day"
+        else -> "$bucket"
+    }
+
     @Composable
     private fun SyncStatus(
         running: Boolean,
@@ -212,10 +323,21 @@ class MainActivity : ComponentActivity() {
         err: String,
         detail: String,
         nextRun: Long?,
+        gapStart: Long,
+        gapEnd: Long,
     ) {
         val stamp = { t: Long ->
             SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(t))
         }
+        val day = { t: Long ->
+            SimpleDateFormat("MMM d HH:mm", Locale.getDefault()).format(Date(t))
+        }
+
+        // Two hours is four missed periods across both legs — no honest way
+        // to call that anything but broken, and pretending otherwise is how
+        // the last silent week happened.
+        val stale = !running && granted && synced > 0 &&
+            System.currentTimeMillis() - synced > 2 * 3600_000L
 
         val headline = when {
             running -> "Syncing…"
@@ -223,11 +345,16 @@ class MainActivity : ComponentActivity() {
             err.isNotEmpty() -> err
             synced == 0L && attempted == 0L -> "Waiting for the first sync"
             synced == 0L -> "No data reported yet"
-            else -> "Working — last sync ${stamp(synced)}"
+            stale -> "STALLED — last sync ${ago(synced)}"
+            else -> "Working — last sync ${ago(synced)}"
         }
 
         Text("Status", style = MaterialTheme.typography.titleMedium)
-        Text(headline, style = MaterialTheme.typography.bodyLarge)
+        Text(
+            headline,
+            style = MaterialTheme.typography.bodyLarge,
+            color = if (stale) MaterialTheme.colorScheme.error else Color.Unspecified
+        )
 
         // "Last error" with nothing after it reads like a dead end. It is not:
         // WorkManager backs off and tries again on its own, and saying when
@@ -246,10 +373,20 @@ class MainActivity : ComponentActivity() {
             )
         }
         if (attempted > 0 && attempted != synced) {
-            Text("Last attempt ${stamp(attempted)}", style = MaterialTheme.typography.bodySmall)
+            Text("Last attempt ${ago(attempted)}", style = MaterialTheme.typography.bodySmall)
         }
         if (detail.isNotEmpty()) {
             Text(detail, style = MaterialTheme.typography.labelSmall)
+        }
+        // A recorded gap outlives the outage that caused it — the data is gone
+        // for good, so the admission stays until a later gap replaces it.
+        if (gapEnd > 0) {
+            Text(
+                "Lost to event-log expiry: ${day(gapStart)} → ${day(gapEnd)}. " +
+                    "The phone was out of reach longer than Android keeps usage events.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error
+            )
         }
     }
 

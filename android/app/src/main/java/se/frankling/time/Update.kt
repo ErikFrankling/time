@@ -172,7 +172,14 @@ object Update {
         return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
     }
 
-    private fun notify(ctx: Context, available: Available, apk: File) {
+    // Guarded because this sits on the sync path: a notification is decoration,
+    // and no channel/PendingIntent/OEM quirk is allowed to cost a data sync.
+    private fun notify(ctx: Context, available: Available, apk: File) = try {
+        doNotify(ctx, available, apk)
+    } catch (_: Throwable) {
+    }
+
+    private fun doNotify(ctx: Context, available: Available, apk: File) {
         if (Build.VERSION.SDK_INT >= 33 &&
             ctx.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) !=
             PackageManager.PERMISSION_GRANTED

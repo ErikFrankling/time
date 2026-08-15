@@ -34,10 +34,16 @@
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />
 
-    <!-- Deliberately absent: FOREGROUND_SERVICE*, SCHEDULE_EXACT_ALARM.
-         UsageStatsManager is retrospective, so nothing has to be running when
-         the activity happens. That sidesteps the whole Android 14/15/16
-         foreground-service regime and the permanent notification with it. -->
+    <!-- The sync loop lives in a foreground service (SyncService) because
+         WorkManager alone proved mortal: a stopped-state app has its jobs
+         cancelled and nothing left to re-arm them, which cost a week of data.
+         specialUse rather than dataSync — no runtime cap, no ban on
+         BOOT_COMPLETED starts. FOREGROUND_SERVICE would be merged in by
+         WorkManager anyway; declared explicitly so the dependency is visible.
+         Still deliberately absent: SCHEDULE_EXACT_ALARM — nothing here needs
+         to fire at an exact moment, UsageStatsManager is retrospective. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
     <!-- A self-hosted server on the LAN is usually plain HTTP with no
          certificate to speak of, and refusing to talk to it would make the
@@ -73,6 +79,18 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+
+        <!-- The always-on sync leg. specialUse needs its purpose declared as a
+             property; there is no reviewer off-Play, but the declaration is
+             what exempts the service from the dataSync-style runtime caps. -->
+        <service
+            android:name=".SyncService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="continuous personal usage-stats collection posted to the owner's private LAN server" />
+        </service>
 
         <receiver
             android:name=".BootReceiver"

@@ -71,6 +71,24 @@ object Prefs {
     var Context.updateChecked: Long
         get() = get(this).getLong("updateChecked", 0)
         set(v) = get(this).edit().putLong("updateChecked", v).apply()
+
+    /**
+     * The most recent stretch the system event log expired before it could be
+     * read — data that is simply gone, recorded so the settings screen can say
+     * so instead of the chart being silently blank. Zero when none.
+     */
+    var Context.lastGapStart: Long
+        get() = get(this).getLong("lastGapStart", 0)
+        set(v) = get(this).edit().putLong("lastGapStart", v).apply()
+
+    var Context.lastGapEnd: Long
+        get() = get(this).getLong("lastGapEnd", 0)
+        set(v) = get(this).edit().putLong("lastGapEnd", v).apply()
+
+    /** So the battery-exemption dialog is offered once, not on every open. */
+    var Context.askedBatteryExemption: Boolean
+        get() = get(this).getBoolean("askedBatteryExemption", false)
+        set(v) = get(this).edit().putBoolean("askedBatteryExemption", v).apply()
 }
 
 class HttpError(val code: Int) : Exception("HTTP $code")
@@ -114,27 +132,61 @@ fun describe(e: Exception): Pair<String, String> {
     }
 }
 
-class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, params) {
+/**
+ * The sync itself, callable from either scheduler.
+ *
+ * Two independent things run this: the WorkManager periodic (which survives
+ * reboots on its own) and [SyncService]'s loop (which survives the standby
+ * bucket throttling WorkManager). Either alone keeps data flowing; the code
+ * they share lives here so they cannot drift apart.
+ */
+object Sync {
 
-    override suspend fun doWork(): Result {
-        val ctx = applicationContext
+    enum class Outcome { SUCCESS, RETRY, FAILURE }
 
-        // Before the usage-access gate on purpose: a phone that cannot sync is
-        // exactly the one that most needs the build which might fix it.
-        Update.checkAndNotify(ctx)
+    /** Below the server's per-batch cap, with room to spare. */
+    const val CHUNK = 500
 
+    /**
+     * The spool is a read-modify-write file and the watermark a read-modify-
+     * write pref; two legs running at once would lose whichever write landed
+     * second. Both callers are on background threads, so blocking is fine.
+     */
+    private val lock = Any()
+
+    /**
+     * Read the event log, spool the minutes, upload the backlog, then check
+     * for updates. May throw — callers own the catch, because what "crashed"
+     * means differs between a worker (retry) and a service loop (log, wait).
+     */
+    fun performSync(ctx: Context): Outcome = synchronized(lock) {
+        val outcome = syncUsage(ctx)
+        // After the data sync rather than before, so an update-check hiccup —
+        // a slow server, a bad JSON body, a notification quirk — can never
+        // cost a data sync. Guarded for the same reason: it is decoration on
+        // the critical path, not part of it. Still on every run, including
+        // failed ones: a phone that cannot sync is exactly the one that most
+        // needs the build which might fix it.
+        try {
+            Update.checkAndNotify(ctx)
+        } catch (_: Throwable) {
+        }
+        outcome
+    }
+
+    private fun syncUsage(ctx: Context): Outcome {
         with(Prefs) {
             ctx.lastAttempt = System.currentTimeMillis()
 
             if (!Usage.hasAccess(ctx)) {
                 ctx.lastError = "Usage access is not granted, so there is nothing to send."
                 ctx.lastErrorDetail = ""
-                return Result.failure()
+                return Outcome.FAILURE
             }
             // queryEvents returns null before first unlock on credential-
             // encrypted storage. Retry rather than treat it as no data.
             if (ctx.getSystemService(UserManager::class.java)?.isUserUnlocked == false) {
-                return Result.retry()
+                return Outcome.RETRY
             }
 
             val now = System.currentTimeMillis()
@@ -142,15 +194,22 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             // for a window that no longer exists. Overlap slightly, because
             // recent events can be truncated, and let the server dedupe on
             // (device, ts).
-            // A fresh install has no watermark. Backfilling the full six days
+            // A fresh install has no watermark. Backfilling the full week
             // the system retains means thousands of minutes and a model call
             // for each, to reconstruct days nobody asked about. Start shallow;
             // an existing install keeps its watermark and loses nothing.
             val floor = if (ctx.watermark == 0L) now - 6 * 3600_000L
-                        else now - 6 * 24 * 3600_000L
+                        else now - 7 * 24 * 3600_000L
+            // A watermark older than the floor means the event log expired
+            // before it was read: that stretch is unrecoverable. Say so, on
+            // the record, instead of leaving a silent blank on the chart.
+            if (ctx.watermark in 1..<floor) {
+                ctx.lastGapStart = ctx.watermark
+                ctx.lastGapEnd = floor
+            }
             val from = maxOf(ctx.watermark - 120_000L, floor)
 
-            val events = Usage.query(ctx, from, now) ?: return Result.retry()
+            val events = Usage.query(ctx, from, now) ?: return Outcome.RETRY
             val fresh = Usage.frames(ctx, Usage.sessions(Usage.drain(events))).map { frame(ctx, it) }
 
             // Derived minutes go to disk before anything is attempted over the
@@ -167,7 +226,7 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
                 ctx.lastSync = now
                 ctx.lastError = ""
                 ctx.lastErrorDetail = ""
-                return Result.success()
+                return Outcome.SUCCESS
             }
 
             return try {
@@ -175,7 +234,7 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
                 ctx.lastSync = now
                 ctx.lastError = ""
                 ctx.lastErrorDetail = ""
-                Result.success()
+                Outcome.SUCCESS
             } catch (e: Exception) {
                 val (why, detail) = describe(e)
                 ctx.lastError = why
@@ -190,7 +249,7 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
                 // leave the next attempt hours past the point it would have
                 // worked. Nothing is lost by waiting: whatever was not accepted
                 // is still in the spool.
-                if (isUnreachable(e)) Result.success() else Result.retry()
+                if (isUnreachable(e)) Outcome.SUCCESS else Outcome.RETRY
             }
         }
     }
@@ -262,11 +321,44 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             if (code !in 200..299) throw HttpError(code)
         }
     }
+}
+
+class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, params) {
+
+    override suspend fun doWork(): Result {
+        val ctx = applicationContext
+
+        // Watchdog leg: the service dies with a force-stop or a rare crash,
+        // and nothing else would ever restart it. A background FGS start is
+        // allowed here once the battery exemption is granted; without it this
+        // throws inside start(), which swallows it — the worker itself is
+        // then still the thing keeping data flowing.
+        SyncService.start(ctx)
+
+        return try {
+            when (Sync.performSync(ctx)) {
+                Sync.Outcome.SUCCESS -> Result.success()
+                Sync.Outcome.RETRY -> Result.retry()
+                Sync.Outcome.FAILURE -> Result.failure()
+            }
+        } catch (t: Throwable) {
+            // Never let a throwable out of doWork. An uncaught one marks the
+            // unique periodic spec FAILED, and FAILED is forever: the UPDATE
+            // enqueue policy cannot revive a finished spec, so one bad run
+            // would silently end all scheduled syncing until the next app
+            // update. That is precisely the week-long silence this app is
+            // built to make impossible.
+            with(Prefs) {
+                val (why, detail) =
+                    if (t is Exception) describe(t) else "Sync crashed." to t.toString()
+                ctx.lastError = why
+                ctx.lastErrorDetail = detail
+            }
+            Result.retry()
+        }
+    }
 
     companion object {
-        /** Below the server's per-batch cap, with room to spare. */
-        const val CHUNK = 500
-
         const val PERIODIC = "sync"
         const val ONCE = "sync-now"
 
@@ -309,12 +401,28 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
                 .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 10, TimeUnit.MINUTES)
                 .build()
 
-            WorkManager.getInstance(ctx)
+            val wm = WorkManager.getInstance(ctx)
+            // A spec that has finished — FAILED from an old uncaught throwable,
+            // CANCELLED from anything — is a corpse: UPDATE cannot revive it,
+            // and enqueueing against it is a no-op that looks like success.
+            // Clear the corpse first, then enqueue. Async (the future's
+            // listener) because this runs on the main thread at app open and
+            // in the boot receiver; WorkManager serialises its operations, so
+            // the cancel lands before the enqueue.
+            val infos = wm.getWorkInfosForUniqueWork(PERIODIC)
+            infos.addListener({
+                val dead = try {
+                    infos.get().any { it.state.isFinished }
+                } catch (_: Exception) {
+                    false
+                }
+                if (dead) wm.cancelUniqueWork(PERIODIC)
                 // UPDATE, not KEEP: KEEP means a build that changes the period or
                 // the backoff never reaches a phone that already has the app,
                 // which is precisely how a scheduling bug becomes permanent.
                 // UPDATE keeps the existing schedule rather than restarting it.
-                .enqueueUniquePeriodicWork(PERIODIC, ExistingPeriodicWorkPolicy.UPDATE, work)
+                wm.enqueueUniquePeriodicWork(PERIODIC, ExistingPeriodicWorkPolicy.UPDATE, work)
+            }, { it.run() })
         }
     }
 }
