@@ -123,6 +123,20 @@ batching 5 minutes per call — 5× cheaper — at the cost of some complexity.
 not 5. The weekly cap was hit outright, which stopped the user's own coding, so
 this stopped being a cost question and became an availability one.
 
+**Later update: batches are cross-device now.** The collector keeps one global
+bucket instead of one per machine, and a batch is a single (ts, device)
+timeline with simultaneous minutes marked as such, one previous label per
+device at the top, and every reply row carrying `device` as well as `ts`. The
+per-device design protected continuity; the cross-device one buys something
+better — correlation. Input counters say where the hands were, so typing on
+the pc while the phone plays YouTube is one person working with something in
+the background, and a video with zero input on every device is watching or an
+empty room — judgments no single machine's screen can support. For the same
+reason (the model has full authority; deterministic rules that preempt it are
+wrong) the phone package-name-to-category map is gone: it was a rule wearing a
+model's clothes, and the local endpoint removed the cost argument that excused
+it.
+
 Two things the estimate above got wrong. There is **no Batch API** on the Go
 plan — `/v1/batches` and `/v1/files` 404, only `/v1/chat/completions` and
 `/v1/responses` exist — so the obvious 50%-off route is not available. And

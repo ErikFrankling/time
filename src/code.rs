@@ -46,6 +46,107 @@ pub struct CodeDay {
 pub const SOURCE_GIT: &str = "git";
 pub const SOURCE_GITHUB: &str = "github";
 
+/// What a source file looked like last run: (mtime seconds, size in bytes).
+/// Equality is the whole interface -- any difference means "rescan".
+pub type Stamp = (i64, u64);
+
+/// Remembered stamps from the previous run, so a minutely timer does not
+/// re-read a hundred git histories or a gigabyte of transcripts to find that
+/// nothing happened. One JSON file in the data dir, shared shape between
+/// `time collect` and `time agents`.
+///
+/// Keyed by the window length (`days`) as well: a 2-day fingerprint says
+/// nothing about what a 30-day run has already posted, and mixing them would
+/// let a short run's cache suppress a long run's scan.
+///
+/// Correctness rules, in order of importance: anything unreadable or missing
+/// counts as changed; a stamp is only recorded for work that succeeded; and
+/// the caller commits the cache only after the server accepted the rows --
+/// a failed post must be rescanned, not forgotten.
+pub struct ScanCache {
+    path: Option<PathBuf>,
+    key: String,
+    /// section -> path -> stamp, as the previous run left it for this key.
+    old: HashMap<String, HashMap<String, Stamp>>,
+    /// What this run observed, gathered via `observe` and written by `commit`.
+    new: HashMap<String, HashMap<String, Stamp>>,
+    /// The whole file, so other windows' entries survive a commit.
+    disk: HashMap<String, HashMap<String, HashMap<String, Stamp>>>,
+}
+
+impl ScanCache {
+    /// Never errors: a cache that cannot be read is an empty cache, which
+    /// simply means a full rescan.
+    pub fn load(file_name: &str, days: i64) -> Self {
+        Self::load_at(
+            crate::config::data_dir().ok().map(|d| d.join(file_name)),
+            days,
+        )
+    }
+
+    /// Split from `load` so a test can point at a throwaway file instead of
+    /// the real data dir.
+    fn load_at(path: Option<PathBuf>, days: i64) -> Self {
+        let disk: HashMap<String, HashMap<String, HashMap<String, Stamp>>> = path
+            .as_deref()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        let key = days.to_string();
+        let old = disk.get(&key).cloned().unwrap_or_default();
+        Self {
+            path,
+            key,
+            old,
+            new: HashMap::new(),
+            disk,
+        }
+    }
+
+    /// Is this one file exactly as the previous run recorded it?
+    pub fn unchanged(&self, section: &str, path: &str, stamp: Stamp) -> bool {
+        self.old
+            .get(section)
+            .and_then(|s| s.get(path))
+            .is_some_and(|old| *old == stamp)
+    }
+
+    /// Is a whole section's file set identical -- same files, same stamps?
+    /// A file appearing or disappearing counts as a change too.
+    pub fn section_unchanged(&self, section: &str, current: &HashMap<String, Stamp>) -> bool {
+        self.old.get(section).is_some_and(|old| old == current)
+    }
+
+    /// Record what a file looked like, to be believed by the next run.
+    pub fn observe(&mut self, section: &str, path: &str, stamp: Stamp) {
+        self.new
+            .entry(section.to_string())
+            .or_default()
+            .insert(path.to_string(), stamp);
+    }
+
+    pub fn observe_all(&mut self, section: &str, stamps: &HashMap<String, Stamp>) {
+        let s = self.new.entry(section.to_string()).or_default();
+        for (path, stamp) in stamps {
+            s.insert(path.clone(), *stamp);
+        }
+    }
+
+    /// Persist this run's observations. Only call once the results have been
+    /// accepted by the server; failure to write is logged and shrugged off --
+    /// the worst case is a rescan.
+    pub fn commit(mut self) {
+        let Some(path) = self.path.take() else { return };
+        self.disk.insert(self.key, self.new);
+        let write = serde_json::to_vec(&self.disk)
+            .map_err(anyhow::Error::from)
+            .and_then(|json| std::fs::write(&path, json).map_err(Into::into));
+        if let Err(e) = write {
+            eprintln!("scan cache: writing {}: {e:#}", path.display());
+        }
+    }
+}
+
 /// Accumulator keyed the same way the table is, so collectors can just add.
 #[derive(Default)]
 struct Tally(HashMap<(String, String, String), CodeDay>);
@@ -304,7 +405,28 @@ fn scan_repo(
     Ok(())
 }
 
-pub fn scan_git(roots: &[String], authors: &[String], since: i64) -> Result<Vec<CodeDay>> {
+/// Stamp of a repository's `.git`. New commits, index writes and ref updates
+/// all go through lock files created and renamed directly inside `.git`, which
+/// updates the directory's mtime -- so an unchanged stamp is a repository
+/// nobody has committed to. None when unreadable, which the caller must treat
+/// as "changed": when in doubt, rescan.
+fn git_stamp(repo: &Path) -> Option<Stamp> {
+    let md = std::fs::metadata(repo.join(".git")).ok()?;
+    let mtime = md
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs() as i64;
+    Some((mtime, md.len()))
+}
+
+pub fn scan_git(
+    roots: &[String],
+    authors: &[String],
+    since: i64,
+    cache: &mut ScanCache,
+) -> Result<Vec<CodeDay>> {
     let mut repos = Vec::new();
     for root in roots {
         find_repos(&expand(root), 4, &mut repos);
@@ -312,14 +434,60 @@ pub fn scan_git(roots: &[String], authors: &[String], since: i64) -> Result<Vec<
     repos.sort();
     repos.dedup();
 
+    // Clones are grouped by the name they report under: rows are keyed by that
+    // name and commits are de-duplicated across clones, so a name's totals are
+    // only right when all of its clones are scanned together. Whole groups are
+    // skipped or rescanned, never half of one.
+    let mut groups: std::collections::BTreeMap<String, Vec<(PathBuf, Option<Stamp>)>> =
+        Default::default();
+    for path in &repos {
+        let name = match git2::Repository::open(path) {
+            Ok(repo) => repo_name(&repo, path),
+            Err(e) => {
+                eprintln!("git: skipping {}: {e}", path.display());
+                continue;
+            }
+        };
+        // Stamped before scanning, so a commit landing mid-scan reads as a
+        // change next run rather than being silently absorbed.
+        groups
+            .entry(name)
+            .or_default()
+            .push((path.clone(), git_stamp(path)));
+    }
+
     let mut tally = Tally::default();
     let mut seen = HashSet::new();
-    for path in &repos {
-        if let Err(e) = scan_repo(path, authors, since, &mut tally, &mut seen) {
-            eprintln!("git: skipping {}: {e}", path.display());
+    let mut skipped = 0usize;
+    let mut scanned = 0usize;
+    for clones in groups.values() {
+        let untouched = clones.iter().all(|(path, stamp)| {
+            stamp.is_some_and(|s| cache.unchanged("git", &path.display().to_string(), s))
+        });
+        if untouched {
+            skipped += clones.len();
+            for (path, stamp) in clones {
+                if let Some(s) = stamp {
+                    cache.observe("git", &path.display().to_string(), *s);
+                }
+            }
+            continue;
+        }
+        for (path, stamp) in clones {
+            match scan_repo(path, authors, since, &mut tally, &mut seen) {
+                // Only a successful scan earns its stamp; a repository that
+                // errored is retried every run until it stops erroring.
+                Ok(()) => {
+                    scanned += 1;
+                    if let Some(s) = stamp {
+                        cache.observe("git", &path.display().to_string(), *s);
+                    }
+                }
+                Err(e) => eprintln!("git: skipping {}: {e}", path.display()),
+            }
         }
     }
-    eprintln!("git: scanned {} repositories", repos.len());
+    eprintln!("git: scanned {scanned} repositories, skipped {skipped} unchanged");
     Ok(tally.into_rows())
 }
 
@@ -503,11 +671,16 @@ pub fn fetch_github(user: &str, from: i64, to: i64) -> Result<Vec<CodeDay>> {
 // ------------------------------------------------------------------ collect
 
 /// Gather both sources for the last `days` days.
-pub fn collect(cfg: &ServerConfig, days: i64) -> Result<Vec<CodeDay>> {
+///
+/// The returned cache holds what this run observed about the local clones;
+/// the caller commits it only after the server has accepted the rows, so a
+/// failed post is rescanned rather than forgotten.
+pub fn collect(cfg: &ServerConfig, days: i64) -> Result<(Vec<CodeDay>, ScanCache)> {
     let now = chrono::Local::now().timestamp();
     let since = now - days * 86_400;
 
-    let mut rows = scan_git(&cfg.code_roots, &cfg.code_authors, since)?;
+    let mut cache = ScanCache::load("code-scan-cache.json", days);
+    let mut rows = scan_git(&cfg.code_roots, &cfg.code_authors, since, &mut cache)?;
 
     match cfg.github_user.as_deref() {
         Some(user) if !user.is_empty() => match fetch_github(user, since, now) {
@@ -518,7 +691,7 @@ pub fn collect(cfg: &ServerConfig, days: i64) -> Result<Vec<CodeDay>> {
         },
         _ => eprintln!("github: no github_user configured, skipping"),
     }
-    Ok(rows)
+    Ok((rows, cache))
 }
 
 /// Hand a run to the server, the same direction a frame goes: the workstation
@@ -538,4 +711,98 @@ pub fn post(agent: &crate::config::AgentConfig, days: &[CodeDay]) -> Result<Stri
     let body = resp.text().unwrap_or_default();
     anyhow::ensure!(status.is_success(), "server returned {status}: {body}");
     Ok(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "time-scan-cache-{name}-{}.json",
+            std::process::id()
+        ))
+    }
+
+    /// The whole skip contract in one place: nothing is trusted until it was
+    /// observed and committed, equality of the full stamp is required, and a
+    /// different window (`days`) never borrows another window's cache.
+    #[test]
+    fn scan_cache_skips_only_what_the_last_run_saw_unchanged() {
+        let path = tmp("skip");
+        let _ = std::fs::remove_file(&path);
+
+        let mut c = ScanCache::load_at(Some(path.clone()), 2);
+        assert!(!c.unchanged("git", "/r/a", (100, 5)), "empty cache: rescan");
+        c.observe("git", "/r/a", (100, 5));
+        c.observe("git", "/r/b", (200, 7));
+        c.commit();
+
+        let c = ScanCache::load_at(Some(path.clone()), 2);
+        assert!(c.unchanged("git", "/r/a", (100, 5)));
+        assert!(!c.unchanged("git", "/r/a", (101, 5)), "mtime moved: rescan");
+        assert!(!c.unchanged("git", "/r/a", (100, 6)), "size moved: rescan");
+        assert!(!c.unchanged("claude", "/r/a", (100, 5)), "wrong section");
+        // The window length is part of the key: a 2-day fingerprint says
+        // nothing about what a 30-day run has posted.
+        let other = ScanCache::load_at(Some(path.clone()), 30);
+        assert!(!other.unchanged("git", "/r/a", (100, 5)));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A section only skips when the file *set* is identical too: a new file,
+    /// a vanished file or a moved stamp all force a rescan.
+    #[test]
+    fn a_section_skips_only_an_identical_file_set() {
+        let path = tmp("section");
+        let _ = std::fs::remove_file(&path);
+
+        let mut fp: HashMap<String, Stamp> = HashMap::new();
+        fp.insert("/t/a.jsonl".into(), (100, 10));
+        fp.insert("/t/b.jsonl".into(), (200, 20));
+
+        let mut c = ScanCache::load_at(Some(path.clone()), 2);
+        assert!(!c.section_unchanged("claude", &fp), "first run scans");
+        c.observe_all("claude", &fp);
+        c.commit();
+
+        let c = ScanCache::load_at(Some(path.clone()), 2);
+        assert!(c.section_unchanged("claude", &fp));
+        let mut grown = fp.clone();
+        grown.insert("/t/c.jsonl".into(), (300, 30));
+        assert!(!c.section_unchanged("claude", &grown), "new file: rescan");
+        let mut shrunk = fp.clone();
+        shrunk.remove("/t/b.jsonl");
+        assert!(!c.section_unchanged("claude", &shrunk), "gone file: rescan");
+        let mut touched = fp.clone();
+        touched.insert("/t/a.jsonl".into(), (100, 11));
+        assert!(
+            !c.section_unchanged("claude", &touched),
+            "grown file: rescan"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Committing one window's observations must not erase another's.
+    #[test]
+    fn commit_keeps_other_windows_entries() {
+        let path = tmp("windows");
+        let _ = std::fs::remove_file(&path);
+
+        let mut two = ScanCache::load_at(Some(path.clone()), 2);
+        two.observe("git", "/r/a", (1, 1));
+        two.commit();
+        let mut thirty = ScanCache::load_at(Some(path.clone()), 30);
+        thirty.observe("git", "/r/a", (2, 2));
+        thirty.commit();
+
+        let two = ScanCache::load_at(Some(path.clone()), 2);
+        assert!(two.unchanged("git", "/r/a", (1, 1)), "2-day entry survived");
+        let thirty = ScanCache::load_at(Some(path.clone()), 30);
+        assert!(thirty.unchanged("git", "/r/a", (2, 2)));
+
+        let _ = std::fs::remove_file(&path);
+    }
 }

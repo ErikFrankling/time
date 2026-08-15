@@ -53,11 +53,6 @@ const SWEEP_EVERY: Duration = Duration::from_secs(600);
 /// refusal every ten minutes forever.
 const MAX_ATTEMPTS: u32 = 3;
 
-/// How many pending rows the free package-map pass considers per sweep. Larger
-/// than `CAPACITY` because none of these cost a call -- the bound is only there
-/// to keep one sweep from holding the database lock across the whole history.
-const FREE_PASS: usize = 2000;
-
 /// One minute waiting for a label.
 ///
 /// The JPEG rides along in memory because that is faster than re-reading the
@@ -259,9 +254,9 @@ pub fn start(cfg: Arc<ServerConfig>, db: Arc<Mutex<Db>>, key: Option<String>) ->
     // On its own thread so a slow or large database cannot delay the listener.
     // Being reachable is the whole point of this change.
     {
-        let (cfg, db, queue) = (cfg.clone(), db.clone(), queue.clone());
+        let (db, queue) = (db.clone(), queue.clone());
         std::thread::spawn(move || loop {
-            match sweep(&cfg, &db, &queue) {
+            match sweep(&db, &queue) {
                 Ok(0) => {}
                 Ok(n) => eprintln!("classifier: requeued {n} unlabelled minute(s)"),
                 Err(e) => eprintln!("classifier: sweep: {e:#}"),
@@ -281,7 +276,7 @@ impl Drop for Release<'_> {
     }
 }
 
-/// Gather single minutes into runs worth one call.
+/// Gather single minutes into one cross-device run worth one call.
 ///
 /// Devices report a minute at a time, so waiting is the only way a batch ever
 /// forms: without a linger the queue holds exactly one job and nothing is
@@ -290,16 +285,18 @@ impl Drop for Release<'_> {
 /// with the previous label carried forward, so the chart is approximately
 /// right in the meantime and exactly right once the batch lands.
 ///
-/// Runs are kept per device. Minutes are labelled with their neighbours as
-/// context, and interleaving two machines' screens would destroy exactly the
-/// continuity that context is for.
+/// The bucket is global, deliberately. The model reasons about the person,
+/// not a machine, and only a batch that shows every device in one timeline
+/// lets it tell "typing here while a video plays there" from two independent
+/// activities. Per-device continuity survives interleaving because every item
+/// names its device and each device's previous label rides along.
 fn collect(cfg: &ServerConfig, queue: &Queue) {
     let size = cfg.batch_minutes.max(1);
     let linger = Duration::from_secs(cfg.batch_wait_secs.max(1));
-    let mut open: HashMap<String, (Instant, Vec<Job>)> = HashMap::new();
+    let mut open = Bucket::default();
 
     loop {
-        // `jobs` is bounded, but buckets and closed batches are not, so with
+        // `jobs` is bounded, but the bucket and closed batches are not, so with
         // the workers stood down for an hour this loop would happily move an
         // unbounded number of JPEGs out of the bounded queue and into memory.
         // Stop drawing once as much is held as the queue itself would hold;
@@ -309,29 +306,50 @@ fn collect(cfg: &ServerConfig, queue: &Queue) {
             continue;
         }
 
-        // Short enough that a bucket flushes close to its deadline rather than
-        // whenever the next frame happens to arrive.
+        // Short enough that the bucket flushes close to its deadline rather
+        // than whenever the next frame happens to arrive.
         if let Some(job) = queue.pop_timeout(Duration::from_secs(5)) {
-            let bucket = open
-                .entry(job.device.clone())
-                .or_insert_with(|| (Instant::now(), Vec::new()));
-            bucket.1.push(job);
+            open.push(job, Instant::now());
         }
 
-        let ready: Vec<String> = open
-            .iter()
-            .filter(|(_, (since, jobs))| jobs.len() >= size || since.elapsed() >= linger)
-            .map(|(device, _)| device.clone())
-            .collect();
-
-        for device in ready {
-            if let Some((_, mut jobs)) = open.remove(&device) {
-                // The model is told these are consecutive; a phone catching up
-                // on a week can deliver them in any order.
-                jobs.sort_by_key(|j| j.ts);
-                queue.put_batch(jobs);
-            }
+        if open.ready(size, linger, Instant::now()) {
+            queue.put_batch(open.close());
         }
+    }
+}
+
+/// The one open batch: every device's minutes, waiting for company.
+#[derive(Default)]
+struct Bucket {
+    /// When the oldest item still in the bucket arrived.
+    since: Option<Instant>,
+    jobs: Vec<Job>,
+}
+
+impl Bucket {
+    fn push(&mut self, job: Job, now: Instant) {
+        if self.jobs.is_empty() {
+            self.since = Some(now);
+        }
+        self.jobs.push(job);
+    }
+
+    /// A batch closes once it is full, or once its oldest item has waited out
+    /// the linger -- whichever comes first.
+    fn ready(&self, size: usize, linger: Duration, now: Instant) -> bool {
+        !self.jobs.is_empty()
+            && (self.jobs.len() >= size
+                || self.since.is_some_and(|s| now.duration_since(s) >= linger))
+    }
+
+    /// Take the batch, sorted by (ts, device) so the prompt reads as a single
+    /// timeline with simultaneous minutes adjacent -- a phone catching up on a
+    /// week can deliver its jobs in any order.
+    fn close(&mut self) -> Vec<Job> {
+        self.since = None;
+        let mut jobs = std::mem::take(&mut self.jobs);
+        jobs.sort_by(|a, b| (a.ts, &a.device).cmp(&(b.ts, &b.device)));
+        jobs
     }
 }
 
@@ -341,50 +359,11 @@ fn collect(cfg: &ServerConfig, queue: &Queue) {
 /// a re-queued minute is re-read from disk and classified with the same pixels
 /// the first attempt had; rows without a file -- phones, and history from
 /// before frames were kept -- fall back to window and presence alone.
-fn sweep(cfg: &ServerConfig, db: &Mutex<Db>, queue: &Queue) -> Result<usize, anyhow::Error> {
+fn sweep(db: &Mutex<Db>, queue: &Queue) -> Result<usize, anyhow::Error> {
     // A pending row is pending until it is labelled, in-flight ones included,
     // so sweeping over live work would queue every minute twice.
     if !queue.idle() {
         return Ok(0);
-    }
-
-    // The free pass first, and over the whole history rather than the model's
-    // window: a phone minute whose package names the activity costs nothing to
-    // resolve, and the rows that predate this shortcut would otherwise sit
-    // pending forever behind a paid call they never needed. On a real database
-    // this was two thirds of everything waiting.
-    let stale = {
-        let db = db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
-        // Deliberately not filtered by attempts: those count failed *calls*,
-        // and a lookup that costs nothing should still rescue a row the model
-        // has already given up on.
-        db.pending_since(0, FREE_PASS, u32::MAX)?
-    };
-    let mut freed = 0;
-    for m in &stale {
-        let Some(window) = m.window.as_deref() else {
-            continue;
-        };
-        let Some(cat) = crate::classify::from_package(cfg, window) else {
-            continue;
-        };
-        let label = crate::classify::Label {
-            category: cat.clone(),
-            project: None,
-            detail: Some(format!("{window} (by app)")),
-            tags: vec![cat],
-        };
-        let put = db
-            .lock()
-            .map_err(|e| anyhow::anyhow!("db lock: {e}"))
-            .and_then(|db| db.label(&m.device, m.ts, &label, "package-map"));
-        match put {
-            Ok(_) => freed += 1,
-            Err(e) => eprintln!("classifier: package-map {} {}: {e:#}", m.device, m.ts),
-        }
-    }
-    if freed > 0 {
-        eprintln!("classifier: labelled {freed} minute(s) from the package map, no call made");
     }
 
     let since = chrono::Utc::now().timestamp() - SWEEP_SECS;
@@ -424,14 +403,34 @@ fn run(cfg: &ServerConfig, db: &Mutex<Db>, key: Option<&str>, queue: &Queue, bat
     let _done = Release(queue, batch.len());
 
     let Some(first) = batch.first() else { return };
-    let device = first.device.clone();
+    // A batch spans devices now; the audit row and the logs name all of them.
+    let device = {
+        let mut d: Vec<&str> = batch.iter().map(|j| j.device.as_str()).collect();
+        d.sort();
+        d.dedup();
+        d.join(",")
+    };
     let span = (first.ts, batch[batch.len() - 1].ts);
 
-    let prev = first.prev.as_ref().map(|p| classify::Previous {
-        category: &p.category,
-        project: p.project.as_deref(),
-        detail: p.detail.as_deref(),
-    });
+    // One previous label per device: from that device's earliest job that
+    // carries one, captured at its ingest -- i.e. the most recent labelled
+    // minute of that device before this batch.
+    let mut prev: Vec<(&str, classify::Previous)> = Vec::new();
+    for job in &batch {
+        if prev.iter().any(|(d, _)| *d == job.device.as_str()) {
+            continue;
+        }
+        if let Some(p) = job.prev.as_ref() {
+            prev.push((
+                job.device.as_str(),
+                classify::Previous {
+                    category: &p.category,
+                    project: p.project.as_deref(),
+                    detail: p.detail.as_deref(),
+                },
+            ));
+        }
+    }
     let items: Vec<classify::Item<'_>> = batch
         .iter()
         .map(|job| classify::Item {
@@ -460,7 +459,7 @@ fn run(cfg: &ServerConfig, db: &Mutex<Db>, key: Option<&str>, queue: &Queue, bat
             eprintln!("classify {}: recording llm_call: {e:#}", call.device);
         }
     };
-    let (labels, usage, raw) = match classify::classify(cfg, key, &items, prev) {
+    let (labels, usage, raw) = match classify::classify(cfg, key, &items, &prev) {
         Ok(v) => v,
         Err(e) => {
             // A weekly cap is not a transient failure. Hammering it burns
@@ -480,13 +479,18 @@ fn run(cfg: &ServerConfig, db: &Mutex<Db>, key: Option<&str>, queue: &Queue, bat
                 // succeed later untouched, but any other failure is very often
                 // the batch itself -- an answer that will not parse however
                 // many times it is bought. Count it against the rows.
-                let sent: Vec<i64> = batch.iter().map(|j| j.ts).collect();
-                if let Err(e) = db
-                    .lock()
-                    .map_err(|e| anyhow::anyhow!("db lock: {e}"))
-                    .and_then(|db| db.bump_attempts(&device, &sent))
-                {
-                    eprintln!("classify {device}: recording failed attempts: {e:#}");
+                let mut sent: HashMap<&str, Vec<i64>> = HashMap::new();
+                for j in &batch {
+                    sent.entry(j.device.as_str()).or_default().push(j.ts);
+                }
+                for (dev, ts) in &sent {
+                    if let Err(e) = db
+                        .lock()
+                        .map_err(|e| anyhow::anyhow!("db lock: {e}"))
+                        .and_then(|db| db.bump_attempts(dev, ts))
+                    {
+                        eprintln!("classify {dev}: recording failed attempts: {e:#}");
+                    }
                 }
                 // The final failure is part of the audit trail too: a backtest
                 // needs to know these minutes were bought and lost, not
@@ -535,49 +539,120 @@ fn run(cfg: &ServerConfig, db: &Mutex<Db>, key: Option<&str>, queue: &Queue, bat
         usage.prompt / batch.len().max(1) as u64,
     );
 
-    // Labels are matched by ts, never by position: a model that drops one
-    // minute out of twenty would otherwise shift every label after it onto
-    // the wrong minute, which is worse than leaving them pending.
-    let wanted: std::collections::HashSet<i64> = batch.iter().map(|j| j.ts).collect();
+    // Labels are matched by (device, ts), never by position: a model that
+    // drops one minute out of twenty would otherwise shift every label after
+    // it onto the wrong minute, which is worse than leaving them pending.
+    let wanted: std::collections::HashSet<(&str, i64)> =
+        batch.iter().map(|j| (j.device.as_str(), j.ts)).collect();
     let mut got = std::collections::HashSet::new();
     let mut stored = 0;
-    for (ts, label) in &labels {
-        if !wanted.contains(ts) {
-            eprintln!("classify {device}: model returned an unasked-for minute {ts}, ignoring");
+    for ((dev, ts), label) in &labels {
+        if !wanted.contains(&(dev.as_str(), *ts)) {
+            eprintln!(
+                "classify {device}: model returned an unasked-for minute {dev} {ts}, ignoring"
+            );
             continue;
         }
         let put = db
             .lock()
             .map_err(|e| anyhow::anyhow!("db lock: {e}"))
-            .and_then(|db| db.label(&device, *ts, label, &usage.model));
+            .and_then(|db| db.label(dev, *ts, label, &usage.model));
         match put {
             Ok(_) => {
                 stored += 1;
-                got.insert(*ts);
+                got.insert((dev.as_str(), *ts));
             }
-            Err(e) => eprintln!("storing label for {device} {ts}: {e:#}"),
+            Err(e) => eprintln!("storing label for {dev} {ts}: {e:#}"),
         }
     }
     if stored < batch.len() {
         // Left pending on purpose; the sweep will offer them again -- but only
         // a few times, so a minute this model cannot label stops being a
         // standing charge.
-        let missed: Vec<i64> = batch
-            .iter()
-            .map(|j| j.ts)
-            .filter(|ts| !got.contains(ts))
-            .collect();
+        let mut missed: HashMap<&str, Vec<i64>> = HashMap::new();
+        for j in &batch {
+            if !got.contains(&(j.device.as_str(), j.ts)) {
+                missed.entry(j.device.as_str()).or_default().push(j.ts);
+            }
+        }
         eprintln!(
             "classify {device}: {} of {} minute(s) came back unlabelled",
-            missed.len(),
+            batch.len() - stored,
             batch.len()
         );
-        if let Err(e) = db
-            .lock()
-            .map_err(|e| anyhow::anyhow!("db lock: {e}"))
-            .and_then(|db| db.bump_attempts(&device, &missed))
-        {
-            eprintln!("classify {device}: recording failed attempts: {e:#}");
+        for (dev, ts) in &missed {
+            if let Err(e) = db
+                .lock()
+                .map_err(|e| anyhow::anyhow!("db lock: {e}"))
+                .and_then(|db| db.bump_attempts(dev, ts))
+            {
+                eprintln!("classify {dev}: recording failed attempts: {e:#}");
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn job(device: &str, ts: i64) -> Job {
+        Job {
+            ts,
+            device: device.into(),
+            window: String::new(),
+            domain: None,
+            jpeg: None,
+            idle_secs: None,
+            keys: 0,
+            mouse: 0,
+            note: None,
+            prev: None,
+        }
+    }
+
+    /// The bucket is global: minutes from any mix of devices count towards
+    /// one batch, and closing sorts them into a single (ts, device) timeline
+    /// so simultaneous minutes sit next to each other.
+    #[test]
+    fn a_bucket_closes_on_size_across_devices() {
+        let mut b = Bucket::default();
+        let now = Instant::now();
+        let linger = Duration::from_secs(600);
+        b.push(job("pc", 120), now);
+        b.push(job("phone", 60), now);
+        assert!(!b.ready(3, linger, now));
+        b.push(job("laptop", 120), now);
+        assert!(b.ready(3, linger, now));
+
+        let order: Vec<(i64, String)> = b.close().into_iter().map(|j| (j.ts, j.device)).collect();
+        assert_eq!(
+            order,
+            [
+                (60, "phone".to_string()),
+                (120, "laptop".to_string()),
+                (120, "pc".to_string()),
+            ]
+        );
+        assert!(b.jobs.is_empty() && b.since.is_none());
+    }
+
+    /// The linger runs from the oldest item still waiting, not from the most
+    /// recent arrival -- otherwise a steady trickle would postpone the batch
+    /// forever -- and an empty bucket never fires at all.
+    #[test]
+    fn a_bucket_closes_when_the_oldest_item_has_waited_out_the_linger() {
+        let mut b = Bucket::default();
+        let now = Instant::now();
+        let linger = Duration::from_secs(600);
+        assert!(!b.ready(20, linger, now + linger * 2), "empty never fires");
+
+        b.push(job("pc", 60), now);
+        b.push(job("pc", 120), now + linger / 2);
+        assert!(!b.ready(20, linger, now + linger / 2));
+        assert!(b.ready(20, linger, now + linger));
+
+        b.close();
+        assert!(!b.ready(20, linger, now + linger * 2), "closing resets it");
     }
 }

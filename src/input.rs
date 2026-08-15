@@ -71,8 +71,8 @@ impl Monitor {
 
             let events = device.supported_events();
             let has_keys = events.contains(evdev::EventType::KEY);
-            let has_motion =
-                events.contains(evdev::EventType::RELATIVE) || events.contains(evdev::EventType::ABSOLUTE);
+            let has_motion = events.contains(evdev::EventType::RELATIVE)
+                || events.contains(evdev::EventType::ABSOLUTE);
             if !has_keys && !has_motion {
                 continue;
             }

@@ -139,6 +139,26 @@ in
       '';
     };
 
+    metrics = {
+      enable = lib.mkEnableOption ''
+        the near-live metrics timer. Runs `time collect 2` and `time agents 2`
+        on a short interval so today's commit and token numbers reach the
+        dashboard within minutes instead of at the nightly run. Affordable at
+        one minute because both commands keep a scan cache in the data dir and
+        skip any source whose files have not changed since the previous run
+      '';
+
+      interval = lib.mkOption {
+        type = lib.types.str;
+        default = "1m";
+        description = ''
+          How long after one run starts the next may start (systemd
+          OnUnitActiveSec). Runs never overlap: the timer only re-triggers
+          the same oneshot unit, and a unit still running is a single job.
+        '';
+      };
+    };
+
     note = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = null;
@@ -234,6 +254,41 @@ in
         OnCalendar = "*-*-* 04:00:00";
         Persistent = true;
         RandomizedDelaySec = "20m";
+      };
+      Install.WantedBy = [ "timers.target" ];
+    };
+
+    systemd.user.services.time-metrics = lib.mkIf cfg.metrics.enable {
+      Unit.Description = "near-live commit and agent metrics for the time server";
+      Service = {
+        Type = "oneshot";
+        # Both halves run even if one fails -- a broken GitHub token must not
+        # also stop the token numbers -- but a failure is still reported.
+        ExecStart = "${pkgs.writeShellScript "time-metrics" ''
+          status=0
+          ${cfg.package}/bin/time collect 2 || status=$?
+          ${cfg.package}/bin/time agents 2 || status=$?
+          exit $status
+        ''}";
+        # Needs `git` and `gh` for its stored credentials, same as the nightly
+        # collector: a user unit does not inherit the login shell's PATH.
+        Environment = [ "PATH=%h/.nix-profile/bin:/run/current-system/sw/bin" ];
+        Slice = "background.slice";
+        # Runs every minute next to interactive work, so stay maximally out of
+        # the way -- the scan cache keeps the common run to a few stat calls.
+        Nice = 19;
+        IOSchedulingClass = "idle";
+      };
+    };
+
+    systemd.user.timers.time-metrics = lib.mkIf cfg.metrics.enable {
+      Unit.Description = "near-live metrics on an interval";
+      Timer = {
+        OnBootSec = cfg.metrics.interval;
+        # Measured from the last activation of the oneshot unit, so a slow
+        # scan delays the next run instead of stacking on top of it.
+        # Persistent is pointless at this cadence: the next tick is never far.
+        OnUnitActiveSec = cfg.metrics.interval;
       };
       Install.WantedBy = [ "timers.target" ];
     };

@@ -115,11 +115,8 @@ pub fn focused_monitor() -> Option<String> {
     let v = hyprctl(&["monitors"]).ok()?;
     let arr = v.as_array()?;
     let real = || {
-        arr.iter().filter(|m| {
-            !m["name"]
-                .as_str()
-                .is_some_and(is_virtual_output)
-        })
+        arr.iter()
+            .filter(|m| !m["name"].as_str().is_some_and(is_virtual_output))
     };
     real()
         .find(|m| m["focused"].as_bool().unwrap_or(false))

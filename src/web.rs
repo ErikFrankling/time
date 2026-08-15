@@ -245,11 +245,7 @@ fn sunburst(
             let (fill, label, op) = if with.is_empty() {
                 (css_var(cfg, cat), "undivided".to_string(), "0.28")
             } else {
-                (
-                    css_var(cfg, &with[0]),
-                    with.join(" + "),
-                    "1",
-                )
+                (css_var(cfg, &with[0]), with.join(" + "), "1")
             };
             outer.push_str(&format!(
                 "<path d=\"{}\" fill=\"{fill}\" fill-opacity=\"{op}\">\
@@ -576,7 +572,11 @@ pub fn page(cfg: &ServerConfig, db: &Db, q: &Query) -> Result<String> {
     // omission.
     let day_key = |ts: i64| {
         chrono::DateTime::from_timestamp(ts, 0)
-            .map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string())
+            .map(|d| {
+                d.with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d")
+                    .to_string()
+            })
             .unwrap_or_default()
     };
     let today = day_key(from);
@@ -640,7 +640,8 @@ pub fn page(cfg: &ServerConfig, db: &Db, q: &Query) -> Result<String> {
         ));
     }
     if cat_rows.is_empty() {
-        cat_rows = "<tr><td colspan=\"3\" class=\"empty\">No minutes recorded yet.</td></tr>".into();
+        cat_rows =
+            "<tr><td colspan=\"3\" class=\"empty\">No minutes recorded yet.</td></tr>".into();
     }
 
     let day_links = (0..7)
@@ -868,13 +869,16 @@ fn day_strip(
 
     for (i, (start, buckets)) in rows.iter().enumerate() {
         let y = i as f64 * row_h;
-        let stamp = chrono::DateTime::from_timestamp(*start, 0).map(|d| d.with_timezone(&chrono::Local));
+        let stamp =
+            chrono::DateTime::from_timestamp(*start, 0).map(|d| d.with_timezone(&chrono::Local));
         let label = stamp
             .map(|d| d.format("%a %d").to_string())
             .unwrap_or_default();
 
         if gutter > 0.0 {
-            let key = stamp.map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default();
+            let key = stamp
+                .map(|d| d.format("%Y-%m-%d").to_string())
+                .unwrap_or_default();
             let (commits, lines) = code.get(&key).copied().unwrap_or((0, 0));
             if commits > 0 {
                 let bar_w = (lines as f64 / peak as f64) * (gutter - 34.0);
@@ -998,7 +1002,12 @@ fn code_panel(rows: &[crate::code::CodeDay]) -> String {
         }
     }
     per_repo.sort_by_key(|r| std::cmp::Reverse(r.2));
-    let max = per_repo.iter().map(|(_, _, l)| *l).max().unwrap_or(1).max(1);
+    let max = per_repo
+        .iter()
+        .map(|(_, _, l)| *l)
+        .max()
+        .unwrap_or(1)
+        .max(1);
 
     let mut bars = String::from("<div class=\"bars\">");
     for (name, c, lines) in per_repo.iter().take(10) {
@@ -1131,7 +1140,12 @@ fn agent_panel(days: &[crate::agents::AgentDay], minutes: &[crate::agents::Agent
         }
     }
     per_project.sort_by_key(|p| std::cmp::Reverse(p.1));
-    let max = per_project.iter().map(|(_, m, _)| *m).max().unwrap_or(1).max(1);
+    let max = per_project
+        .iter()
+        .map(|(_, m, _)| *m)
+        .max()
+        .unwrap_or(1)
+        .max(1);
 
     let mut bars = String::from("<div class=\"bars\">");
     for (name, mins, p) in per_project.iter().take(10) {

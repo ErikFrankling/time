@@ -57,6 +57,10 @@ data:
       "music",
       "browsing",
       "youtube",
+      # HBO Max, Netflix, film & TV. Without a slot of its own this time was
+      # scattered into comms/youtube/other — the DB has 'HBO Max —
+      # com.wbd.stream' labelled `other` 233 times.
+      "streaming",
       "twitter",
       "idle",
       "other",
@@ -112,7 +116,7 @@ spec:
         # or image change only reaches the pod when something in this template
         # changes — this counter is that something. There is no config-reloader
         # on the cluster, and a ConfigMap edit alone restarts nothing.
-        time.erikfrankling.se/config-rev: "local-llm-1"
+        time.erikfrankling.se/config-rev: "local-llm-2"
     spec:
       automountServiceAccountToken: false
       containers:

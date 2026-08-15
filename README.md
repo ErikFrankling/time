@@ -74,6 +74,24 @@ A model looking at the screen just sees what's happening. So the split is: code
 produces facts (window class, screen-changed-or-not), the model produces
 judgments (what is this, whose project is it).
 
+For the same reason there is no package map any more. An earlier shortcut
+translated phone package names straight to categories ("com.instagram = twitter")
+without a model call. It is gone, deliberately: the model has full authority
+over what a minute means, and a lookup table that preempts it is exactly the
+rule-stack this section argues against — it froze judgments the model, seeing
+every device's timeline at once, is better placed to make (Instagram open while
+the pc plays a lecture is not "twitter" the way Instagram at midnight is). The
+cost argument that justified it died when classification moved to a free local
+model. Old configs that still carry `phone_categories` parse fine; the key is
+simply ignored.
+
+The model also sees all devices in **one timeline**: batches interleave every
+machine, simultaneous minutes are marked as such, and each device's previous
+label rides along. Input counters say where the hands were, so typing on the pc
+while the phone plays YouTube reads as work with YouTube in the background —
+not as two separate activities — and a video with no input anywhere reads as
+watching, or as an empty room, whichever the trajectory suggests.
+
 ## Deploying the server
 
 Manifests live in the homelab repo under `kubernetes/homelab/apps/time.yaml`
@@ -274,13 +292,19 @@ side reads only its own, so the same file works everywhere.
 - **`server.categories`** — the list that becomes the chart. `idle` and `other`
   always render grey; the rest get one of 8 colourblind-checked colours in list
   order. Keep it to 8 real categories. Off-list answers from the model fold into
-  `other` rather than inventing a slice.
+  `other` rather than inventing a slice — but the name the model would have
+  used is kept as the minute's first tag, so
+  `SELECT tags, COUNT(*) FROM minute WHERE category='other' GROUP BY 1` is how
+  this list gets grown from data instead of guessed.
 - **`server.idle_distance`** — how similar two consecutive screens must be to
   count as unchanged.
 - **`server.batch_minutes`** / **`server.batch_wait_secs`** — how many minutes
   share one model call, and how long the first of them waits for the rest.
-  A label appears up to `batch_wait_secs` after the minute it describes; the
-  row itself is written immediately.
+  One batch spans every device — a single (ts, device) timeline with
+  simultaneous minutes marked — which is what lets the model correlate
+  machines instead of judging each screen in isolation. A label appears up to
+  `batch_wait_secs` after the minute it describes; the row itself is written
+  immediately.
 - **`server.endpoint`** — any OpenAI-compatible chat-completions URL. The
   intended setup is a local llama-swap (llama.cpp) instance on a machine with
   a GPU; the hosted OpenCode endpoint is the works-out-of-the-box fallback.
@@ -350,8 +374,9 @@ one commit is skipped along with lock files and vendored trees: one refresh of a
 checked-in data dump is 650k lines, which is more than a month of real writing
 and would flatten every other day in the chart to a single pixel.
 
-Run it nightly — commit timestamps are retrospective, so there is nothing to
-gain from running it more often. The home-manager module has a timer for it:
+Runs are idempotent — rows are replaced, not added — so it can run as often as
+you like; the nightly timer below is the baseline, and the metrics timer
+further down keeps today's numbers fresh. The home-manager module:
 
 ```nix
 services.time-agent.collect = {
@@ -388,6 +413,34 @@ Token counts are never summed across tools: the three of them count cached input
 three different ways. The dashboard reports elapsed agent time as *distinct
 minutes*, not summed session minutes — several sessions overlap constantly, and
 adding them up produces days longer than a day.
+
+## Near-live metrics
+
+`collect` and `agents` are retrospective; run only nightly, they leave the
+dashboard saying "no commits recorded for this day" until 3am. The
+home-manager module has a second timer that runs `time collect 2` and
+`time agents 2` on a short interval instead:
+
+```nix
+services.time-agent.metrics = {
+  enable = true;
+  interval = "1m";   # the default; systemd OnUnitActiveSec, so runs never overlap
+};
+```
+
+A one-minute cadence is affordable because both commands keep a scan cache in
+the data dir (`code-scan-cache.json`, `agents-scan-cache.json`), keyed by
+window length: `time collect` records each clone's `.git` mtime and skips a
+repository group nobody has committed to; `time agents` records
+`(mtime, size)` for every transcript file in the window and skips a tool whose
+files are all unchanged — so the common run is a stat walk and two empty
+posts. Skips are all-or-nothing per repository group / per tool, because day
+totals are recomputed from every file and upserted whole: a skipped source
+posts nothing and the server keeps its previous rows, which is correct, while
+a half-scanned one would replace correct rows with undercounts. The cache is
+committed only after the server accepts the rows — a failed post is rescanned,
+not forgotten — and anything doubtful (no cache, a changed window, an
+unreadable file, a failed parse) falls back to a full rescan.
 
 ## Cost
 

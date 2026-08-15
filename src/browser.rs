@@ -212,7 +212,10 @@ mod tests {
             Some("dn.se".into())
         );
         assert_eq!(domain_of("https://X.com/erik"), Some("x.com".into()));
-        assert_eq!(domain_of("http://localhost:3000/admin"), Some("localhost".into()));
+        assert_eq!(
+            domain_of("http://localhost:3000/admin"),
+            Some("localhost".into())
+        );
     }
 
     #[test]

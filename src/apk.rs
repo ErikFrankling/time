@@ -93,7 +93,10 @@ pub fn start() -> Shared {
     }
 
     if pinned() {
-        println!("apk: pinned to {} (TIME_APK_PATH set, no fetching)", path().display());
+        println!(
+            "apk: pinned to {} (TIME_APK_PATH set, no fetching)",
+            path().display()
+        );
         return shared;
     }
 
@@ -194,8 +197,7 @@ struct Release {
 fn latest_release(repo: &str) -> Result<Release> {
     // Overridable so the fetch chain can be exercised against a stub, and so a
     // GitHub Enterprise host would work without a code change.
-    let api = std::env::var("TIME_GITHUB_API")
-        .unwrap_or_else(|_| "https://api.github.com".into());
+    let api = std::env::var("TIME_GITHUB_API").unwrap_or_else(|_| "https://api.github.com".into());
     let url = format!("{api}/repos/{repo}/releases?per_page=20");
     let mut req = client()?
         .get(&url)
@@ -221,12 +223,10 @@ fn latest_release(repo: &str) -> Result<Release> {
         let Some((version, version_code)) = parse_tag(tag) else {
             continue;
         };
-        let Some(asset) = r["assets"]
-            .as_array()
-            .and_then(|a| a.iter().find(|a| {
-                a["name"].as_str().is_some_and(|n| n.ends_with(".apk"))
-            }))
-        else {
+        let Some(asset) = r["assets"].as_array().and_then(|a| {
+            a.iter()
+                .find(|a| a["name"].as_str().is_some_and(|n| n.ends_with(".apk")))
+        }) else {
             continue;
         };
         let name = asset["name"].as_str().unwrap_or_default();
@@ -241,7 +241,12 @@ fn latest_release(repo: &str) -> Result<Release> {
             size: asset["size"].as_u64().unwrap_or(0),
             // CI falls back to the debug build when no keystore secret exists,
             // and marks the filename so nobody has to guess later.
-            signing: if name.contains("-debug") { "debug" } else { "release" }.into(),
+            signing: if name.contains("-debug") {
+                "debug"
+            } else {
+                "release"
+            }
+            .into(),
         });
     }
     Err(anyhow!("no release with an APK asset in {repo}"))

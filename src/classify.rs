@@ -19,18 +19,23 @@ pub struct Label {
 }
 
 /// One label as it comes back from a batched call: the same fields plus the
-/// timestamp that says which minute it belongs to. Order alone would be enough
-/// if models never dropped or reordered an entry, which they do.
+/// device and timestamp that say which minute it belongs to. Order alone would
+/// be enough if models never dropped or reordered an entry, which they do; and
+/// a batch spans every device now, so the timestamp alone is not a key either.
+/// `device` is optional only for the batch-of-one-machine case, where it is
+/// unambiguous.
 #[derive(Debug, Deserialize)]
 struct Row {
+    #[serde(default)]
+    device: Option<String>,
     ts: i64,
     #[serde(flatten)]
     label: Label,
 }
 
-/// The previous minute's label, passed back into the next call. One string, and
-/// it's what stops labels flickering between categories during a single
-/// continuous activity.
+/// A device's most recent labelled minute, passed back into the next call.
+/// One line per device, and it's what stops labels flickering between
+/// categories during a single continuous activity.
 pub struct Previous<'a> {
     pub category: &'a str,
     pub project: Option<&'a str>,
@@ -48,8 +53,8 @@ pub struct Presence<'a> {
     pub note: Option<&'a str>,
 }
 
-/// One minute to be labelled. A call takes a run of these from a single device
-/// in time order.
+/// One minute to be labelled. A call takes a run of these across every device
+/// at once, sorted by (ts, device) so simultaneity is visible.
 pub struct Item<'a> {
     pub ts: i64,
     pub jpeg: Option<&'a [u8]>,
@@ -90,91 +95,63 @@ pub struct Usage {
 
 fn system_prompt(cfg: &ServerConfig) -> String {
     format!(
-        "You are labelling minutes of a developer's day, to be aggregated \
-into a chart of where their time went.
+        "You are labelling minutes of one person's day, observed across ALL of \
+their devices at once, to be aggregated into a chart of where the time went.
 
-The question is NOT \"what is on this screen\". It is \"what was THE PERSON \
-doing during this minute\". Those differ more often than you would expect, and \
-getting the difference right is the whole job.
-
-Choose exactly one category per minute:
+The question is never \"what is on this screen\" -- it is \"what was THE \
+PERSON doing during this minute\". You decide; there is no rule that \
+overrides your judgment. Choose one category per minute from:
 {}
 
-## Presence comes first
+## One person, several devices
 
-You are given the seconds since the last real human input, plus counts of key \
-presses and mouse movements for this minute. Input counts come only from \
-physical devices; input injected by automation is already excluded.
+The timeline below interleaves every device, in time order, and items marked \
+\"same minute\" happened simultaneously. There is one person behind them all, \
+so correlate the devices the way a human would:
 
-A screen can change continuously with nobody in the room. Builds scroll, videos \
-play, tests run, and AI agents drive the machine on their own. So:
+- Key presses and pointer movements are counted from physical input devices \
+and say where the hands actually were. Typing on one machine while a video \
+plays on another means the typing is the foreground activity and the video is \
+background -- categorise the typing, tag the video.
+- A video playing with no input on any device is probably being watched.
+- A long stretch of zero input everywhere while screens merely change -- \
+builds scrolling, videos looping, AI agents editing files -- is absence: \
+label those minutes \"idle\" however work-like the windows look.
+- A device whose idle time is UNKNOWN cannot count input either (a phone \
+reports neither), so its zeros mean nothing; the foreground app is the whole \
+signal there.
+- Recent input with a still screen usually means reading or thinking, which \
+is real activity, not \"idle\".
 
-- No input for several minutes and the screen is merely *changing* is NOT the \
-person working. If nothing indicates a human is watching, that is \"idle\".
-- Substantial idle time with no keys and no mouse is strong evidence they are \
-away. Weigh it heavily. Do not label work just because a work-looking window \
-is visible.
-- But you decide. Reading a long document, watching a video, or sitting in a \
-meeting are all real activity with little or no input. If the screen genuinely \
-suggests a person is consuming something, label that, not \"idle\".
-- Recent input with an idle-looking screen usually means they are still there.
+## Categories are only chart buckets
 
-If the idle time is unknown, say so in your reasoning by leaning on the screen \
-and previous label, and be more cautious about claiming active work. Zero key \
-presses and zero pointer movements are then no information either -- the same \
-device that cannot time the last input usually cannot count them, and a phone \
-reports neither. Treat them as unknown, not as evidence nobody was there; what \
-is in the foreground is the whole signal.
+The list exists so time can be charted, not to constrain what you may say \
+happened. When nothing on it genuinely fits, use \"other\" -- and put the \
+natural one-word category you would have used FIRST in \"tags\", so the list \
+can be grown from real data later. Never force a bad fit.
 
-## One minute, several things
-
-People do more than one thing at once. Coding with music playing, writing
-with YouTube on a second monitor, reading docs while a chat window sits open
-and active.
-
-- \"category\" is the ONE thing that best describes the minute -- what they
-would say they were doing. Time is accounted against this, so it must be
-singular.
-- \"tags\" lists EVERYTHING going on, including the category itself. If code
-is being written while a video plays, that is category \"work_personal\" with
-tags [\"work_personal\", \"youtube\"].
-- Only tag what is genuinely active. A minimised window or an idle tab is not
-an activity. Audible media, a visible video, a live chat all count.
-- Tags must come from the same category list. Nothing invented.
-
-## Several minutes at once
-
-You are given a run of minutes from one machine, in time order. They are \
-usually but not always consecutive -- each one states its own timestamp, so \
-check before assuming two of them are a minute apart. Read them as a \
-trajectory, not as unrelated screenshots: a build that starts \
-in minute 3 and is still running in minute 7 is the same stretch of work, and \
-someone who stops touching the keyboard halfway through has left, even if the \
-screen keeps moving. Use the later minutes to understand the earlier ones.
-
-Label every minute you are given. Do not merge them, drop them or invent \
-extra ones. Consecutive minutes of the same activity should get the same \
-category and project -- flickering between categories mid-activity is the \
-most common way these labels go wrong -- but \"detail\" should still say what \
-was specifically happening in that minute.
+\"tags\" otherwise lists everything genuinely active this minute, from the \
+list, the category itself included. Audible media, a visible video, a live \
+chat all count; a minimised window or an idle tab is not an activity.
 
 ## The other fields
 
-- \"project\" is the repository, course, or topic if you can identify one, else \
-null.
-- \"detail\" is ONE concrete sentence naming specifics: file paths, repo names, \
-page titles, what a terminal is running. This is the only record that survives \
-after the screenshot is deleted, so be specific rather than vague. When the \
-person is away, say what the machine was doing instead, e.g. \"away; an agent \
-was editing files in the terminal\".
-- Use \"other\" when nothing on the list genuinely fits. Do not force a bad fit.
-- If the previous minute's label is given and the first minute continues the \
-same activity, reuse the same category and project.
+- \"project\" is the repository, course, or topic if you can identify one, \
+else null.
+- \"detail\" is ONE concrete sentence naming specifics: file paths, repo \
+names, page titles, what a terminal is running. It is what a later reader \
+sees without the screenshot, so be specific. When the person is away, say \
+what the machine was doing instead.
+- Each device's previous label is given at the top. Consecutive minutes of \
+one continuous activity keep the same category and project -- flickering \
+mid-activity is the most common way these labels go wrong -- but \"detail\" \
+should still say what specifically happened in that minute.
 
-Respond with a JSON array only, no markdown fence, one object per minute given, \
-in the same order, each carrying back the \"ts\" it was labelled from:
-[{{\"ts\": 1234567890, \"category\": \"...\", \"tags\": [\"...\"], \
-\"project\": \"...\" or null, \"detail\": \"...\"}}]",
+Label every (device, ts) item you are given; never merge, drop or invent \
+items. Respond with a JSON array only, no markdown fence, one object per \
+item, each carrying back the \"device\" and \"ts\" it was labelled from:
+[{{\"device\": \"pc\", \"ts\": 1234567890, \"category\": \"...\", \
+\"tags\": [\"...\"], \"project\": \"...\" or null, \"detail\": \"...\"}}]",
         cfg.categories
             .iter()
             .map(|c| format!("- {c}"))
@@ -183,70 +160,82 @@ in the same order, each carrying back the \"ts\" it was labelled from:
     )
 }
 
-/// The per-minute preamble that sits in front of that minute's screenshot.
-fn item_context(item: &Item<'_>, n: usize, total: usize, prev: Option<&Previous<'_>>) -> String {
-    let mut context = String::new();
-    let p = &item.presence;
+/// The per-item preambles, one per item in order, each sitting in front of
+/// that minute's screenshot. Split out from `classify` so the same-minute
+/// grouping is testable at the string level.
+fn contexts(items: &[Item<'_>]) -> Vec<String> {
+    let total = items.len();
+    let mut out = Vec::with_capacity(total);
+    let mut seen: Vec<&str> = Vec::new();
+    for (i, item) in items.iter().enumerate() {
+        let mut context = String::new();
+        let p = &item.presence;
 
-    // Once for the run, not once per minute: every minute in a batch comes
-    // from the same machine, and repeating its description twenty times says
-    // nothing new at full price.
-    if n == 1 {
-        if let Some(note) = p.note.filter(|n| !n.trim().is_empty()) {
-            context.push_str(&format!("About this machine: {note}\n"));
+        // Once per device, not once per minute: repeating a machine's
+        // description twenty times says nothing new at full price.
+        if !seen.contains(&p.device) {
+            seen.push(p.device);
+            if let Some(note) = p.note.filter(|n| !n.trim().is_empty()) {
+                context.push_str(&format!("About the machine \"{}\": {note}\n", p.device));
+            }
         }
-    }
-    context.push_str(&format!(
-        "--- Minute {n} of {total} --- ts={} ({})\n",
-        item.ts,
-        chrono::DateTime::from_timestamp(item.ts, 0)
+        let when = chrono::DateTime::from_timestamp(item.ts, 0)
             .map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string())
-            .unwrap_or_default()
-    ));
-    context.push_str(&format!("Machine: {}\n", p.device));
-    match p.idle_secs {
-        Some(s) => context.push_str(&format!("Seconds since last human input: {s}\n")),
-        // "no input device readable" was written for a desktop whose evdev read
-        // failed. A phone has no such device to begin with and never will, so
-        // the phrasing has to cover both without implying a fault.
-        None => context
-            .push_str("Seconds since last human input: UNKNOWN (this device does not report it)\n"),
-    }
-    context.push_str(&format!(
-        "Human input this minute: {} key presses, {} pointer movements\n",
-        p.keys, p.mouse
-    ));
-    context.push_str(&format!("Active window: {}", item.window));
-    // "Firefox" tells the model nothing; the site being read tells it almost
-    // everything, and reading it off the screenshot is guesswork the browser
-    // itself can answer exactly.
-    if let Some(d) = item.domain.filter(|d| !d.trim().is_empty()) {
-        context.push_str(&format!("\nFocused browser tab is on: {d}"));
-    }
-    if item.jpeg.is_none() {
-        // Otherwise the model is left to wonder which of the images below
-        // belongs to this minute.
-        context.push_str("\n(no screenshot available for this minute)");
-    }
-
-    if let Some(p) = prev {
-        context.push_str(&format!("\nPrevious minute: category={}", p.category));
-        if let Some(proj) = p.project.filter(|s| !s.is_empty()) {
-            context.push_str(&format!(", project={proj}"));
+            .unwrap_or_default();
+        // Simultaneity is the whole point of a cross-device batch, so it must
+        // be legible in the text rather than left for the model to derive
+        // from timestamp arithmetic across twenty items.
+        if i > 0 && items[i - 1].ts / 60 == item.ts / 60 {
+            context.push_str(&format!(
+                "--- same minute, on {}: --- ts={} ({when})\n",
+                p.device, item.ts
+            ));
+        } else {
+            context.push_str(&format!(
+                "--- Item {} of {total} --- ts={} ({when}), on {}\n",
+                i + 1,
+                item.ts,
+                p.device
+            ));
         }
-        if let Some(d) = p.detail.filter(|s| !s.is_empty()) {
-            context.push_str(&format!(", detail={d}"));
+        match p.idle_secs {
+            Some(s) => context.push_str(&format!("Seconds since last human input: {s}\n")),
+            // "no input device readable" was written for a desktop whose evdev
+            // read failed. A phone has no such device to begin with and never
+            // will, so the phrasing has to cover both without implying a fault.
+            None => context.push_str(
+                "Seconds since last human input: UNKNOWN (this device does not report it)\n",
+            ),
         }
+        context.push_str(&format!(
+            "Human input this minute: {} key presses, {} pointer movements\n",
+            p.keys, p.mouse
+        ));
+        context.push_str(&format!("Active window: {}", item.window));
+        // "Firefox" tells the model nothing; the site being read tells it
+        // almost everything, and reading it off the screenshot is guesswork
+        // the browser itself can answer exactly.
+        if let Some(d) = item.domain.filter(|d| !d.trim().is_empty()) {
+            context.push_str(&format!("\nFocused browser tab is on: {d}"));
+        }
+        if item.jpeg.is_none() {
+            // Otherwise the model is left to wonder which of the images below
+            // belongs to this item.
+            context.push_str("\n(no screenshot available for this minute)");
+        }
+        context.push('\n');
+        out.push(context);
     }
-    context.push('\n');
-    context
+    out
 }
 
 /// Which model gets this batch.
 ///
 /// Vision is what makes the expensive model necessary, so a batch without a
-/// single screenshot -- every phone batch, and everything the sweep picks up
-/// after the image is gone -- goes to the cheap text model instead. Decided
+/// single screenshot -- one that is all phone minutes, or rows the sweep
+/// picked up after their image was gone -- goes to the text model instead;
+/// note that a cross-device batch mixing one desktop screenshot in routes the
+/// phone minutes to the vision model along with it. Decided
 /// from the payload rather than the device name, so a desktop whose capture
 /// failed is routed correctly too, and so a text-only model can never be sent
 /// a picture of the user's screen by accident.
@@ -258,13 +247,15 @@ pub fn model_for<'a>(cfg: &'a ServerConfig, items: &[Item<'_>]) -> &'a str {
     }
 }
 
-/// Label a run of minutes from one device, in time order, in a single call.
+/// Label a run of minutes across every device, in time order, in one call.
 ///
 /// One call for twenty minutes instead of twenty calls is not only twenty
-/// times fewer requests against a weekly allowance -- the long system prompt
-/// is sent once instead of twenty times, and the model gets to see the
-/// trajectory, which is what it needs to tell "reading" from "left the room"
-/// in the first place.
+/// times fewer requests -- the long system prompt is sent once instead of
+/// twenty times, and the model gets to see the trajectory, which is what it
+/// needs to tell "reading" from "left the room" in the first place. The run
+/// deliberately mixes devices: input on one machine while a video plays on
+/// another is one person working with something in the background, and only
+/// a model that sees both screens in one timeline can say so.
 ///
 /// `jpeg` is None for devices that cannot produce a screenshot -- a phone,
 /// where Android forbids silent capture entirely. There the foreground app name
@@ -285,17 +276,33 @@ pub fn classify(
     cfg: &ServerConfig,
     key: Option<&str>,
     items: &[Item<'_>],
-    prev: Option<Previous<'_>>,
-) -> Result<(Vec<(i64, Label)>, Usage, String)> {
+    prev: &[(&str, Previous<'_>)],
+) -> Result<(Vec<((String, i64), Label)>, Usage, String)> {
     anyhow::ensure!(!items.is_empty(), "nothing to classify");
 
-    let mut content: Vec<serde_json::Value> = Vec::with_capacity(items.len() * 2 + 1);
-    for (i, item) in items.iter().enumerate() {
-        let prev = if i == 0 { prev.as_ref() } else { None };
-        content.push(serde_json::json!({
-            "type": "text",
-            "text": item_context(item, i + 1, items.len(), prev),
-        }));
+    let mut content: Vec<serde_json::Value> = Vec::with_capacity(items.len() * 2 + 2);
+    if !prev.is_empty() {
+        // Once, at the top, rather than woven into the items: each device gets
+        // exactly one "where you left off" line, which is what carries an
+        // activity across a batch boundary without repeating itself.
+        let mut text = String::from(
+            "Previous label for each device (its most recent labelled minute, \
+             before this batch):\n",
+        );
+        for (device, p) in prev {
+            text.push_str(&format!("- {device}: category={}", p.category));
+            if let Some(proj) = p.project.filter(|s| !s.is_empty()) {
+                text.push_str(&format!(", project={proj}"));
+            }
+            if let Some(d) = p.detail.filter(|s| !s.is_empty()) {
+                text.push_str(&format!(", detail={d}"));
+            }
+            text.push('\n');
+        }
+        content.push(serde_json::json!({ "type": "text", "text": text }));
+    }
+    for (item, text) in items.iter().zip(contexts(items)) {
+        content.push(serde_json::json!({ "type": "text", "text": text }));
         if let Some(j) = item.jpeg {
             content.push(serde_json::json!({
                 "type": "image_url",
@@ -308,8 +315,8 @@ pub fn classify(
     content.push(serde_json::json!({
         "type": "text",
         "text": format!(
-            "Classify all {} minutes above. Return a JSON array of exactly {} objects \
-             in the same order, each with its own \"ts\".",
+            "Classify all {} items above. Return a JSON array of exactly {} objects \
+             in the same order, each carrying back its own \"device\" and \"ts\".",
             items.len(),
             items.len()
         ),
@@ -317,17 +324,19 @@ pub fn classify(
 
     let model = model_for(cfg, items);
 
+    // No temperature, top_p or top_k: the server's own sampling defaults must
+    // win. Greedy decoding is a documented endless-repetition failure mode for
+    // the Qwen thinking models this runs against, and a hardcoded 0 here once
+    // forced exactly that.
     let mut body = serde_json::json!({
         "model": model,
-        "temperature": 0,
-        // Per minute, plus headroom for a reasoning model's preamble. Too low
-        // truncates the array and costs the whole batch, which is far more
-        // expensive than the few unused tokens this leaves on the table.
-        // Measured peak is 212 tokens for a minute with a long detail line, so
-        // 200 left about 6% headroom at a batch of twenty -- and an overrun
-        // does not truncate one label, it loses the whole batch. Unused
-        // headroom is free: this caps the reply, it does not reserve anything.
-        "max_tokens": per_minute_budget(cfg, model) * items.len() as u32 + 2048,
+        // Per minute, plus headroom for a reasoning block. Too low truncates
+        // the array and costs the whole batch, which is far more expensive
+        // than the unused tokens this leaves on the table -- the cap reserves
+        // nothing. The server runs a reasoning budget of 3072 as a backstop,
+        // so 4096 of headroom means a full think block plus the JSON can
+        // never starve.
+        "max_tokens": per_minute_budget(cfg, model) * items.len() as u32 + 4096,
         "messages": [
             { "role": "system", "content": system_prompt(cfg) },
             { "role": "user", "content": serde_json::Value::Array(content) }
@@ -430,9 +439,20 @@ pub fn classify(
         } else {
             format!("{content}\n--- reasoning ---\n{reasoning}")
         };
-        match parse_labels(content, cfg) {
+        // A batch from a single machine forgives replies that omit "device":
+        // there is only one it could mean.
+        let lone = {
+            let mut devices = items.iter().map(|i| i.presence.device);
+            let first = devices.next();
+            if devices.all(|d| Some(d) == first) {
+                first
+            } else {
+                None
+            }
+        };
+        match parse_labels(content, cfg, lone) {
             Ok(rows) => return Ok((rows, usage, raw)),
-            Err(e) => match parse_labels(reasoning, cfg) {
+            Err(e) => match parse_labels(reasoning, cfg, lone) {
                 Ok(rows) if !rows.is_empty() => return Ok((rows, usage, raw)),
                 // Neither field held an array. Say enough to tell the three
                 // causes apart without ever logging the reply itself, which
@@ -478,7 +498,16 @@ fn strip_reasoning(content: &str) -> &str {
 /// Models wrap JSON in prose or fences often enough that trusting the raw body
 /// is a guaranteed source of intermittent failures. Take the outermost
 /// brackets, and accept a bare object for the batch-of-one case.
-fn parse_labels(content: &str, cfg: &ServerConfig) -> Result<Vec<(i64, Label)>> {
+///
+/// `lone_device` is Some when the whole batch came from one machine; a row
+/// missing its "device" is then unambiguous and accepted. In a mixed batch
+/// such a row is dropped instead -- its minute stays pending, which beats
+/// guessing which machine it belonged to.
+fn parse_labels(
+    content: &str,
+    cfg: &ServerConfig,
+    lone_device: Option<&str>,
+) -> Result<Vec<((String, i64), Label)>> {
     // An unterminated think block strips to nothing. That is right when the
     // narration ran out of budget mid-sentence, and wrong when a stray "<think"
     // appears after an array that was already complete -- so only accept the
@@ -508,7 +537,10 @@ fn parse_labels(content: &str, cfg: &ServerConfig) -> Result<Vec<(i64, Label)>> 
 
     Ok(rows
         .into_iter()
-        .map(|r| (r.ts, clean(r.label, cfg)))
+        .filter_map(|r| {
+            let device = r.device.or_else(|| lone_device.map(str::to_string))?;
+            Some(((device, r.ts), clean(r.label, cfg)))
+        })
         .collect())
 }
 
@@ -522,48 +554,27 @@ fn clean(mut label: Label, cfg: &ServerConfig) -> Label {
         "other".into()
     };
 
-    // Drop invented tags for the same reason as the category: a phantom tag
-    // would show up as real concurrent activity that never happened.
-    label.tags = label
-        .tags
-        .iter()
-        .map(|t| t.trim().to_lowercase())
-        .filter(|t| cfg.categories.iter().any(|c| c.to_lowercase() == *t))
-        .collect();
+    // Tags keep their order and are allowed off the list, on purpose: when
+    // the category fell back to `other`, the model's first tag is the name it
+    // would have used, and that is precisely the data the category list is
+    // grown from later. Filtering it out here would make `other` a dead end.
+    let mut tags: Vec<String> = Vec::new();
+    for t in &label.tags {
+        let t = t.trim().to_lowercase();
+        if !t.is_empty() && !tags.contains(&t) {
+            tags.push(t);
+        }
+    }
     // The category is always part of what was happening, even if the model
     // omitted it from the list.
-    if !label.tags.contains(&label.category) {
-        label.tags.push(label.category.clone());
+    if !tags.contains(&label.category) {
+        tags.push(label.category.clone());
     }
-    label.tags.sort();
-    label.tags.dedup();
+    label.tags = tags;
 
     label.project = label.project.filter(|s| !s.trim().is_empty());
     label.detail = label.detail.filter(|s| !s.trim().is_empty());
     label
-}
-
-/// Category for a phone minute, from the package name alone.
-///
-/// A phone frame has no screenshot, so the model is being asked to read
-/// "Instagram — com.instagram.android" and say what it is. That is a lookup
-/// wearing a model's clothes: it costs a call, a queue slot and part of a
-/// weekly allowance to restate the input. On a phone the foreground app *is*
-/// the activity, in a way it never is on a desktop where everything is a
-/// browser or a terminal.
-///
-/// Unmatched packages still go to the model, so a new app gets a real answer
-/// once and this list is where the answer belongs afterwards.
-pub fn from_package(cfg: &ServerConfig, window: &str) -> Option<String> {
-    let hay = window.to_lowercase();
-    cfg.phone_categories
-        .iter()
-        .find_map(|rule| {
-            let (needle, cat) = rule.split_once('=')?;
-            hay.contains(&needle.trim().to_lowercase())
-                .then(|| cat.trim().to_string())
-        })
-        .filter(|c| cfg.categories.contains(c))
 }
 
 #[cfg(test)]
@@ -575,30 +586,47 @@ mod tests {
     }
 
     #[test]
-    fn parses_an_array_keyed_by_ts() {
+    fn parses_an_array_keyed_by_device_and_ts() {
         let out = parse_labels(
-            r#"[{"ts":100,"category":"idle","tags":[],"project":null,"detail":"away"},
-                {"ts":160,"category":"work_personal","tags":["youtube"],"detail":"hacking"}]"#,
+            r#"[{"device":"pc","ts":100,"category":"idle","tags":[],"project":null,"detail":"away"},
+                {"device":"phone","ts":100,"category":"work_personal","tags":["youtube"],"detail":"hacking"}]"#,
             &cfg(),
+            None,
         )
         .unwrap();
         assert_eq!(out.len(), 2);
-        assert_eq!(out[0].0, 100);
+        // Two devices may answer for the same timestamp; the pair is the key.
+        assert_eq!(out[0].0, ("pc".to_string(), 100));
+        assert_eq!(out[1].0, ("phone".to_string(), 100));
         assert_eq!(out[1].1.category, "work_personal");
         // The category joins its own tag list even when the model forgets it.
         assert!(out[1].1.tags.contains(&"work_personal".to_string()));
         assert!(out[1].1.tags.contains(&"youtube".to_string()));
     }
 
+    /// A batch from a single machine forgives a reply without "device"; a
+    /// mixed batch cannot, and drops the row rather than guessing.
+    #[test]
+    fn a_single_device_batch_tolerates_rows_missing_device() {
+        let reply = r#"[{"ts":100,"category":"idle"}]"#;
+        let out = parse_labels(reply, &cfg(), Some("laptop")).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, ("laptop".to_string(), 100));
+
+        let out = parse_labels(reply, &cfg(), None).unwrap();
+        assert!(out.is_empty(), "ambiguous rows are dropped, not guessed");
+    }
+
     #[test]
     fn survives_a_fence_and_prose() {
         let out = parse_labels(
-            "Here you go:\n```json\n[{\"ts\":7,\"category\":\"idle\"}]\n```\nHope that helps!",
+            "Here you go:\n```json\n[{\"device\":\"pc\",\"ts\":7,\"category\":\"idle\"}]\n```\nHope that helps!",
             &cfg(),
+            None,
         )
         .unwrap();
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].0, 7);
+        assert_eq!(out[0].0, ("pc".to_string(), 7));
     }
 
     /// The reason `minimax-m3` was written off; it is 2.5x cheaper on output.
@@ -606,8 +634,9 @@ mod tests {
     fn survives_a_think_block_full_of_braces() {
         let out = parse_labels(
             "<think>Maybe {\"category\": \"idle\"}? No, [1,2,3] suggests work.</think>\
-             [{\"ts\":9,\"category\":\"work_husk\",\"tags\":[\"work_husk\"]}]",
+             [{\"device\":\"pc\",\"ts\":9,\"category\":\"work_husk\",\"tags\":[\"work_husk\"]}]",
             &cfg(),
+            None,
         )
         .unwrap();
         assert_eq!(out.len(), 1);
@@ -616,18 +645,29 @@ mod tests {
 
     #[test]
     fn an_unclosed_think_block_is_not_an_answer() {
-        assert!(parse_labels("<think>still thinking about [{\"ts\":1}", &cfg()).is_err());
+        assert!(parse_labels("<think>still thinking about [{\"ts\":1}", &cfg(), None).is_err());
     }
 
+    /// The category folds into `other` -- an invented one cannot be charted --
+    /// but the invented name survives, first, in the tags: that ordering is
+    /// what the category list is grown from later.
     #[test]
-    fn folds_an_invented_category_into_other() {
+    fn an_invented_category_folds_to_other_but_survives_in_tags() {
         let out = parse_labels(
-            r#"[{"ts":1,"category":"gardening","tags":["gardening"]}]"#,
+            r#"[{"ts":1,"category":"gardening","tags":["gardening","music"]}]"#,
             &cfg(),
+            Some("pc"),
         )
         .unwrap();
         assert_eq!(out[0].1.category, "other");
-        assert_eq!(out[0].1.tags, vec!["other".to_string()]);
+        assert_eq!(
+            out[0].1.tags,
+            vec![
+                "gardening".to_string(),
+                "music".to_string(),
+                "other".to_string()
+            ]
+        );
     }
 
     fn item(ts: i64, jpeg: Option<&'static [u8]>) -> Item<'static> {
@@ -669,9 +709,44 @@ mod tests {
 
     #[test]
     fn accepts_a_bare_object_for_a_single_minute() {
-        let out = parse_labels(r#"{"ts":42,"category":"idle"}"#, &cfg()).unwrap();
+        let out = parse_labels(r#"{"ts":42,"category":"idle"}"#, &cfg(), Some("pc")).unwrap();
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].0, 42);
+        assert_eq!(out[0].0, ("pc".to_string(), 42));
+    }
+
+    /// The grouping the whole cross-device design hangs on: two items in the
+    /// same minute must say so in words, with the device named, rather than
+    /// leaving simultaneity for the model to derive from timestamps.
+    #[test]
+    fn contexts_mark_items_sharing_a_minute() {
+        let mut a = item(120, None);
+        a.presence.device = "pc";
+        let mut b = item(120, None);
+        b.presence.device = "laptop";
+        let mut c = item(180, None);
+        c.presence.device = "pc";
+        let texts = contexts(&[a, b, c]);
+        assert!(texts[0].contains("--- Item 1 of 3 ---"), "{}", texts[0]);
+        assert!(texts[0].contains("on pc"), "{}", texts[0]);
+        assert!(texts[1].contains("same minute, on laptop"), "{}", texts[1]);
+        // A later minute goes back to being an ordinary item.
+        assert!(texts[2].contains("--- Item 3 of 3 ---"), "{}", texts[2]);
+    }
+
+    /// Each machine's note appears once, the first time the device does --
+    /// not per minute, and not attached to the wrong machine.
+    #[test]
+    fn a_device_note_is_sent_once_per_device() {
+        let mut a = item(60, None);
+        a.presence.note = Some("runs agents");
+        let mut b = item(120, None);
+        b.presence.note = Some("runs agents");
+        let mut c = item(120, None);
+        c.presence.device = "phone";
+        let texts = contexts(&[a, b, c]);
+        assert!(texts[0].contains("About the machine \"d\": runs agents"));
+        assert!(!texts[1].contains("About the machine"));
+        assert!(!texts[2].contains("About the machine"));
     }
 
     #[test]
@@ -693,18 +768,20 @@ mod tests {
     fn schema_shaped_reply_parses() {
         let schema = response_format();
         assert_eq!(schema["type"], "json_schema");
-        for field in ["ts", "category", "tags", "project", "detail"] {
+        for field in ["device", "ts", "category", "tags", "project", "detail"] {
             assert!(
                 schema["json_schema"]["schema"]["items"]["properties"][field].is_object(),
                 "schema is missing {field}"
             );
         }
         let out = parse_labels(
-            r#"[{"ts":100,"category":"idle","tags":["idle"],"project":null,"detail":"away"}]"#,
+            r#"[{"device":"pc","ts":100,"category":"idle","tags":["idle"],"project":null,"detail":"away"}]"#,
             &cfg(),
+            None,
         )
         .unwrap();
         assert_eq!(out[0].1.category, "idle");
+        assert_eq!(out[0].0, ("pc".to_string(), 100));
     }
 }
 
@@ -753,13 +830,14 @@ fn response_format() -> serde_json::Value {
                 "items": {
                     "type": "object",
                     "properties": {
+                        "device": { "type": "string" },
                         "ts": { "type": "integer" },
                         "category": { "type": "string" },
                         "tags": { "type": "array", "items": { "type": "string" } },
                         "project": { "type": ["string", "null"] },
                         "detail": { "type": "string" }
                     },
-                    "required": ["ts", "category", "tags", "project", "detail"],
+                    "required": ["device", "ts", "category", "tags", "project", "detail"],
                     "additionalProperties": false
                 }
             }

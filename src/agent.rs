@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 
 use crate::browser;
 use crate::capture;
-use crate::input;
 use crate::config::AgentConfig;
+use crate::input;
 use crate::proto::{Frame, FrameAck};
 use crate::spool::Spool;
 
@@ -27,7 +27,11 @@ const TAB_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(150);
 
 /// Build this minute's frame. The only decision the agent makes on its own is
 /// the blocklist -- and it errs toward sending nothing.
-pub fn build_frame(cfg: &AgentConfig, input: &input::Monitor, tabs: &browser::Tabs) -> Result<Frame> {
+pub fn build_frame(
+    cfg: &AgentConfig,
+    input: &input::Monitor,
+    tabs: &browser::Tabs,
+) -> Result<Frame> {
     let now = chrono::Local::now().timestamp();
     let ts = now - (now % 60);
     let window = capture::active_window();

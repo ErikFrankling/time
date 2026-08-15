@@ -87,7 +87,14 @@ pub fn run(mut cfg: ServerConfig, opts: Opts) -> Result<()> {
 
     let mut pairs: Vec<(String, String)> = Vec::new();
     for batch in &batches {
-        let device = batch[0].device.clone();
+        // A batch spans devices, exactly like the live classifier's; the log
+        // line names all of them.
+        let device = {
+            let mut d: Vec<&str> = batch.iter().map(|m| m.device.as_str()).collect();
+            d.sort();
+            d.dedup();
+            d.join(",")
+        };
         let span = (batch[0].ts, batch[batch.len() - 1].ts);
 
         // Read the kept pixels back. A missing file is the pre-retention era
@@ -118,7 +125,7 @@ pub fn run(mut cfg: ServerConfig, opts: Opts) -> Result<()> {
             })
             .collect();
 
-        let (labels, usage, _raw) = match classify::classify(&cfg, key.as_deref(), &items, None) {
+        let (labels, usage, _raw) = match classify::classify(&cfg, key.as_deref(), &items, &[]) {
             Ok(v) => v,
             Err(e) => {
                 // A rate limit shuts the whole endpoint, not this batch, so
@@ -131,9 +138,14 @@ pub fn run(mut cfg: ServerConfig, opts: Opts) -> Result<()> {
             }
         };
 
-        let old: HashMap<i64, &Minute> = batch.iter().map(|m| (m.ts, m)).collect();
-        for (ts, label) in &labels {
-            let Some(orig) = old.get(ts) else { continue };
+        let old: HashMap<(&str, i64), &Minute> = batch
+            .iter()
+            .map(|m| ((m.device.as_str(), m.ts), m))
+            .collect();
+        for ((dev, ts), label) in &labels {
+            let Some(orig) = old.get(&(dev.as_str(), *ts)) else {
+                continue;
+            };
             if opts.apply {
                 db.label(&orig.device, *ts, label, &usage.model)?;
             } else {
@@ -157,23 +169,20 @@ pub fn run(mut cfg: ServerConfig, opts: Opts) -> Result<()> {
     Ok(())
 }
 
-/// Group minutes per device, in time order, cut into runs of at most `batch`
-/// -- the same shape the live classifier sends, so the backtest measures the
-/// model under the conditions it would actually run in.
-pub fn chunk(rows: Vec<Minute>, batch: usize) -> Vec<Vec<Minute>> {
-    let mut per: std::collections::BTreeMap<String, Vec<Minute>> = Default::default();
-    for m in rows {
-        per.entry(m.device.clone()).or_default().push(m);
-    }
+/// Sort minutes into one (ts, device) timeline across every device and cut it
+/// into runs of at most `batch` -- the same shape the live classifier sends,
+/// so the backtest measures the model under the conditions it would actually
+/// run in: simultaneous minutes from different machines sit in one batch,
+/// side by side.
+pub fn chunk(mut rows: Vec<Minute>, batch: usize) -> Vec<Vec<Minute>> {
+    // `range` returns ts order already, but that is a property of a query
+    // this function cannot see -- and the device tiebreak is this function's
+    // own contract.
+    rows.sort_by(|a, b| (a.ts, &a.device).cmp(&(b.ts, &b.device)));
     let mut out = Vec::new();
-    for (_, mut ms) in per {
-        // `range` returns ts order already, but that is a property of a query
-        // this function cannot see.
-        ms.sort_by_key(|m| m.ts);
-        let mut it = ms.into_iter().peekable();
-        while it.peek().is_some() {
-            out.push(it.by_ref().take(batch).collect());
-        }
+    let mut it = rows.into_iter().peekable();
+    while it.peek().is_some() {
+        out.push(it.by_ref().take(batch).collect());
     }
     out
 }
@@ -246,29 +255,33 @@ mod tests {
         }
     }
 
+    /// The backtest batches exactly like the live classifier: one timeline
+    /// across every device, sorted by (ts, device), so a batch may -- and
+    /// should -- mix machines, with simultaneous minutes adjacent.
     #[test]
-    fn chunks_per_device_in_time_order() {
-        // Interleaved devices, shuffled timestamps, batch of 2.
+    fn chunks_one_cross_device_timeline() {
+        // Interleaved devices, shuffled timestamps, batch of 3.
         let rows = vec![
             m("pc", 180, "other"),
             m("laptop", 60, "other"),
             m("pc", 60, "other"),
             m("pc", 120, "other"),
         ];
-        let batches = chunk(rows, 2);
-        assert_eq!(batches.len(), 3);
-        // BTreeMap keying makes device order deterministic: laptop before pc.
-        assert_eq!(batches[0].iter().map(|x| x.ts).collect::<Vec<_>>(), [60]);
-        assert_eq!(batches[0][0].device, "laptop");
+        let batches = chunk(rows, 3);
+        assert_eq!(batches.len(), 2);
+        let key = |x: &Minute| (x.ts, x.device.clone());
         assert_eq!(
-            batches[1].iter().map(|x| x.ts).collect::<Vec<_>>(),
-            [60, 120]
+            batches[0].iter().map(key).collect::<Vec<_>>(),
+            [
+                (60, "laptop".to_string()),
+                (60, "pc".to_string()),
+                (120, "pc".to_string()),
+            ]
         );
-        assert_eq!(batches[2].iter().map(|x| x.ts).collect::<Vec<_>>(), [180]);
-        // Never a mixed-device batch: the model is told these are one machine.
-        for b in &batches {
-            assert!(b.iter().all(|x| x.device == b[0].device));
-        }
+        assert_eq!(
+            batches[1].iter().map(key).collect::<Vec<_>>(),
+            [(180, "pc".to_string())]
+        );
     }
 
     #[test]

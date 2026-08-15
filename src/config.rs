@@ -140,12 +140,6 @@ pub struct ServerConfig {
     /// How far back an agent run looks. Separate from `code_days` because the
     /// windows cost very different amounts: a month of git log is a few seconds,
     /// a month of transcripts is well over a gigabyte of JSONL.
-    /// Package substring to category, as "substring=category". A phone
-    /// minute matching one is labelled without a model call: the app name
-    /// is the whole signal there, and paying to have it restated is waste.
-    #[serde(default = "default_phone_categories")]
-    pub phone_categories: Vec<String>,
-
     #[serde(default = "default_agent_days")]
     pub agent_days: i64,
 }
@@ -189,7 +183,6 @@ impl Default for ServerConfig {
             code_days: default_code_days(),
             agent_tools: default_agent_tools(),
             agent_days: default_agent_days(),
-            phone_categories: default_phone_categories(),
         }
     }
 }
@@ -207,28 +200,6 @@ fn default_agent_tools() -> Vec<String> {
         crate::agents::TOOL_CLAUDE,
         crate::agents::TOOL_OPENCODE,
         crate::agents::TOOL_CODEX,
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect()
-}
-
-fn default_phone_categories() -> Vec<String> {
-    [
-        "com.google.android.youtube=youtube",
-        "com.twitter=twitter",
-        "com.x.=twitter",
-        "com.instagram=twitter",
-        "com.reddit=twitter",
-        "com.slack=comms",
-        "com.discord=comms",
-        "org.thoughtcrime.securesms=comms",
-        "com.whatsapp=comms",
-        "com.google.android.gm=comms",
-        "com.android.chrome=browsing",
-        "org.mozilla=browsing",
-        "com.spotify=music",
-        "com.netflix=netflix",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -540,6 +511,15 @@ mod tests {
         std::env::set_var("TIME_API_KEY", " sk-123 ");
         assert_eq!(super::api_key(), Some("sk-123".into()));
         std::env::remove_var("TIME_API_KEY");
+    }
+
+    /// `phone_categories` is retired -- the model has full authority now --
+    /// but a config file that still carries it must keep parsing.
+    #[test]
+    fn a_retired_key_does_not_break_an_old_config() {
+        let cfg: super::Config =
+            toml::from_str("[server]\nphone_categories = [\"com.spotify=music\"]\n").unwrap();
+        assert_eq!(cfg.server.port, super::default_port());
     }
 
     #[test]

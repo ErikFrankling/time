@@ -105,7 +105,8 @@ impl Spool {
         // truncated frame the drain would have to reason about.
         let tmp = path.with_extension("tmp");
         std::fs::write(&tmp, &body).with_context(|| format!("writing {}", tmp.display()))?;
-        std::fs::rename(&tmp, &path).with_context(|| format!("renaming into {}", path.display()))?;
+        std::fs::rename(&tmp, &path)
+            .with_context(|| format!("renaming into {}", path.display()))?;
 
         Ok(Entry {
             ts: frame.ts,
@@ -276,7 +277,9 @@ mod tests {
 
         // A budget of three against four written: the oldest has to go, and
         // only the oldest.
-        let s = Spool::at(tmpdir("bytes")).unwrap().caps(one * 3, MAX_AGE_SECS);
+        let s = Spool::at(tmpdir("bytes"))
+            .unwrap()
+            .caps(one * 3, MAX_AGE_SECS);
         for ts in all {
             s.push(&frame(ts)).unwrap();
         }

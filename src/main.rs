@@ -79,7 +79,7 @@ fn main() -> Result<()> {
                 .nth(2)
                 .and_then(|a| a.parse().ok())
                 .unwrap_or(cfg.server.code_days);
-            let rows = code::collect(&cfg.server, days)?;
+            let (rows, cache) = code::collect(&cfg.server, days)?;
             let commits: i64 = rows
                 .iter()
                 .filter(|r| r.source == code::SOURCE_GIT)
@@ -112,6 +112,9 @@ fn main() -> Result<()> {
                 return Ok(());
             }
             println!("{}", code::post(&cfg.agent, &rows)?.trim());
+            // Only now: a scan whose rows never reached the server must be
+            // repeated, not remembered as done.
+            cache.commit();
             Ok(())
         }
         // Same shape as `collect`, and for the same reason: the transcripts are
@@ -121,7 +124,7 @@ fn main() -> Result<()> {
                 .nth(2)
                 .and_then(|a| a.parse().ok())
                 .unwrap_or(cfg.server.agent_days);
-            let report = agents::collect(&cfg.server, &cfg.agent.device, days)?;
+            let (report, cache) = agents::collect(&cfg.server, &cfg.agent.device, days)?;
             let sessions: i64 = report.days.iter().map(|d| d.sessions).sum();
             let prompts: i64 = report.days.iter().map(|d| d.prompts).sum();
             let out: i64 = report.days.iter().map(|d| d.tokens_out).sum();
@@ -159,6 +162,9 @@ fn main() -> Result<()> {
                 return Ok(());
             }
             println!("{}", agents::post(&cfg.agent, &report)?.trim());
+            // Only after the server accepted the report, for the same reason
+            // as `collect`: a failed post must be rescanned, not remembered.
+            cache.commit();
             Ok(())
         }
         // Server-side, unlike collect/agents: it reads the database and the

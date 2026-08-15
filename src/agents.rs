@@ -38,6 +38,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
+use crate::code::ScanCache;
 use crate::config::ServerConfig;
 use crate::proto::AgentReport;
 
@@ -155,7 +156,12 @@ impl Raw {
                     cache_read: a.cache_read,
                     cache_write: a.cache_write,
                     active_minutes: a.minutes.len() as i64,
-                    peak_parallel: a.minutes.values().map(|s| s.len() as i64).max().unwrap_or(0),
+                    peak_parallel: a
+                        .minutes
+                        .values()
+                        .map(|s| s.len() as i64)
+                        .max()
+                        .unwrap_or(0),
                 }
             })
             .collect();
@@ -240,12 +246,18 @@ fn cutoff(days: i64) -> i64 {
     chrono::Local::now().timestamp() - days.max(1) * 86_400
 }
 
-/// Files whose contents could possibly fall inside the window. Transcripts are
-/// append-only, so an untouched file cannot contain a recent line -- and at
-/// 1.2 GB of history, reading everything to discover that would make a nightly
-/// job take minutes instead of seconds.
-fn recent_files(root: &Path, since: i64, matches: &dyn Fn(&Path) -> bool) -> Vec<PathBuf> {
-    let mut out = Vec::new();
+/// (mtime, size) of every file under `root` whose contents could possibly
+/// fall inside the window. Transcripts are append-only, so an untouched file
+/// cannot contain a recent line -- and at 1.2 GB of history, reading
+/// everything to discover that would make the job take minutes instead of
+/// seconds. The same map doubles as the tool's scan fingerprint: if it is
+/// identical to the previous run's, nothing in the window can have changed.
+fn stamps(
+    root: &Path,
+    since: i64,
+    matches: &dyn Fn(&Path) -> bool,
+) -> HashMap<String, crate::code::Stamp> {
+    let mut out = HashMap::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let Ok(rd) = std::fs::read_dir(&dir) else {
@@ -261,16 +273,27 @@ fn recent_files(root: &Path, since: i64, matches: &dyn Fn(&Path) -> bool) -> Vec
             if !matches(&p) {
                 continue;
             }
-            let fresh = md
+            let mtime = md
                 .modified()
                 .ok()
                 .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
-                .is_some_and(|d| d.as_secs() as i64 >= since);
-            if fresh {
-                out.push(p);
+                .map(|d| d.as_secs() as i64);
+            if let Some(mtime) = mtime.filter(|m| *m >= since) {
+                out.insert(p.display().to_string(), (mtime, md.len()));
             }
         }
     }
+    out
+}
+
+/// Files whose contents could possibly fall inside the window, in a stable
+/// order so the run is deterministic.
+fn recent_files(root: &Path, since: i64, matches: &dyn Fn(&Path) -> bool) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = stamps(root, since, matches)
+        .into_keys()
+        .map(PathBuf::from)
+        .collect();
+    out.sort();
     out
 }
 
@@ -369,7 +392,9 @@ fn claude(device: &str, days: i64) -> Result<(Vec<AgentDay>, Vec<AgentMinute>)> 
             else {
                 continue;
             };
-            let Some((secs, day)) = when(ts) else { continue };
+            let Some((secs, day)) = when(ts) else {
+                continue;
+            };
             if secs < since {
                 continue;
             }
@@ -438,8 +463,11 @@ fn prompt_text(content: Option<&serde_json::Value>) -> Option<usize> {
     let t = text.trim();
     // Slash commands and injected reminders are expanded inline into the
     // transcript as tagged blocks. They are not something you typed.
-    if t.is_empty() || t.starts_with("<command-name>") || t.starts_with("<local-command")
-        || t.starts_with("<system-reminder>") || t.starts_with("<bash-stdout>")
+    if t.is_empty()
+        || t.starts_with("<command-name>")
+        || t.starts_with("<local-command")
+        || t.starts_with("<system-reminder>")
+        || t.starts_with("<bash-stdout>")
     {
         return None;
     }
@@ -597,7 +625,10 @@ fn codex(device: &str, days: i64) -> Result<(Vec<AgentDay>, Vec<AgentMinute>)> {
         if session.is_empty() {
             continue;
         }
-        let project = project_for(meta.get("cwd").and_then(|v| v.as_str()).unwrap_or(""), &mut projects);
+        let project = project_for(
+            meta.get("cwd").and_then(|v| v.as_str()).unwrap_or(""),
+            &mut projects,
+        );
 
         // Codex spawns child threads whose instructions are recorded as
         // `user_message` exactly like something you typed. Their work is real
@@ -652,6 +683,43 @@ fn codex(device: &str, days: i64) -> Result<(Vec<AgentDay>, Vec<AgentMinute>)> {
 
 // ------------------------------------------------------------------ collector
 
+/// Every file a tool's scan would read, stamped, so an identical map next run
+/// proves the scan would find nothing new. opencode is its SQLite database
+/// plus the WAL -- in WAL mode writes land in `-wal` first and the main file's
+/// stamp can sit still for a long time.
+fn fingerprint(tool: &str, since: i64) -> HashMap<String, crate::code::Stamp> {
+    let Ok(home) = home() else {
+        return HashMap::new();
+    };
+    match tool {
+        TOOL_CLAUDE => stamps(&home.join(".claude/projects"), since, &|p| {
+            p.extension().is_some_and(|e| e == "jsonl")
+        }),
+        TOOL_CODEX => stamps(&home.join(".codex/sessions"), since, &|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("rollout-") && n.ends_with(".jsonl"))
+        }),
+        TOOL_OPENCODE => {
+            let mut out = HashMap::new();
+            let db = home.join(".local/share/opencode/opencode.db");
+            for p in [db.clone(), db.with_extension("db-wal")] {
+                if let Ok(md) = std::fs::metadata(&p) {
+                    let mtime = md
+                        .modified()
+                        .ok()
+                        .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                    out.insert(p.display().to_string(), (mtime, md.len()));
+                }
+            }
+            out
+        }
+        _ => HashMap::new(),
+    }
+}
+
 /// Read every agent tool present on this machine.
 ///
 /// One tool failing is reported and skipped. These are three independent
@@ -659,22 +727,42 @@ fn codex(device: &str, days: i64) -> Result<(Vec<AgentDay>, Vec<AgentMinute>)> {
 /// reason to lose opencode. `cfg.agent_tools` is the escape hatch for the case
 /// this module's header warns about: a parser that has gone quietly wrong can
 /// be taken out of the run without waiting for a rebuild.
-pub fn collect(cfg: &ServerConfig, device: &str, days: i64) -> Result<AgentReport> {
+///
+/// A tool whose files carry exactly the stamps the previous run recorded is
+/// skipped without reading a line -- what makes a minutely timer affordable.
+/// The skip is all-or-nothing per tool because day totals are recomputed from
+/// every file and upserted whole: omitting one unchanged file would replace a
+/// correct row with an undercount, whereas omitting the whole tool leaves its
+/// previous rows standing. The caller commits the returned cache only after
+/// the server has accepted the rows.
+pub fn collect(cfg: &ServerConfig, device: &str, days: i64) -> Result<(AgentReport, ScanCache)> {
     let mut out = AgentReport::default();
+    let mut cache = ScanCache::load("agents-scan-cache.json", days);
+    let since = cutoff(days);
     type Reader = fn(&str, i64) -> Result<(Vec<AgentDay>, Vec<AgentMinute>)>;
-    for (name, result) in [
+    for (name, read) in [
         (TOOL_CLAUDE, claude as Reader),
         (TOOL_OPENCODE, opencode),
         (TOOL_CODEX, codex),
     ]
     .into_iter()
     .filter(|(name, _)| cfg.agent_tools.iter().any(|t| t == name))
-    .map(|(name, read)| (name, read(device, days)))
     {
-        match result {
+        // Stamped before reading, so a transcript growing mid-scan reads as a
+        // change next run rather than being silently absorbed.
+        let fp = fingerprint(name, since);
+        if cache.section_unchanged(name, &fp) {
+            eprintln!("{name}: transcripts unchanged, skipping");
+            cache.observe_all(name, &fp);
+            continue;
+        }
+        match read(device, days) {
             Ok((days, minutes)) => {
                 out.days.extend(days);
                 out.minutes.extend(minutes);
+                // Only a successful read earns its stamps; a failed one is
+                // retried every run until it stops failing.
+                cache.observe_all(name, &fp);
             }
             Err(e) => eprintln!("{name}: {e:#}"),
         }
@@ -686,7 +774,7 @@ pub fn collect(cfg: &ServerConfig, device: &str, days: i64) -> Result<AgentRepor
             .then(a.project.cmp(&b.project))
     });
     out.minutes.sort_by_key(|m| (m.ts, m.tool.clone()));
-    Ok(out)
+    Ok((out, cache))
 }
 
 /// Ship a collection to the server.
