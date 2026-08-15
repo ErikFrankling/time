@@ -68,6 +68,21 @@ pub struct ServerConfig {
     #[serde(default = "default_endpoint")]
     pub endpoint: String,
 
+    /// Output-token budget per minute in a batch. None falls back to a
+    /// name-substring guess (reasoning models get more), which is wrong the
+    /// moment the endpoint is a local llama-swap alias whose name says nothing
+    /// about the model behind it -- this is the override for that.
+    #[serde(default)]
+    pub max_tokens_per_minute: Option<u32>,
+
+    /// Ask the endpoint to enforce the label schema via an OpenAI-style
+    /// `response_format` of type `json_schema`. llama.cpp's llama-server
+    /// supports this (it compiles the schema to a grammar); hosted gateways
+    /// mostly ignore or reject it, hence off by default. The prompt still
+    /// spells out the shape either way, so nothing depends on this being on.
+    #[serde(default)]
+    pub json_schema: bool,
+
     #[serde(default = "default_port")]
     pub port: u16,
 
@@ -161,6 +176,8 @@ impl Default for ServerConfig {
             model: default_model(),
             model_text: default_model_text(),
             endpoint: default_endpoint(),
+            max_tokens_per_minute: None,
+            json_schema: false,
             port: default_port(),
             idle_after_secs: default_idle_after_secs(),
             idle_distance: default_idle_distance(),
@@ -286,6 +303,10 @@ fn default_model_text() -> String {
     "deepseek-v4-flash".into()
 }
 
+/// The hosted fallback. The intended setup is a local llama-swap
+/// (llama.cpp) endpoint on a machine with a GPU -- free, private, and off any
+/// usage allowance -- but a fresh install should classify out of the box, and
+/// only the hosted endpoint does that without a model download first.
 fn default_endpoint() -> String {
     "https://opencode.ai/zen/go/v1/chat/completions".into()
 }
@@ -390,6 +411,15 @@ categories = [
 # submitted data may be used for training; the paid IDs are zero-retention.
 model = "qwen3.6-plus"
 model_text = "deepseek-v4-flash"
+
+# Any OpenAI-compatible chat-completions URL. The default is the hosted
+# OpenCode endpoint so a fresh install works out of the box, but the intended
+# setup is a local llama-swap (llama.cpp) instance serving a Qwen VL model --
+# free, private, and off any usage allowance. With llama-swap, point both
+# model names above at your aliases, leave TIME_API_KEY unset, and consider:
+#
+#   max_tokens_per_minute = 1600   # explicit output budget per minute
+#   json_schema = true             # llama-server enforces the label schema
 endpoint = "https://opencode.ai/zen/go/v1/chat/completions"
 port = 7373
 idle_distance = 3
@@ -448,8 +478,8 @@ impl Config {
             std::fs::write(&path, DEFAULT_CONFIG)?;
             eprintln!("wrote default config to {}", path.display());
         }
-        let text =
-            std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading {}", path.display()))?;
         let mut cfg: Config =
             toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
 
@@ -461,15 +491,16 @@ impl Config {
 }
 
 /// Model API key. Server-side only, and never read from the config file -- it
-/// comes from the environment so it can be a Kubernetes secret.
-pub fn api_key() -> Result<String> {
-    let k = std::env::var("TIME_API_KEY")
-        .context("TIME_API_KEY is not set (on the cluster this comes from the time-secrets secret)")?;
-    let k = k.trim().to_string();
-    anyhow::ensure!(!k.is_empty(), "TIME_API_KEY is empty");
-    Ok(k)
+/// comes from the environment so it can be a Kubernetes secret. None when
+/// unset or empty, which is the normal state for a local llama-swap endpoint:
+/// no key exists, and sending a Bearer header anyway is what some local
+/// servers reject.
+pub fn api_key() -> Option<String> {
+    std::env::var("TIME_API_KEY")
+        .ok()
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
 }
-
 
 fn base_dir(kind: &str) -> Result<PathBuf> {
     let home = std::env::var("HOME").context("HOME not set")?;
@@ -495,4 +526,30 @@ pub fn data_dir() -> Result<PathBuf> {
 
 pub fn db_path() -> Result<PathBuf> {
     Ok(data_dir()?.join("time.db"))
+}
+
+#[cfg(test)]
+mod tests {
+    /// One test, not three: they would share the process environment and race.
+    #[test]
+    fn api_key_is_optional_and_trimmed() {
+        std::env::remove_var("TIME_API_KEY");
+        assert_eq!(super::api_key(), None);
+        std::env::set_var("TIME_API_KEY", "   ");
+        assert_eq!(super::api_key(), None, "whitespace-only key is no key");
+        std::env::set_var("TIME_API_KEY", " sk-123 ");
+        assert_eq!(super::api_key(), Some("sk-123".into()));
+        std::env::remove_var("TIME_API_KEY");
+    }
+
+    #[test]
+    fn new_server_keys_default_off() {
+        let cfg: super::Config = toml::from_str("[server]\n").unwrap();
+        assert_eq!(cfg.server.max_tokens_per_minute, None);
+        assert!(!cfg.server.json_schema);
+        let cfg: super::Config =
+            toml::from_str("[server]\nmax_tokens_per_minute = 1600\njson_schema = true\n").unwrap();
+        assert_eq!(cfg.server.max_tokens_per_minute, Some(1600));
+        assert!(cfg.server.json_schema);
+    }
 }

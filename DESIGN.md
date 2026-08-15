@@ -16,7 +16,9 @@ One Rust binary on `pc`, running as a systemd user service. Every minute:
 4. Otherwise send to a cheap multimodal model: the image, the active window
    class/title, and **last minute's label**
 5. Get back `{category, project, detail}`
-6. Insert a row in SQLite. **Delete the image.**
+6. Insert a row in SQLite. ~~**Delete the image.**~~ **Reversed** — see §4:
+   the server now keeps every screenshot, by owner decision, so labels can be
+   recomputed later with better models.
 
 Then one local web page: today's pie chart, plus a scrollable list of the
 minutes so I can drill into what a slice actually was.
@@ -60,6 +62,16 @@ clicking a slice worth doing.
 ---
 
 ## 3. The model call
+
+**Superseding update: the call is local now.** The deployed endpoint is
+llama-swap (llama.cpp) on the pc's GPU, serving one local Qwen VL model behind
+two aliases (`time-vision` / `time-text`) — free, private, off any allowance.
+Three config keys carry the difference: the API key is optional (llama-swap
+has none; no Authorization header is sent when unset), `max_tokens_per_minute`
+sets the output budget explicitly since an alias name says nothing about
+whether the model reasons, and `json_schema = true` has llama-server enforce
+the label array as a grammar. Everything below about OpenCode models and
+pricing is the hosted fallback the default config still points at.
 
 - **Model:** `qwen3.6-plus`. The original pick, `mimo-v2-omni`, is still listed
   by the models endpoint but 404s as deprecated on every call — so the plan's
@@ -163,8 +175,34 @@ CREATE TABLE minute (
 );
 ```
 
-~220k rows/year, a few tens of MB. Labels kept forever, screenshots never
-written to disk longer than the moment between capture and API call.
+~220k rows/year, a few tens of MB.
+
+**"Labels kept forever, screenshots never written to disk" is reversed**, by
+owner decision, and on purpose rather than by drift. The original rule assumed
+the pixels' only value was one model call and their retention was pure
+liability; both halves changed when classification moved to a local model.
+Labels are a lossy, model-of-the-day reading of the raw data — throwing the
+raw data away froze every past mistake permanently. So the server now keeps,
+forever, with no pruning:
+
+- every screenshot, at `<data dir>/frames/<device>/<ts>.jpg`, referenced from
+  `minute.image_path` (also: `minute.note` and `minute.blocked` are stored now
+  instead of being discarded at ingest);
+- every raw model reply (or final error) in the `llm_call` table — created,
+  device, minute span, model, endpoint, token counts, response text.
+
+`time reclassify <days>` is the payoff: it re-batches stored minutes exactly
+as the live classifier would, re-reads the frames, calls any model/endpoint,
+and writes to a `minute_trial` table with an agreement report against the live
+labels — or rewrites them with `--apply`. The sweep also got honest pixels
+back: a re-queued minute re-reads its frame from disk instead of degrading to
+text-only.
+
+The privacy accounting moved rather than disappeared: nothing goes to a third
+party any more, but the server's disk is now a permanent visual archive of
+every screen, which is a bigger prize for anyone who gets onto it. The
+client-side blocklist is unchanged and remains the only gate that matters —
+what is never captured can never be retained.
 
 ---
 
@@ -188,10 +226,9 @@ Not V1. Roughly in the order they'd become worth it:
 - **A collector server** — Postgres plus an ingest API on a home server, reachable
   on the LAN only, so multiple machines land in one place. Only worth it once
   there's a second machine.
-- **A local vision model** — pointing the classifier at a self-hosted VLM
-  (llama.cpp / llama-swap with a Qwen-VL model on a machine that has a GPU)
-  makes labeling free, private, and off any usage allowance entirely. The
-  strongest argument for doing this eventually.
+- ~~**A local vision model**~~ — **built.** The classifier points at
+  llama-swap on the pc's GPU (see §3); labeling is free, private, and off any
+  usage allowance. This is also what unlocked keeping the raw data (§4).
 - **Typing/mouse metrics** — WPM, click counts. Requires reading
   `/dev/input/event*` via evdev (Wayland gives no global input API). If done:
   count keystrokes into buckets, never record which key.

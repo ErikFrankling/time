@@ -209,9 +209,8 @@ fn item_context(item: &Item<'_>, n: usize, total: usize, prev: Option<&Previous<
         // "no input device readable" was written for a desktop whose evdev read
         // failed. A phone has no such device to begin with and never will, so
         // the phrasing has to cover both without implying a fault.
-        None => context.push_str(
-            "Seconds since last human input: UNKNOWN (this device does not report it)\n",
-        ),
+        None => context
+            .push_str("Seconds since last human input: UNKNOWN (this device does not report it)\n"),
     }
     context.push_str(&format!(
         "Human input this minute: {} key presses, {} pointer movements\n",
@@ -251,7 +250,7 @@ fn item_context(item: &Item<'_>, n: usize, total: usize, prev: Option<&Previous<
 /// from the payload rather than the device name, so a desktop whose capture
 /// failed is routed correctly too, and so a text-only model can never be sent
 /// a picture of the user's screen by accident.
-fn model_for<'a>(cfg: &'a ServerConfig, items: &[Item<'_>]) -> &'a str {
+pub fn model_for<'a>(cfg: &'a ServerConfig, items: &[Item<'_>]) -> &'a str {
     if items.iter().any(|i| i.jpeg.is_some()) {
         &cfg.model
     } else {
@@ -275,12 +274,19 @@ fn model_for<'a>(cfg: &'a ServerConfig, items: &[Item<'_>]) -> &'a str {
 /// Minutes the model declines to label are simply absent from the result. They
 /// keep their pending flag and the sweep offers them again, which is a great
 /// deal safer than pairing labels to minutes by position.
+///
+/// `key` is None for endpoints without auth -- a local llama-swap -- and then
+/// no Authorization header is sent at all.
+///
+/// The third element of the result is the raw reply text (content, plus the
+/// reasoning half when the model split them), so the caller can keep an audit
+/// trail the labels can later be re-derived or second-guessed from.
 pub fn classify(
     cfg: &ServerConfig,
-    key: &str,
+    key: Option<&str>,
     items: &[Item<'_>],
     prev: Option<Previous<'_>>,
-) -> Result<(Vec<(i64, Label)>, Usage)> {
+) -> Result<(Vec<(i64, Label)>, Usage, String)> {
     anyhow::ensure!(!items.is_empty(), "nothing to classify");
 
     let mut content: Vec<serde_json::Value> = Vec::with_capacity(items.len() * 2 + 1);
@@ -311,7 +317,7 @@ pub fn classify(
 
     let model = model_for(cfg, items);
 
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "model": model,
         "temperature": 0,
         // Per minute, plus headroom for a reasoning model's preamble. Too low
@@ -321,12 +327,15 @@ pub fn classify(
         // 200 left about 6% headroom at a batch of twenty -- and an overrun
         // does not truncate one label, it loses the whole batch. Unused
         // headroom is free: this caps the reply, it does not reserve anything.
-        "max_tokens": per_minute_budget(model) * items.len() as u32 + 2048,
+        "max_tokens": per_minute_budget(cfg, model) * items.len() as u32 + 2048,
         "messages": [
             { "role": "system", "content": system_prompt(cfg) },
             { "role": "user", "content": serde_json::Value::Array(content) }
         ]
     });
+    if cfg.json_schema {
+        body["response_format"] = response_format();
+    }
 
     let client = reqwest::blocking::Client::builder()
         // A full-screen image on a busy endpoint regularly takes well over a
@@ -339,11 +348,14 @@ pub fn classify(
     // and a dropped minute leaves a permanent hole in the day.
     let mut last_err = String::new();
     for _ in 0..2 {
-        let sent = client
-            .post(&cfg.endpoint)
-            .bearer_auth(key)
-            .json(&body)
-            .send();
+        let mut req = client.post(&cfg.endpoint);
+        // Only when there is one: a local llama-swap has no key, and a Bearer
+        // header carrying an empty secret is the kind of thing strict servers
+        // reject outright.
+        if let Some(key) = key {
+            req = req.bearer_auth(key);
+        }
+        let sent = req.json(&body).send();
 
         let resp = match sent {
             Ok(r) => r,
@@ -392,7 +404,10 @@ pub fn classify(
         }
 
         let v: serde_json::Value = serde_json::from_str(&text).with_context(|| {
-            format!("parsing response: {}", text.chars().take(400).collect::<String>())
+            format!(
+                "parsing response: {}",
+                text.chars().take(400).collect::<String>()
+            )
         })?;
         let msg = &v["choices"][0]["message"];
         let content = msg["content"].as_str().unwrap_or("");
@@ -408,10 +423,17 @@ pub fn classify(
             completion: v["usage"]["completion_tokens"].as_u64().unwrap_or(0),
             model: model.to_string(),
         };
+        // Both halves, because either may hold the answer, and the audit row
+        // exists precisely so a later reading can disagree with this one.
+        let raw = if reasoning.is_empty() {
+            content.to_string()
+        } else {
+            format!("{content}\n--- reasoning ---\n{reasoning}")
+        };
         match parse_labels(content, cfg) {
-            Ok(rows) => return Ok((rows, usage)),
+            Ok(rows) => return Ok((rows, usage, raw)),
             Err(e) => match parse_labels(reasoning, cfg) {
-                Ok(rows) if !rows.is_empty() => return Ok((rows, usage)),
+                Ok(rows) if !rows.is_empty() => return Ok((rows, usage, raw)),
                 // Neither field held an array. Say enough to tell the three
                 // causes apart without ever logging the reply itself, which
                 // describes what was on screen.
@@ -440,7 +462,10 @@ fn strip_reasoning(content: &str) -> &str {
     // `<think>`, `<thinking>` and `<reasoning>` between them.
     while let Some(open) = rest.find("<think") {
         let after = &rest[open..];
-        match after.find("</").and_then(|c| after[c..].find('>').map(|e| open + c + e + 1)) {
+        match after
+            .find("</")
+            .and_then(|c| after[c..].find('>').map(|e| open + c + e + 1))
+        {
             Some(end) => rest = &rest[end..],
             // An unterminated block means the answer was truncated before it
             // ever started. Nothing to salvage.
@@ -459,7 +484,11 @@ fn parse_labels(content: &str, cfg: &ServerConfig) -> Result<Vec<(i64, Label)>> 
     // appears after an array that was already complete -- so only accept the
     // stripped form if it still has something to parse.
     let stripped = strip_reasoning(content);
-    let content = if stripped.trim().is_empty() { content } else { stripped };
+    let content = if stripped.trim().is_empty() {
+        content
+    } else {
+        stripped
+    };
     let json = match (content.find('['), content.rfind(']')) {
         (Some(s), Some(e)) if e > s => &content[s..=e],
         _ => match (content.find('{'), content.rfind('}')) {
@@ -592,8 +621,11 @@ mod tests {
 
     #[test]
     fn folds_an_invented_category_into_other() {
-        let out = parse_labels(r#"[{"ts":1,"category":"gardening","tags":["gardening"]}]"#, &cfg())
-            .unwrap();
+        let out = parse_labels(
+            r#"[{"ts":1,"category":"gardening","tags":["gardening"]}]"#,
+            &cfg(),
+        )
+        .unwrap();
         assert_eq!(out[0].1.category, "other");
         assert_eq!(out[0].1.tags, vec!["other".to_string()]);
     }
@@ -617,7 +649,10 @@ mod tests {
     #[test]
     fn a_batch_without_pictures_goes_to_the_cheap_model() {
         let cfg = cfg();
-        assert_eq!(model_for(&cfg, &[item(1, None), item(2, None)]), cfg.model_text);
+        assert_eq!(
+            model_for(&cfg, &[item(1, None), item(2, None)]),
+            cfg.model_text
+        );
     }
 
     /// The safety half of the split: a text-only model must never be handed a
@@ -638,6 +673,39 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].0, 42);
     }
+
+    #[test]
+    fn budget_override_beats_the_name_heuristic() {
+        let mut cfg = cfg();
+        // The heuristic would say 1500 for deepseek and 400 for anything else;
+        // the config, when set, wins over both.
+        assert_eq!(per_minute_budget(&cfg, "deepseek-v4-flash"), 1500);
+        assert_eq!(per_minute_budget(&cfg, "time-vision"), 400);
+        cfg.max_tokens_per_minute = Some(1600);
+        assert_eq!(per_minute_budget(&cfg, "deepseek-v4-flash"), 1600);
+        assert_eq!(per_minute_budget(&cfg, "time-vision"), 1600);
+    }
+
+    /// A reply that exactly follows the enforced schema must round-trip
+    /// through the parser: the schema and `parse_labels` are two descriptions
+    /// of one shape, and this is what keeps them from drifting apart.
+    #[test]
+    fn schema_shaped_reply_parses() {
+        let schema = response_format();
+        assert_eq!(schema["type"], "json_schema");
+        for field in ["ts", "category", "tags", "project", "detail"] {
+            assert!(
+                schema["json_schema"]["schema"]["items"]["properties"][field].is_object(),
+                "schema is missing {field}"
+            );
+        }
+        let out = parse_labels(
+            r#"[{"ts":100,"category":"idle","tags":["idle"],"project":null,"detail":"away"}]"#,
+            &cfg(),
+        )
+        .unwrap();
+        assert_eq!(out[0].1.category, "idle");
+    }
 }
 
 /// Output tokens to allow per minute in a batch.
@@ -651,7 +719,13 @@ mod tests {
 ///
 /// The cap reserves nothing and is not billed unless used, so the reasoning
 /// budget is deliberately generous.
-fn per_minute_budget(model: &str) -> u32 {
+fn per_minute_budget(cfg: &ServerConfig, model: &str) -> u32 {
+    // The config wins when set: behind a llama-swap alias like "time-vision"
+    // the name says nothing about whether the model reasons, so the substring
+    // guess below has nothing to go on.
+    if let Some(n) = cfg.max_tokens_per_minute {
+        return n;
+    }
     // Named rather than inferred: a model that reasons is a property of the
     // model, and guessing from the id would silently mis-size a new one.
     const REASONING: [&str; 3] = ["deepseek", "minimax", "think"];
@@ -661,4 +735,34 @@ fn per_minute_budget(model: &str) -> u32 {
     } else {
         400
     }
+}
+
+/// OpenAI-style `response_format` describing exactly the array `parse_labels`
+/// expects. llama.cpp's llama-server compiles this to a grammar and the reply
+/// cannot then be anything but the array -- no fences, no prose, no think
+/// block. The prompt keeps describing the same shape in words, so switching
+/// this off (or a gateway ignoring it) changes nothing.
+fn response_format() -> serde_json::Value {
+    serde_json::json!({
+        "type": "json_schema",
+        "json_schema": {
+            "name": "labels",
+            "strict": true,
+            "schema": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "ts": { "type": "integer" },
+                        "category": { "type": "string" },
+                        "tags": { "type": "array", "items": { "type": "string" } },
+                        "project": { "type": ["string", "null"] },
+                        "detail": { "type": "string" }
+                    },
+                    "required": ["ts", "category", "tags", "project", "detail"],
+                    "additionalProperties": false
+                }
+            }
+        }
+    })
 }

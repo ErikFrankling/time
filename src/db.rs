@@ -29,6 +29,16 @@ pub struct Minute {
     pub pending: bool,
     /// Everything active this minute, including the primary category.
     pub tags: Vec<String>,
+    /// Where this minute's screenshot lives, relative to the data dir
+    /// ("frames/<device>/<ts>.jpg"). None for devices that cannot capture and
+    /// for every row from before screenshots were kept.
+    pub image_path: Option<String>,
+    /// The agent's free-text note about its machine, as it read when the frame
+    /// arrived. Kept so a reclassify run can hand the model the same context
+    /// the original call had.
+    pub note: Option<String>,
+    /// Capture was suppressed by the client-side blocklist.
+    pub blocked: bool,
 }
 
 impl Minute {
@@ -41,6 +51,23 @@ impl Minute {
             .map(|w| w.split(" — ").next().unwrap_or(w).trim())
             .filter(|s| !s.is_empty())
     }
+}
+
+/// One model call for the audit trail: which minutes went out, what came back
+/// (or why nothing did), and what the endpoint said it cost.
+#[derive(Debug, Default)]
+pub struct LlmCall {
+    pub created: i64,
+    pub device: String,
+    pub ts_from: i64,
+    pub ts_to: i64,
+    pub n: i64,
+    pub model: String,
+    pub endpoint: String,
+    pub prompt_tokens: Option<i64>,
+    pub completion_tokens: Option<i64>,
+    pub raw_response: Option<String>,
+    pub error: Option<String>,
 }
 
 /// Totals over a day, split however the caller asked.
@@ -109,11 +136,17 @@ fn params<'a>(
 
 const COLS: &str = "ts, device, category, project, detail, window, phash, model, \
                     keys, mouse, idle_secs, apps, workspaces, classified, tags, domain, \
-                    pending";
+                    pending, image_path, note, blocked";
 
 impl Db {
     pub fn open() -> Result<Self> {
-        let conn = Connection::open(crate::config::db_path()?)?;
+        Self::open_at(crate::config::db_path()?)
+    }
+
+    /// Split from `open` so a test can point at a throwaway file instead of
+    /// the real database under $HOME.
+    pub fn open_at(path: std::path::PathBuf) -> Result<Self> {
+        let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.execute_batch(
             // Keyed by (device, ts) so several machines can report the same
@@ -146,6 +179,9 @@ impl Db {
             ("domain", "TEXT"),
             ("pending", "INTEGER NOT NULL DEFAULT 0"),
             ("attempts", "INTEGER NOT NULL DEFAULT 0"),
+            ("image_path", "TEXT"),
+            ("note", "TEXT"),
+            ("blocked", "INTEGER NOT NULL DEFAULT 0"),
         ] {
             let exists: bool = conn
                 .prepare("SELECT 1 FROM pragma_table_info('minute') WHERE name = ?1")?
@@ -159,9 +195,7 @@ impl Db {
         // the column it indexes is one of the ones added there. The sweep runs
         // on every start and must not scan the whole history to find a handful
         // of rows.
-        conn.execute_batch(
-            "CREATE INDEX IF NOT EXISTS minute_pending ON minute(pending, ts);",
-        )?;
+        conn.execute_batch("CREATE INDEX IF NOT EXISTS minute_pending ON minute(pending, ts);")?;
 
         // Output, kept well away from the minute table. Different grain (a day,
         // not a minute), different truth (retrospective and re-derivable rather
@@ -230,6 +264,47 @@ impl Db {
              );
              CREATE INDEX IF NOT EXISTS agent_minute_ts ON agent_minute(ts);",
         )?;
+
+        // The audit trail: one row per model call, raw reply included. Labels
+        // used to be the only thing that survived a call; keeping the reply
+        // (and the screenshots, under frames/) is what makes it possible to
+        // re-judge old minutes with a better model later instead of trusting
+        // whatever the model of the day said.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS llm_call (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                created           INTEGER NOT NULL,
+                device            TEXT NOT NULL,
+                ts_from           INTEGER NOT NULL,
+                ts_to             INTEGER NOT NULL,
+                n                 INTEGER NOT NULL,
+                model             TEXT NOT NULL,
+                endpoint          TEXT NOT NULL,
+                prompt_tokens     INTEGER,
+                completion_tokens INTEGER,
+                raw_response      TEXT,
+                error             TEXT
+             );
+             CREATE INDEX IF NOT EXISTS llm_call_created ON llm_call(created);",
+        )?;
+
+        // Dry-run reclassifications land here rather than in `minute`, so a
+        // backtest of a candidate model can be compared against the live labels
+        // without touching them. Keyed per run so several trials coexist.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS minute_trial (
+                run_id   TEXT NOT NULL,
+                device   TEXT NOT NULL,
+                ts       INTEGER NOT NULL,
+                category TEXT NOT NULL,
+                project  TEXT,
+                detail   TEXT,
+                tags     TEXT,
+                model    TEXT,
+                created  INTEGER NOT NULL,
+                PRIMARY KEY (run_id, device, ts)
+             );",
+        )?;
         Ok(Self { conn })
     }
 
@@ -238,8 +313,9 @@ impl Db {
             "INSERT OR REPLACE INTO minute
                (ts, device, category, project, detail, window, phash, model,
                 keys, mouse, idle_secs, apps, workspaces, classified, tags, domain,
-                pending)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+                pending, image_path, note, blocked)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,
+                     ?18,?19,?20)",
             rusqlite::params![
                 m.ts,
                 m.device,
@@ -258,6 +334,9 @@ impl Db {
                 serde_json::to_string(&m.tags).unwrap_or_else(|_| "[]".into()),
                 m.domain,
                 m.pending as i32,
+                m.image_path,
+                m.note,
+                m.blocked as i32,
             ],
         )?;
         Ok(())
@@ -326,6 +405,62 @@ impl Db {
                 rusqlite::params![device, ts],
             )?;
         }
+        Ok(())
+    }
+
+    /// Record one model call, verdict or failure, raw reply and all. The
+    /// insert must never take the minutes down with it, so callers log a
+    /// failure here rather than propagating it.
+    pub fn record_llm_call(&self, c: &LlmCall) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO llm_call
+               (created, device, ts_from, ts_to, n, model, endpoint,
+                prompt_tokens, completion_tokens, raw_response, error)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            rusqlite::params![
+                c.created,
+                c.device,
+                c.ts_from,
+                c.ts_to,
+                c.n,
+                c.model,
+                c.endpoint,
+                c.prompt_tokens,
+                c.completion_tokens,
+                c.raw_response,
+                c.error,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Store one reclassified minute in the trial table, leaving the live
+    /// label alone. Replace-on-conflict so a re-run of the same run_id
+    /// converges instead of erroring halfway.
+    pub fn put_trial(
+        &self,
+        run_id: &str,
+        device: &str,
+        ts: i64,
+        label: &crate::classify::Label,
+        model: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO minute_trial
+               (run_id, device, ts, category, project, detail, tags, model, created)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            rusqlite::params![
+                run_id,
+                device,
+                ts,
+                label.category,
+                label.project,
+                label.detail,
+                serde_json::to_string(&label.tags).unwrap_or_else(|_| "[]".into()),
+                model,
+                chrono::Utc::now().timestamp(),
+            ],
+        )?;
         Ok(())
     }
 
@@ -422,7 +557,6 @@ impl Db {
         Ok(v)
     }
 
-
     /// Foreground minutes per application, derived from the active window
     /// class. This is time actually spent in an app, not merely having it open.
     pub fn by_app(&self, from: i64, to: i64, f: &Filter) -> Result<Vec<(String, i64)>> {
@@ -446,7 +580,11 @@ impl Db {
     /// did the evening go", which only counts while someone was there.
     pub fn by_domain(&self, from: i64, to: i64, f: &Filter) -> Result<Vec<(String, i64)>> {
         let mut counts: std::collections::HashMap<String, i64> = Default::default();
-        for m in self.resolved(from, to, f)?.into_iter().filter(|m| m.category != "idle") {
+        for m in self
+            .resolved(from, to, f)?
+            .into_iter()
+            .filter(|m| m.category != "idle")
+        {
             if let Some(d) = m.domain.filter(|d| !d.trim().is_empty()) {
                 *counts.entry(d).or_default() += 1;
             }
@@ -525,7 +663,6 @@ impl Db {
         Ok((buckets, input))
     }
 
-
     pub fn all_devices(&self) -> Result<Vec<String>> {
         let mut stmt = self
             .conn
@@ -554,11 +691,17 @@ fn row_to_minute(r: &rusqlite::Row) -> rusqlite::Result<Minute> {
             .unwrap_or_default(),
         workspaces: r.get(12).unwrap_or(0),
         classified: r.get::<_, i32>(13).unwrap_or(0) != 0,
-        tags: r.get::<_, Option<String>>(14).ok().flatten()
+        tags: r
+            .get::<_, Option<String>>(14)
+            .ok()
+            .flatten()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default(),
         domain: r.get(15).unwrap_or(None),
         pending: r.get::<_, i32>(16).unwrap_or(0) != 0,
+        image_path: r.get(17).unwrap_or(None),
+        note: r.get(18).unwrap_or(None),
+        blocked: r.get::<_, i32>(19).unwrap_or(0) != 0,
     })
 }
 
@@ -577,8 +720,7 @@ fn beats(a: &Minute, b: &Minute) -> bool {
     a.device < b.device
 }
 
-impl Db {
-}
+impl Db {}
 
 impl Db {
     /// Two-level breakdown for the sunburst: each primary category, and within
@@ -599,8 +741,12 @@ impl Db {
         let mut totals: std::collections::HashMap<String, i64> = Default::default();
         for m in self.resolved(from, to, f)? {
             *totals.entry(m.category.clone()).or_default() += 1;
-            let mut with: Vec<String> =
-                m.tags.iter().filter(|t| **t != m.category).cloned().collect();
+            let mut with: Vec<String> = m
+                .tags
+                .iter()
+                .filter(|t| **t != m.category)
+                .cloned()
+                .collect();
             with.sort();
             *outer.entry((m.category.clone(), with)).or_default() += 1;
         }
@@ -842,10 +988,7 @@ impl Db {
                     b.minutes = (m.ts - b.start) / 60 + 1;
                     interruptions = 0;
                 }
-                Some(b)
-                    if interruptions < tolerance
-                        && m.ts - (b.start + b.minutes * 60) <= 60 =>
-                {
+                Some(b) if interruptions < tolerance && m.ts - (b.start + b.minutes * 60) <= 60 => {
                     // A brief dip into something else: hold the block open.
                     interruptions += 1;
                     let _ = b;
@@ -936,5 +1079,97 @@ impl Db {
             out.push((start, row));
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp_db(name: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!("time-db-{name}-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    fn minute(ts: i64) -> Minute {
+        Minute {
+            ts,
+            device: "pc".into(),
+            category: "other".into(),
+            image_path: Some(format!("frames/pc/{ts}.jpg")),
+            note: Some("runs agents".into()),
+            blocked: false,
+            ..Default::default()
+        }
+    }
+
+    /// The new columns must round-trip, and -- since they arrive via the
+    /// additive ALTER loop -- must survive the database being opened again.
+    #[test]
+    fn raw_columns_survive_a_reopen() {
+        let path = tmp_db("raw-cols");
+        {
+            let db = Db::open_at(path.clone()).unwrap();
+            let mut m = minute(60);
+            m.blocked = true;
+            db.insert(&m).unwrap();
+        }
+        let db = Db::open_at(path.clone()).unwrap();
+        let m = db.get("pc", 60).unwrap().expect("row still there");
+        assert_eq!(m.image_path.as_deref(), Some("frames/pc/60.jpg"));
+        assert_eq!(m.note.as_deref(), Some("runs agents"));
+        assert!(m.blocked);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn llm_call_and_trial_tables_survive_a_reopen() {
+        let path = tmp_db("audit");
+        {
+            let db = Db::open_at(path.clone()).unwrap();
+            db.record_llm_call(&LlmCall {
+                created: 1,
+                device: "pc".into(),
+                ts_from: 60,
+                ts_to: 120,
+                n: 2,
+                model: "time-vision".into(),
+                endpoint: "http://local".into(),
+                prompt_tokens: Some(1000),
+                completion_tokens: Some(200),
+                raw_response: Some("[{}]".into()),
+                error: None,
+            })
+            .unwrap();
+            let label = crate::classify::Label {
+                category: "idle".into(),
+                project: None,
+                detail: Some("away".into()),
+                tags: vec!["idle".into()],
+            };
+            db.put_trial("run-1", "pc", 60, &label, "time-vision")
+                .unwrap();
+            // Same key again must replace, not error.
+            db.put_trial("run-1", "pc", 60, &label, "time-vision")
+                .unwrap();
+        }
+        let db = Db::open_at(path.clone()).unwrap();
+        let calls: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM llm_call", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(calls, 1);
+        let (trials, cat): (i64, String) = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*), MAX(category) FROM minute_trial WHERE run_id = 'run-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(trials, 1, "replaced, not duplicated");
+        assert_eq!(cat, "idle");
+        let _ = std::fs::remove_file(&path);
     }
 }

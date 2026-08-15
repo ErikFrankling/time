@@ -3,8 +3,12 @@
 # The secret is NOT in this file and must never be. Create it out of band:
 #
 #   kubectl -n homelab create secret generic time-secrets \
-#     --from-literal=api-key='<opencode key>' \
+#     --from-literal=api-key='<key, or empty — the local llama-swap needs none>' \
 #     --from-literal=ingest-token="$(openssl rand -hex 32)"
+#
+# The api-key entry is optional now that classification runs against the local
+# llama-swap endpoint; it only matters again if the endpoint below points back
+# at a hosted gateway.
 #
 # The Traefik route lives in homelab ingress/routes.yaml, alongside the others.
 # See README.md for the full walkthrough.
@@ -14,14 +18,21 @@ kind: PersistentVolumeClaim
 metadata:
   name: time-data
   annotations:
-    # The database is the only thing that can't be reconstructed. Keep Flux
-    # (and anything else doing a prune) away from it.
+    # The database and the kept screenshots can't be reconstructed. Keep Flux
+    # (and anything else doing a prune) away from them.
     kustomize.toolkit.fluxcd.io/prune: disabled
 spec:
   accessModes:
     - ReadWriteOnce
   resources:
     requests:
+      # Screenshots are now kept forever under frames/ (roughly 50-100 KiB a
+      # minute, so tens of GiB a year). This number stays at its historical
+      # value on purpose: local-path never enforces capacity — the real limit
+      # is the node's 160 GiB disk — and the storage class does not support
+      # expansion, so changing this field on the bound claim makes every Flux
+      # apply of this file error out. Growing it for real means recreating the
+      # claim and moving the data by hand; until then the value is cosmetic.
       storage: 2Gi
   storageClassName: local-path
 ---
@@ -50,21 +61,32 @@ data:
       "idle",
       "other",
     ]
-    # Two models, picked per call by whether the batch carries screenshots.
-    # `model` needs vision and is priced for it; `model_text` serves the phone,
-    # which cannot screenshot itself and reports most of the minutes.
+    # Classification runs against llama-swap on the pc (LAN), serving a local
+    # Qwen VL model on its GPU: free, private, and off any usage allowance —
+    # no screenshot leaves the LAN any more. `model` and `model_text` are
+    # llama-swap aliases, still picked per call by whether the batch carries
+    # screenshots; both currently resolve to the same local vision model, so
+    # any mix of batches is fine and the split only matters again if the two
+    # aliases ever diverge.
     #
-    # Never point model_text at a "-free" ID: those are the ones whose data may
-    # be used for training. The paid IDs are zero-retention.
-    model = "qwen3.6-plus"
-    model_text = "deepseek-v4-flash"
-    endpoint = "https://opencode.ai/zen/go/v1/chat/completions"
+    # If this ever points back at a hosted endpoint: never use a "-free" model
+    # ID there — that suffix marks the ones whose submitted data may be used
+    # for training; the paid IDs are zero-retention.
+    model = "time-vision"
+    model_text = "time-text"
+    endpoint = "http://192.168.50.232:8000/v1/chat/completions"
+    # The aliases say nothing about whether the model behind them reasons, so
+    # the output budget is set explicitly rather than guessed from the name.
+    max_tokens_per_minute = 1600
+    # llama-server compiles the label schema to a grammar, so the reply can
+    # only ever be the JSON array — no fences, no prose, no think block.
+    json_schema = true
     port = 7373
     idle_distance = 3
     idle_after_secs = 300
-    # One call per minute per device does not fit a weekly allowance shared
-    # with real coding. Twenty minutes share one system prompt, and the label
-    # lands within ten minutes of the minute it describes.
+    # Batching predates the local endpoint (it was about a shared weekly
+    # allowance) but is still right: twenty minutes share one system prompt
+    # and the model sees a trajectory instead of isolated frames.
     batch_minutes = 20
     batch_wait_secs = 600
 ---
@@ -85,6 +107,12 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: time
+      annotations:
+        # Bumping this forces a rollout. The image tag is :latest, so a config
+        # or image change only reaches the pod when something in this template
+        # changes — this counter is that something. There is no config-reloader
+        # on the cluster, and a ConfigMap edit alone restarts nothing.
+        time.erikfrankling.se/config-rev: "local-llm-1"
     spec:
       automountServiceAccountToken: false
       containers:
@@ -93,11 +121,15 @@ spec:
           imagePullPolicy: Always
           args: ["server"]
           env:
+            # Optional: the local llama-swap endpoint takes no auth, and the
+            # server runs fine without a key. Kept wired so pointing back at a
+            # hosted endpoint is a config change, not a manifest change.
             - name: TIME_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: time-secrets
                   key: api-key
+                  optional: true
             # The server pulls the Android APK from this repo's GitHub
             # releases hourly and serves it at /app, so it needs outbound
             # HTTPS to api.github.com and objects.githubusercontent.com. The

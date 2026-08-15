@@ -11,8 +11,14 @@ use crate::report;
 use crate::web;
 
 pub fn run(cfg: Arc<ServerConfig>) -> Result<()> {
-    // Fail at startup rather than an hour in, when the first frame arrives.
-    let key = config::api_key()?;
+    // Optional now: a local llama-swap endpoint has no key at all. Say which
+    // way it went at startup so an unexpectedly missing secret is one log line
+    // away, not an hour of silent 401s.
+    let key = config::api_key();
+    match &key {
+        Some(_) => println!("model auth: bearer token from TIME_API_KEY"),
+        None => println!("model auth: none (TIME_API_KEY unset — fine for a local endpoint)"),
+    }
 
     // SQLite allows one writer; a mutex keeps concurrent agents from colliding.
     let db = Arc::new(Mutex::new(Db::open()?));
@@ -22,7 +28,7 @@ pub fn run(cfg: Arc<ServerConfig>) -> Result<()> {
     let apk = apk::start();
 
     // Every model call happens over here, on threads that serve no request.
-    let queue = classifier::start(cfg.clone(), db.clone(), key.clone());
+    let queue = classifier::start(cfg.clone(), db.clone(), key);
 
     let addr = format!("0.0.0.0:{}", cfg.port);
     let server = Arc::new(
@@ -75,7 +81,8 @@ fn handle(
         if req.url().starts_with("/v1/code") {
             let mut body = String::new();
             if req.as_reader().read_to_string(&mut body).is_err() {
-                let _ = req.respond(tiny_http::Response::from_string("bad body").with_status_code(400));
+                let _ =
+                    req.respond(tiny_http::Response::from_string("bad body").with_status_code(400));
                 return;
             }
             let result = serde_json::from_str::<crate::proto::CodeReport>(&body)
@@ -98,7 +105,8 @@ fn handle(
         if req.url().starts_with("/v1/agents") {
             let mut body = String::new();
             if req.as_reader().read_to_string(&mut body).is_err() {
-                let _ = req.respond(tiny_http::Response::from_string("bad body").with_status_code(400));
+                let _ =
+                    req.respond(tiny_http::Response::from_string("bad body").with_status_code(400));
                 return;
             }
             let result = serde_json::from_str::<crate::proto::AgentReport>(&body)
@@ -128,10 +136,10 @@ fn handle(
         }
 
         if is_ingest {
-
             let mut body = String::new();
             if req.as_reader().read_to_string(&mut body).is_err() {
-                let _ = req.respond(tiny_http::Response::from_string("bad body").with_status_code(400));
+                let _ =
+                    req.respond(tiny_http::Response::from_string("bad body").with_status_code(400));
                 return;
             }
 
@@ -163,14 +171,18 @@ fn handle(
         } else {
             let url = req.url().to_string();
             let param = |k: &str| -> Option<String> {
-                url.split(&['?', '&'][..]).find_map(|p| {
-                    p.strip_prefix(&format!("{k}=")).map(|v| {
-                        v.replace('+', " ")
+                url.split(&['?', '&'][..])
+                    .find_map(|p| {
+                        p.strip_prefix(&format!("{k}="))
+                            .map(|v| v.replace('+', " "))
                     })
-                }).filter(|v| !v.is_empty())
+                    .filter(|v| !v.is_empty())
             };
             let q = crate::web::Query {
-                day: param("d").and_then(|v| v.parse().ok()).unwrap_or(0).clamp(0, 3650),
+                day: param("d")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0)
+                    .clamp(0, 3650),
                 filter: crate::db::Filter {
                     category: param("cat").map(|v| urldecode(&v)),
                     device: param("dev").map(|v| urldecode(&v)),
@@ -247,7 +259,11 @@ fn ingest_batch(
     queue: &Queue,
     mut frames: Vec<Frame>,
 ) -> Result<Vec<FrameAck>> {
-    anyhow::ensure!(frames.len() <= 2000, "batch of {} frames is too large", frames.len());
+    anyhow::ensure!(
+        frames.len() <= 2000,
+        "batch of {} frames is too large",
+        frames.len()
+    );
     frames.sort_by_key(|f| f.ts);
 
     let mut acks = Vec::with_capacity(frames.len());
@@ -321,8 +337,13 @@ fn ingest(cfg: &ServerConfig, db: &Mutex<Db>, queue: &Queue, frame: Frame) -> Re
             pending: false,
             model: None,
             tags: vec!["other".to_string()],
+            image_path: None,
+            note: frame.note,
+            blocked: true,
         };
-        db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?.insert(&m)?;
+        db.lock()
+            .map_err(|e| anyhow::anyhow!("db lock: {e}"))?
+            .insert(&m)?;
         return Ok(ack(&m));
     }
 
@@ -343,6 +364,20 @@ fn ingest(cfg: &ServerConfig, db: &Mutex<Db>, queue: &Queue, frame: Frame) -> Re
         }
         None => None,
     };
+
+    // Keep the pixels. The original design deleted every screenshot on
+    // principle; the owner reversed that so labels can be recomputed later
+    // with better models. A failed write costs the archive one frame, never
+    // the minute -- ingest carries on with image_path unset.
+    let image_path = jpeg
+        .as_deref()
+        .and_then(|j| match store_frame(&frame.device, frame.ts, j) {
+            Ok(rel) => Some(rel),
+            Err(e) => {
+                eprintln!("ingest: storing frame {} {}: {e:#}", frame.device, frame.ts);
+                None
+            }
+        });
 
     // No image means no perceptual hash, so the free skip below simply
     // never fires for those devices -- correct, since there is no screen
@@ -387,6 +422,9 @@ fn ingest(cfg: &ServerConfig, db: &Mutex<Db>, queue: &Queue, frame: Frame) -> Re
                 pending: false,
                 model: Some("package-map".into()),
                 tags: vec![cat],
+                image_path: None,
+                note: frame.note,
+                blocked: false,
             };
             db.lock()
                 .map_err(|e| anyhow::anyhow!("db lock: {e}"))?
@@ -419,6 +457,9 @@ fn ingest(cfg: &ServerConfig, db: &Mutex<Db>, queue: &Queue, frame: Frame) -> Re
                     pending: false,
                     model: None,
                     tags: prev.tags.clone(),
+                    image_path: None,
+                    note: frame.note,
+                    blocked: false,
                 };
                 db.lock()
                     .map_err(|e| anyhow::anyhow!("db lock: {e}"))?
@@ -445,9 +486,7 @@ fn ingest(cfg: &ServerConfig, db: &Mutex<Db>, queue: &Queue, frame: Frame) -> Re
             // saying so needs no model -- it is a fact, not a judgment.
             // Without this the last real label propagates forever and an
             // empty room reads as a full working day.
-            let long_gone = frame
-                .idle_secs
-                .is_some_and(|s| s >= cfg.idle_after_secs);
+            let long_gone = frame.idle_secs.is_some_and(|s| s >= cfg.idle_after_secs);
 
             let (category, project, detail) = if long_gone || prev.category == "idle" {
                 (
@@ -483,6 +522,9 @@ fn ingest(cfg: &ServerConfig, db: &Mutex<Db>, queue: &Queue, frame: Frame) -> Re
                 pending: false,
                 tags: prev.tags.clone(),
                 model: None,
+                image_path: image_path.clone(),
+                note: frame.note.clone(),
+                blocked: false,
             };
             {
                 let db = db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
@@ -527,12 +569,17 @@ fn ingest(cfg: &ServerConfig, db: &Mutex<Db>, queue: &Queue, frame: Frame) -> Re
         pending: true,
         tags: last.as_ref().map(|l| l.tags.clone()).unwrap_or_default(),
         model: None,
+        image_path,
+        note: frame.note.clone(),
+        blocked: false,
     };
 
     // Written before it is queued, never after: the row is what makes the
     // queue disposable. Lose the process and the minute is still on disk,
     // flagged, waiting for the next sweep to find it.
-    db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?.insert(&m)?;
+    db.lock()
+        .map_err(|e| anyhow::anyhow!("db lock: {e}"))?
+        .insert(&m)?;
 
     queue.push(classifier::Job {
         ts: frame.ts,
@@ -552,7 +599,44 @@ fn ingest(cfg: &ServerConfig, db: &Mutex<Db>, queue: &Queue, frame: Frame) -> Re
     });
 
     Ok(ack(&m))
-    // The JPEG lives on in the queue and is never written anywhere.
+    // The JPEG lives on in the queue for the model call; the durable copy is
+    // the one store_frame wrote under frames/.
+}
+
+/// Write one screenshot under `<data dir>/frames/<device>/<ts>.jpg` and return
+/// the path relative to the data dir, which is what the row stores -- the data
+/// dir moves between deployments, the layout under it does not.
+fn store_frame(device: &str, ts: i64, jpeg: &[u8]) -> Result<String> {
+    let device = sanitize_device(device);
+    let rel = format!("frames/{device}/{ts}.jpg");
+    let path = config::data_dir()?.join(&rel);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(&path, jpeg).with_context(|| format!("writing {}", path.display()))?;
+    Ok(rel)
+}
+
+/// The device name arrives over the network and becomes a directory name, so
+/// it must not be able to carry a path anywhere: no separators, no dots, no
+/// "..". Everything outside a tame allowlist becomes '_' rather than being
+/// stripped, so "a/b" and "a_b" cannot collide with "ab".
+fn sanitize_device(device: &str) -> String {
+    let s: String = device
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if s.is_empty() {
+        "unknown".into()
+    } else {
+        s
+    }
 }
 
 fn ack(m: &Minute) -> FrameAck {
@@ -592,9 +676,7 @@ fn app_response(path: &str, apk: &apk::Shared) -> tiny_http::ResponseBox {
         };
         return tiny_http::Response::from_string(body.to_string())
             .with_status_code(if meta.is_some() { 200 } else { 404 })
-            .with_header::<tiny_http::Header>(
-                "Content-Type: application/json".parse().unwrap(),
-            )
+            .with_header::<tiny_http::Header>("Content-Type: application/json".parse().unwrap())
             .boxed();
     }
 
@@ -612,13 +694,7 @@ fn app_response(path: &str, apk: &apk::Shared) -> tiny_http::ResponseBox {
         // Content-Length and leaves a 25 MB download with no progress bar on a
         // phone. The length is known here, so say it.
         let len = file.metadata().ok().map(|m| m.len() as usize);
-        return tiny_http::Response::new(
-            tiny_http::StatusCode(200),
-            Vec::new(),
-            file,
-            len,
-            None,
-        )
+        return tiny_http::Response::new(tiny_http::StatusCode(200), Vec::new(), file, len, None)
             .with_chunked_threshold(usize::MAX)
             .with_header::<tiny_http::Header>(
                 "Content-Type: application/vnd.android.package-archive"
@@ -771,6 +847,28 @@ fn human_ago(mins: i64) -> String {
         m if m < 60 => format!("{m}m"),
         m if m < 60 * 48 => format!("{}h", m / 60),
         m => format!("{}d", m / (60 * 24)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_device;
+
+    /// The name comes off the network and turns into a directory, so anything
+    /// path-shaped has to come out flattened.
+    #[test]
+    fn device_names_cannot_traverse() {
+        assert_eq!(sanitize_device("pc"), "pc");
+        assert_eq!(sanitize_device("erik-laptop_2"), "erik-laptop_2");
+        assert_eq!(sanitize_device("../etc"), "___etc");
+        assert_eq!(sanitize_device("a/b\\c"), "a_b_c");
+        assert_eq!(sanitize_device(".."), "__");
+        assert_eq!(sanitize_device("."), "_");
+        assert_eq!(sanitize_device(""), "unknown");
+        assert_eq!(sanitize_device("släpdator"), "sl_pdator");
+        for bad in ["..", "/", "\\", "\0"] {
+            assert!(!sanitize_device(&format!("x{bad}y")).contains(['/', '\\', '.', '\0']));
+        }
     }
 }
 

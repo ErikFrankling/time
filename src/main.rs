@@ -3,19 +3,20 @@ mod agents;
 mod apk;
 mod browser;
 mod capture;
-mod code;
-mod input;
 mod classifier;
 mod classify;
+mod code;
 mod config;
 mod db;
+mod input;
 mod proto;
+mod reclassify;
 mod report;
 mod server;
 mod spool;
 mod web;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::sync::Arc;
 
 use config::Config;
@@ -28,6 +29,11 @@ const USAGE: &str = "time — minute-by-minute activity tracking
                 (--wait-for-browser waits out one extension heartbeat first)
   time collect  read commits, diffs and pull requests, post them to the server
   time agents   read what the coding agents did, post it to the server
+  time reclassify <days> [--device NAME] [--model NAME] [--endpoint URL]
+                [--run-id ID] [--limit N] [--apply]
+                re-judge stored minutes from the kept screenshots; results go
+                to the minute_trial table for comparison unless --apply, which
+                rewrites the live labels. Runs where the server data is.
   time config   print config and database paths
 
 The agent holds no API key and makes no model calls. Everything that costs
@@ -81,14 +87,26 @@ fn main() -> Result<()> {
                 .sum();
             let added: i64 = rows.iter().map(|r| r.added).sum();
             let removed: i64 = rows.iter().map(|r| r.removed).sum();
-            println!("{days}d: {commits} commits, +{added} -{removed}, {} rows", rows.len());
+            println!(
+                "{days}d: {commits} commits, +{added} -{removed}, {} rows",
+                rows.len()
+            );
             // `--dry-run` so the numbers can be checked before a server exists.
             if std::env::args().any(|a| a == "--dry-run") {
                 for r in &rows {
                     println!(
                         "  {} {:8} {:24} {:4}c +{:<7} -{:<7} pr{}/{} is{}/{} rv{}",
-                        r.day, r.source, r.repo, r.commits, r.added, r.removed,
-                        r.prs_opened, r.prs_merged, r.issues_opened, r.issues_closed, r.reviews
+                        r.day,
+                        r.source,
+                        r.repo,
+                        r.commits,
+                        r.added,
+                        r.removed,
+                        r.prs_opened,
+                        r.prs_merged,
+                        r.issues_opened,
+                        r.issues_closed,
+                        r.reviews
                     );
                 }
                 return Ok(());
@@ -127,14 +145,61 @@ fn main() -> Result<()> {
                 for d in &report.days {
                     println!(
                         "  {} {:8} {:24} {:3}s {:4}p in{:<10} out{:<10} {:4}m peak{}",
-                        d.day, d.tool, d.project, d.sessions, d.prompts, d.tokens_in,
-                        d.tokens_out, d.active_minutes, d.peak_parallel
+                        d.day,
+                        d.tool,
+                        d.project,
+                        d.sessions,
+                        d.prompts,
+                        d.tokens_in,
+                        d.tokens_out,
+                        d.active_minutes,
+                        d.peak_parallel
                     );
                 }
                 return Ok(());
             }
             println!("{}", agents::post(&cfg.agent, &report)?.trim());
             Ok(())
+        }
+        // Server-side, unlike collect/agents: it reads the database and the
+        // kept frames, both of which live where the server runs.
+        "reclassify" => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            let mut opts = reclassify::Opts::default();
+            let mut days = None;
+            let mut i = 0;
+            while i < args.len() {
+                let flag = args[i].as_str();
+                match flag {
+                    "--apply" => opts.apply = true,
+                    "--device" | "--model" | "--endpoint" | "--run-id" | "--limit" => {
+                        i += 1;
+                        let v = args
+                            .get(i)
+                            .cloned()
+                            .with_context(|| format!("{flag} needs a value"))?;
+                        match flag {
+                            "--device" => opts.device = Some(v),
+                            "--model" => opts.model = Some(v),
+                            "--endpoint" => opts.endpoint = Some(v),
+                            "--run-id" => opts.run_id = Some(v),
+                            _ => opts.limit = Some(v.parse().context("--limit takes a number")?),
+                        }
+                    }
+                    a => {
+                        days = Some(
+                            a.parse::<i64>()
+                                .with_context(|| format!("unexpected argument {a}"))?,
+                        )
+                    }
+                }
+                i += 1;
+            }
+            opts.days = days.context(
+                "usage: time reclassify <days> [--device NAME] [--model NAME] \
+                 [--endpoint URL] [--run-id ID] [--limit N] [--apply]",
+            )?;
+            reclassify::run(cfg.server, opts)
         }
         "config" => {
             println!("config: {}", config::config_path()?.display());

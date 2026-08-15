@@ -60,9 +60,9 @@ const FREE_PASS: usize = 2000;
 
 /// One minute waiting for a label.
 ///
-/// The JPEG rides along in memory because it is deliberately never written
-/// down -- not keeping the screenshot is the point of the whole design, and
-/// spilling it to disk to make a queue durable would trade that away.
+/// The JPEG rides along in memory because that is faster than re-reading the
+/// copy ingest just wrote under `frames/` -- the on-disk copy is what makes a
+/// dropped job recoverable with pixels intact, which the sweep relies on.
 pub struct Job {
     pub ts: i64,
     pub device: String,
@@ -206,10 +206,7 @@ impl Queue {
             if let Some(b) = batches.pop_front() {
                 return b;
             }
-            batches = self
-                .filled
-                .wait(batches)
-                .unwrap_or_else(|e| e.into_inner());
+            batches = self.filled.wait(batches).unwrap_or_else(|e| e.into_inner());
         }
     }
 
@@ -236,7 +233,10 @@ impl Queue {
 }
 
 /// Start the pool and hand back the queue ingest should push to.
-pub fn start(cfg: Arc<ServerConfig>, db: Arc<Mutex<Db>>, key: String) -> Arc<Queue> {
+///
+/// `key` is None for endpoints without auth -- the local llama-swap setup --
+/// and every call then goes out without an Authorization header.
+pub fn start(cfg: Arc<ServerConfig>, db: Arc<Mutex<Db>>, key: Option<String>) -> Arc<Queue> {
     let queue = Arc::new(Queue::new());
 
     for _ in 0..WORKERS {
@@ -247,7 +247,7 @@ pub fn start(cfg: Arc<ServerConfig>, db: Arc<Mutex<Db>>, key: String) -> Arc<Que
             // would otherwise wake straight into a call it had already been
             // told not to make.
             queue.wait_out_pause();
-            run(&cfg, &db, &key, &queue, batch);
+            run(&cfg, &db, key.as_deref(), &queue, batch);
         });
     }
 
@@ -337,9 +337,10 @@ fn collect(cfg: &ServerConfig, queue: &Queue) {
 
 /// Requeue minutes that were stored but never labelled -- the tail of the queue
 /// when the process last died, anything a burst evicted, and everything the
-/// allowance was closed for. Their screenshots are gone, so these are
-/// classified from the window and presence alone, which is the same
-/// information a phone ever sends.
+/// allowance was closed for. Ingest keeps each screenshot under `frames/`, so
+/// a re-queued minute is re-read from disk and classified with the same pixels
+/// the first attempt had; rows without a file -- phones, and history from
+/// before frames were kept -- fall back to window and presence alone.
 fn sweep(cfg: &ServerConfig, db: &Mutex<Db>, queue: &Queue) -> Result<usize, anyhow::Error> {
     // A pending row is pending until it is labelled, in-flight ones included,
     // so sweeping over live work would queue every minute twice.
@@ -361,8 +362,12 @@ fn sweep(cfg: &ServerConfig, db: &Mutex<Db>, queue: &Queue) -> Result<usize, any
     };
     let mut freed = 0;
     for m in &stale {
-        let Some(window) = m.window.as_deref() else { continue };
-        let Some(cat) = crate::classify::from_package(cfg, window) else { continue };
+        let Some(window) = m.window.as_deref() else {
+            continue;
+        };
+        let Some(cat) = crate::classify::from_package(cfg, window) else {
+            continue;
+        };
         let label = crate::classify::Label {
             category: cat.clone(),
             project: None,
@@ -389,23 +394,31 @@ fn sweep(cfg: &ServerConfig, db: &Mutex<Db>, queue: &Queue) -> Result<usize, any
     };
     let n = rows.len();
     for m in rows {
+        // Quietly None when the file is missing -- pruned by hand, or a row
+        // from before frames were kept -- because that is exactly the old
+        // text-only sweep, not an error.
+        let jpeg = m
+            .image_path
+            .as_deref()
+            .and_then(|rel| crate::config::data_dir().ok().map(|d| d.join(rel)))
+            .and_then(|p| std::fs::read(p).ok());
         queue.push(Job {
             ts: m.ts,
             device: m.device,
             window: m.window.unwrap_or_default(),
             domain: m.domain,
-            jpeg: None,
+            jpeg,
             idle_secs: m.idle_secs,
             keys: m.keys,
             mouse: m.mouse,
-            note: None,
+            note: m.note,
             prev: None,
         });
     }
     Ok(n)
 }
 
-fn run(cfg: &ServerConfig, db: &Mutex<Db>, key: &str, queue: &Queue, batch: Vec<Job>) {
+fn run(cfg: &ServerConfig, db: &Mutex<Db>, key: Option<&str>, queue: &Queue, batch: Vec<Job>) {
     // However this returns, these minutes are no longer in flight and the
     // sweep is free to reconsider whichever of them are still pending.
     let _done = Release(queue, batch.len());
@@ -436,7 +449,18 @@ fn run(cfg: &ServerConfig, db: &Mutex<Db>, key: &str, queue: &Queue, batch: Vec<
         })
         .collect();
 
-    let (labels, usage) = match classify::classify(cfg, key, &items, prev) {
+    let audit = |call: crate::db::LlmCall| {
+        // The audit row is a nice-to-have next to the labels; failing to write
+        // it must never take the batch down with it.
+        if let Err(e) = db
+            .lock()
+            .map_err(|e| anyhow::anyhow!("db lock: {e}"))
+            .and_then(|db| db.record_llm_call(&call))
+        {
+            eprintln!("classify {}: recording llm_call: {e:#}", call.device);
+        }
+    };
+    let (labels, usage, raw) = match classify::classify(cfg, key, &items, prev) {
         Ok(v) => v,
         Err(e) => {
             // A weekly cap is not a transient failure. Hammering it burns
@@ -464,10 +488,38 @@ fn run(cfg: &ServerConfig, db: &Mutex<Db>, key: &str, queue: &Queue, batch: Vec<
                 {
                     eprintln!("classify {device}: recording failed attempts: {e:#}");
                 }
+                // The final failure is part of the audit trail too: a backtest
+                // needs to know these minutes were bought and lost, not
+                // skipped. Which model failed is known even though no usage
+                // came back -- the batch decides.
+                audit(crate::db::LlmCall {
+                    created: chrono::Utc::now().timestamp(),
+                    device: device.clone(),
+                    ts_from: span.0,
+                    ts_to: span.1,
+                    n: batch.len() as i64,
+                    model: classify::model_for(cfg, &items).to_string(),
+                    endpoint: cfg.endpoint.clone(),
+                    error: Some(format!("{e:#}")),
+                    ..Default::default()
+                });
             }
             return;
         }
     };
+    audit(crate::db::LlmCall {
+        created: chrono::Utc::now().timestamp(),
+        device: device.clone(),
+        ts_from: span.0,
+        ts_to: span.1,
+        n: batch.len() as i64,
+        model: usage.model.clone(),
+        endpoint: cfg.endpoint.clone(),
+        prompt_tokens: Some(usage.prompt as i64),
+        completion_tokens: Some(usage.completion as i64),
+        raw_response: Some(raw),
+        error: None,
+    });
 
     // Real numbers, because deciding whether the screenshot width or the batch
     // size is worth changing needs the endpoint's own count and not an
@@ -510,7 +562,11 @@ fn run(cfg: &ServerConfig, db: &Mutex<Db>, key: &str, queue: &Queue, batch: Vec<
         // Left pending on purpose; the sweep will offer them again -- but only
         // a few times, so a minute this model cannot label stops being a
         // standing charge.
-        let missed: Vec<i64> = batch.iter().map(|j| j.ts).filter(|ts| !got.contains(ts)).collect();
+        let missed: Vec<i64> = batch
+            .iter()
+            .map(|j| j.ts)
+            .filter(|ts| !got.contains(ts))
+            .collect();
         eprintln!(
             "classify {device}: {} of {} minute(s) came back unlabelled",
             missed.len(),
