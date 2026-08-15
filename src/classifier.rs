@@ -27,7 +27,10 @@ use crate::db::Db;
 
 /// Threads draining the queue. They spend their lives blocked on a socket, so
 /// this is about how many model calls to have in flight, not about CPU.
-const WORKERS: usize = 4;
+// Two, not four: the endpoint is one local GPU. Extra workers do not add
+// throughput, they just queue long batches against each other until the
+// client timeout kills whoever is last in line.
+const WORKERS: usize = 2;
 
 /// Jobs held in memory at once. Each carries a downscaled JPEG, so the bound is
 /// really a memory bound; a few hundred is well inside the pod's 512 MiB.

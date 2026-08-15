@@ -726,59 +726,6 @@ fn beats(a: &Minute, b: &Minute) -> bool {
 impl Db {}
 
 impl Db {
-    /// Two-level breakdown for the sunburst: each primary category, and within
-    /// it what else was going on at the same time.
-    ///
-    /// Each minute lands in exactly one inner slice and exactly one outer
-    /// segment, so the rings line up. A minute with several companions becomes
-    /// one combined segment ("youtube + music") rather than being counted
-    /// twice, which would make the outer ring wider than its parent and the
-    /// chart a lie.
-    pub fn layered(
-        &self,
-        from: i64,
-        to: i64,
-        f: &Filter,
-    ) -> Result<Vec<(String, i64, Vec<(Vec<String>, i64)>)>> {
-        let mut outer: std::collections::HashMap<(String, Vec<String>), i64> = Default::default();
-        let mut totals: std::collections::HashMap<String, i64> = Default::default();
-        for m in self.resolved(from, to, f)? {
-            *totals.entry(m.category.clone()).or_default() += 1;
-            let mut with: Vec<String> = m
-                .tags
-                .iter()
-                .filter(|t| **t != m.category)
-                .cloned()
-                .collect();
-            with.sort();
-            *outer.entry((m.category.clone(), with)).or_default() += 1;
-        }
-
-        let mut cats: Vec<(String, i64)> = totals.into_iter().collect();
-        cats.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-
-        Ok(cats
-            .into_iter()
-            .map(|(cat, total)| {
-                let mut segs: Vec<(Vec<String>, i64)> = outer
-                    .iter()
-                    .filter(|((c, _), _)| *c == cat)
-                    .map(|((_, w), n)| (w.clone(), *n))
-                    .collect();
-                // Undivided time first, then companions by size.
-                segs.sort_by(|a, b| {
-                    a.0.is_empty()
-                        .cmp(&b.0.is_empty())
-                        .reverse()
-                        .then(b.1.cmp(&a.1))
-                });
-                (cat, total, segs)
-            })
-            .collect())
-    }
-}
-
-impl Db {
     /// Rewrite the minutes leading up to a detected absence.
     ///
     /// Idle is only noticed once the timeout expires, so by the time a minute

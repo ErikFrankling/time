@@ -58,6 +58,94 @@ pub fn hex(cfg: &ServerConfig, category: &str) -> &'static str {
     }
 }
 
+/// Which app a minute belongs to, for the per-app split and the inspector
+/// panel. This is a convention, not a column:
+///
+/// 1. the first off-list tag -- the model is asked to always tag the specific
+///    app/service/site as a lowercase word, and for `other` its first tag is
+///    the category it would have invented;
+/// 2. else `project` -- comms/streaming/social minutes carry the app name
+///    there by prompt convention;
+/// 3. else the window class; 4. else the browser domain.
+///
+/// None means nothing could name the minute; callers render that as one
+/// dimmed "unattributed" segment rather than dropping the time.
+pub fn app_of(cfg: &ServerConfig, m: &Minute) -> Option<String> {
+    let listed = |t: &str| cfg.categories.iter().any(|c| c.eq_ignore_ascii_case(t));
+    if let Some(t) = m.tags.iter().find(|t| !listed(t)) {
+        return Some(t.clone());
+    }
+    if let Some(p) = m.project.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+        return Some(p.to_lowercase());
+    }
+    if let Some(a) = m.app() {
+        return Some(a.to_lowercase());
+    }
+    m.domain
+        .as_deref()
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .map(str::to_string)
+}
+
+/// Category totals with a per-app split inside each, from resolved minutes.
+/// Minutes `app_of` cannot name land in one "" segment so a category's
+/// segments always sum to its slice.
+pub fn app_layers(
+    cfg: &ServerConfig,
+    minutes: &[Minute],
+) -> Vec<(String, i64, Vec<(String, i64)>)> {
+    let mut totals: Vec<(String, i64, Vec<(String, i64)>)> = Vec::new();
+    for m in minutes {
+        let app = app_of(cfg, m).unwrap_or_default();
+        let entry = match totals.iter_mut().position(|(c, _, _)| *c == m.category) {
+            Some(i) => &mut totals[i],
+            None => {
+                totals.push((m.category.clone(), 0, Vec::new()));
+                totals.last_mut().unwrap()
+            }
+        };
+        entry.1 += 1;
+        match entry.2.iter_mut().find(|(a, _)| *a == app) {
+            Some(s) => s.1 += 1,
+            None => entry.2.push((app, 1)),
+        }
+    }
+    for (_, _, segs) in totals.iter_mut() {
+        // Unattributed time first (it anchors the slice start, dimmed), then
+        // apps by size; the name tie-break keeps the order stable across days.
+        segs.sort_by(|a, b| {
+            a.0.is_empty()
+                .cmp(&b.0.is_empty())
+                .reverse()
+                .then(b.1.cmp(&a.1))
+                .then(a.0.cmp(&b.0))
+        });
+    }
+    totals.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    totals
+}
+
+/// FNV-1a over the app name, 32-bit. Mirrored byte-for-byte in the panel
+/// script so its swatches match the ring; change one and change the other.
+fn name_hash(s: &str) -> u32 {
+    let mut h: u32 = 0x811c9dc5;
+    for b in s.bytes() {
+        h ^= b as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    h
+}
+
+/// Deterministic tint for an app inside its category slice: a fill-opacity
+/// step picked by name hash, so the same app keeps the same tint across days.
+/// Opacity over the page surface lightens in light mode and darkens in dark,
+/// so one value serves both themes.
+fn shade_for(app: &str) -> &'static str {
+    const LEVELS: [&str; 4] = ["1", "0.84", "0.68", "0.52"];
+    LEVELS[(name_hash(app) as usize) % LEVELS.len()]
+}
+
 /// Config order, with anything unknown to the config appended. Emitting slices
 /// this way is what keeps a category's colour and its neighbours stable from
 /// one day to the next, and so keeps adjacency on the validated pairlist.
@@ -180,17 +268,21 @@ impl Query {
     }
 }
 
-/// Two-ring sunburst: inner ring is what you were mainly doing, outer ring is
-/// what was going on alongside it. Coding for 5h reads as one inner slice; the
-/// 3h of it spent with YouTube on is an outer segment nested inside that slice.
+/// Two-ring sunburst: inner ring is what you were doing, outer ring splits
+/// each slice by *app* -- comms is not one arc but discord, snapchat and
+/// whatsapp as tints of the same hue, so the family colour still reads at a
+/// glance while the split answers "which one".
 ///
-/// The outer ring is drawn in the *companion's* colour, so YouTube-while-coding
-/// is visibly YouTube. Undivided time keeps the parent colour, dimmed, so a
-/// solid-looking ring means focus and a stripey one means distraction.
+/// Tints are hash-picked per app name (`shade_for`), so an app keeps its tint
+/// from one day to the next. Minutes whose app could not be named keep the
+/// parent colour heavily dimmed.
+///
+/// Every arc carries data-cat/data-app for the inspector panel; the href
+/// underneath is the old category-filter toggle, kept as the no-JS fallback.
 fn sunburst(
     cfg: &ServerConfig,
     q: &Query,
-    layers: &[(String, i64, Vec<(Vec<String>, i64)>)],
+    layers: &[(String, i64, Vec<(String, i64)>)],
 ) -> String {
     let total: i64 = layers.iter().map(|(_, n, _)| n).sum();
     if total == 0 {
@@ -221,9 +313,10 @@ fn sunburst(
 
         let selected = q.filter.category.as_deref() == Some(cat.as_str());
         inner.push_str(&format!(
-            "<a href=\"{}\"><path d=\"{}\" fill=\"{}\" class=\"slice{}\">\
-             <title>{} — {} ({:.0}%) · click to drill in</title></path></a>",
+            "<a href=\"{}\" data-cat=\"{}\"><path d=\"{}\" fill=\"{}\" class=\"slice{}\">\
+             <title>{} — {} ({:.0}%) · click for details</title></path></a>",
             esc(&q.toggle("cat", &q.filter.category, cat)),
+            esc(cat),
             arc(r_in, r_mid, a0, a1),
             css_var(cfg, cat),
             if selected { " on" } else { "" },
@@ -234,7 +327,7 @@ fn sunburst(
 
         // Outer segments subdivide this slice only, so they always sum to it.
         let mut sub = cat_start;
-        for (with, sn) in segs {
+        for (app, sn) in segs {
             let sfrac = *sn as f64 / total as f64;
             let ssweep = (sfrac * std::f64::consts::TAU).min(std::f64::consts::TAU - 0.001);
             let (b0, b1) = (sub + gap / 2.0, sub + ssweep - gap / 2.0);
@@ -242,17 +335,22 @@ fn sunburst(
             if b1 <= b0 {
                 continue;
             }
-            let (fill, label, op) = if with.is_empty() {
-                (css_var(cfg, cat), "undivided".to_string(), "0.28")
+            let (label, op) = if app.is_empty() {
+                ("unattributed", "0.26")
             } else {
-                (css_var(cfg, &with[0]), with.join(" + "), "1")
+                (app.as_str(), shade_for(app))
             };
             outer.push_str(&format!(
-                "<path d=\"{}\" fill=\"{fill}\" fill-opacity=\"{op}\">\
-                 <title>{} while {} — {} ({:.0}% of {})</title></path>",
-                arc(r_gap, r_out, b0, b1),
+                "<a href=\"{}\" data-cat=\"{}\" data-app=\"{}\">\
+                 <path d=\"{}\" fill=\"{}\" fill-opacity=\"{op}\" class=\"seg\">\
+                 <title>{} · {} — {} ({:.0}% of {}) · click for details</title></path></a>",
+                esc(&q.toggle("cat", &q.filter.category, cat)),
                 esc(cat),
-                esc(&label),
+                esc(app),
+                arc(r_gap, r_out, b0, b1),
+                css_var(cfg, cat),
+                esc(cat),
+                esc(label),
                 fmt_hm(*sn),
                 *sn as f64 / *n as f64 * 100.0,
                 esc(cat)
@@ -550,7 +648,11 @@ pub fn page(cfg: &ServerConfig, db: &Db, q: &Query) -> Result<String> {
     let f = &q.filter;
 
     let cats = db.by_category(from, to, f)?;
-    let layers = db.layered(from, to, f)?;
+    // Resolved minutes feed both the sunburst's per-app split and the
+    // inspector panel's embedded rows, so a segment and its panel can never
+    // disagree about how big it is.
+    let resolved = db.resolved(from, to, f)?;
+    let layers = app_layers(cfg, &resolved);
     let devices = db.by_device(from, to, f)?;
     let apps = db.by_app(from, to, f)?;
     let open = db.open_apps(from, to, f)?;
@@ -643,6 +745,35 @@ pub fn page(cfg: &ServerConfig, db: &Db, q: &Query) -> Result<String> {
         cat_rows =
             "<tr><td colspan=\"3\" class=\"empty\">No minutes recorded yet.</td></tr>".into();
     }
+
+    // Everything the inspector panel needs, shipped with the page: the day's
+    // resolved minutes (1-2k rows, a few tens of KB) as JSON. Keys are one
+    // letter because the blob is repeated per row. `<` is escaped so a window
+    // title can never smuggle "</script>" into the document.
+    let panel_rows: Vec<serde_json::Value> = resolved
+        .iter()
+        .map(|m| {
+            serde_json::json!({
+                "t": m.ts,
+                "d": m.device,
+                "c": m.category,
+                "a": app_of(cfg, m).unwrap_or_default(),
+                "x": m.detail.as_deref().unwrap_or(""),
+                "g": m.tags,
+            })
+        })
+        .collect();
+    let panel_colors: serde_json::Map<String, serde_json::Value> = layers
+        .iter()
+        .map(|(cat, _, _)| (cat.clone(), css_var(cfg, cat).into()))
+        .collect();
+    let panel_data = serde_json::to_string(&serde_json::json!({
+        "day": q.day,
+        "multi": all_devices.len() > 1,
+        "colors": panel_colors,
+        "rows": panel_rows,
+    }))?
+    .replace('<', "\\u003c");
 
     let day_links = (0..7)
         .map(|d| {
@@ -762,7 +893,7 @@ h2 {{ font-size:12px; text-transform:uppercase; letter-spacing:.07em;
   .block {{ grid-template-columns:16px 48px 1fr; }}
   .dur, .detail, .io, .app {{ display:none; }}
 }}
-</style></head><body><main>
+</style><style>{panel_css}</style></head><body><main>
 <header><h1>{heading}</h1><nav>{day_links}</nav>
 <nav class="dl">PDF report:
   <a href="/report.pdf?d={d}&amp;range=day">day</a>
@@ -805,10 +936,23 @@ h2 {{ font-size:12px; text-transform:uppercase; letter-spacing:.07em;
 </div>
 
 <h2>Timeline</h2>{timeline}
-</main></body></html>"#,
+</main>
+<div id="pbg" hidden></div>
+<aside id="panel" hidden role="dialog" aria-modal="true" aria-labelledby="ptitle">
+<header><button id="pback" class="pbtn" hidden aria-label="Back to category">‹</button>
+<span id="pswatch" class="swatch"></span><h3 id="ptitle"></h3>
+<span id="ptotal"></span>
+<button id="pclose" class="pbtn" aria-label="Close">✕</button></header>
+<div id="pbody"></div>
+</aside>
+<script id="pdata" type="application/json">{panel_data}</script>
+<script>{panel_js}</script>
+</body></html>"#,
         d = q.day,
         series_light = series_css(&SERIES_LIGHT),
         series_dark = series_css(&SERIES_DARK),
+        panel_css = PANEL_CSS,
+        panel_js = PANEL_JS,
         donut = sunburst(cfg, q, &layers),
         hourly = hourly_chart(cfg, &buckets),
         focus_panel = focus_panel(&focus),
@@ -836,6 +980,221 @@ h2 {{ font-size:12px; text-transform:uppercase; letter-spacing:.07em;
         },
     ))
 }
+
+/// Styles for the inspector panel: a right-hand drawer on a desktop, a bottom
+/// sheet on a phone. Kept out of the main stylesheet's `format!` so its braces
+/// stay single. The `[hidden]` rule matters: the panel is `display:flex`,
+/// which would silently override the attribute without it.
+const PANEL_CSS: &str = r#"
+#pbg { position:fixed; inset:0; background:rgba(0,0,0,.35); opacity:0;
+  transition:opacity .18s; z-index:40; }
+#pbg.show { opacity:1; }
+#panel { position:fixed; top:0; right:0; bottom:0; width:min(430px,92vw); z-index:50;
+  background:var(--surface-1); border-left:1px solid var(--rule);
+  box-shadow:-12px 0 32px rgba(0,0,0,.18); display:flex; flex-direction:column;
+  transform:translateX(102%); transition:transform .18s ease-out; }
+#panel.show { transform:none; }
+#panel header { display:flex; align-items:center; gap:10px; padding:13px 16px;
+  border-bottom:1px solid var(--rule); flex:none; margin:0; }
+#panel header .swatch { margin:0; flex:none; }
+#ptitle { font-size:15px; font-weight:650; margin:0; flex:1;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+#psub { color:var(--text-muted); font-weight:400; font-size:12px; }
+#ptotal { color:var(--text-secondary); font-variant-numeric:tabular-nums;
+  font-size:13px; flex:none; }
+.pbtn { border:0; background:none; color:var(--text-secondary); font:inherit;
+  font-size:15px; cursor:pointer; padding:4px 9px; border-radius:7px; line-height:1.2; }
+.pbtn:hover { background:var(--surface-2); color:var(--text-primary); }
+#pback { font-size:20px; }
+#pbody { overflow-y:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch;
+  padding:12px 16px 28px; flex:1; }
+.papps { display:flex; flex-direction:column; gap:2px; margin-bottom:14px; }
+.papp { display:grid; grid-template-columns:14px minmax(72px,130px) 1fr 54px; gap:9px;
+  align-items:center; border:0; background:none; font:inherit; font-size:13px;
+  color:inherit; text-align:left; padding:5px 6px; border-radius:8px; cursor:pointer; }
+.papp:hover { background:var(--surface-2); }
+.papp .swatch { margin:0; }
+.papp-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.papp-val { text-align:right; color:var(--text-secondary);
+  font-variant-numeric:tabular-nums; font-size:12px; }
+.prun { padding:8px 0; border-bottom:1px solid var(--rule); font-size:13px; }
+.prun-head { display:flex; gap:10px; align-items:baseline; flex-wrap:wrap; }
+.prun-time { font-variant-numeric:tabular-nums; color:var(--text-secondary); }
+.prun-dur { color:var(--text-muted); font-size:12px; font-variant-numeric:tabular-nums; }
+.prun-app { font-weight:600; }
+.prun-dev { color:var(--text-muted); font-size:11px; border:1px solid var(--rule);
+  border-radius:99px; padding:0 7px; }
+.prun-detail { color:var(--text-secondary); margin-top:2px; overflow-wrap:anywhere; }
+.prun-tags { color:var(--text-muted); font-size:12px; margin-top:2px; }
+.pfoot { font-size:13px; margin:14px 0 0; }
+.pfoot a { color:var(--text-secondary); }
+a[data-cat] { cursor:pointer; }
+.seg { transition:opacity .12s; }
+.seg:hover { opacity:.8; }
+[hidden] { display:none !important; }
+@media (max-width:760px) {
+  #panel { top:auto; left:0; right:0; bottom:0; width:auto; max-height:80vh;
+    border-left:0; border-top:1px solid var(--rule); border-radius:16px 16px 0 0;
+    box-shadow:0 -12px 32px rgba(0,0,0,.22); transform:translateY(102%); }
+  #panel.show { transform:none; }
+  body.panel-open { overflow:hidden; }
+}
+"#;
+
+/// The inspector: click an arc, get the minutes behind it.
+///
+/// Everything works off the JSON shipped in #pdata -- no endpoint, no fetch,
+/// so the panel opens instantly and the page stays a self-contained document.
+/// Clicks on the chart's `a[data-cat]` anchors are intercepted here; with
+/// scripting off those same anchors still navigate to the category filter.
+///
+/// `fnv` mirrors `name_hash` in this file (over UTF-8 bytes, hence the
+/// encodeURIComponent dance) so the panel's app swatches show the same tint
+/// as the ring segments they explain.
+const PANEL_JS: &str = r#"
+(function () {
+  'use strict';
+  var data = JSON.parse(document.getElementById('pdata').textContent);
+  var rows = data.rows, colors = data.colors || {};
+  var panel = document.getElementById('panel'), bg = document.getElementById('pbg'),
+      body = document.getElementById('pbody'), title = document.getElementById('ptitle'),
+      total = document.getElementById('ptotal'), swatch = document.getElementById('pswatch'),
+      back = document.getElementById('pback'), closeBtn = document.getElementById('pclose');
+  var scope = null; /* {cat, app} — app null = whole category, "" = unattributed */
+
+  function hm(n) { var h = Math.floor(n / 60), m = n % 60;
+    return h > 0 ? h + 'h ' + m + 'm' : m + 'm'; }
+  function tmin(ts) { var d = new Date(ts * 1000);
+    return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2); }
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+  function fnv(s) { var b = unescape(encodeURIComponent(s)), h = 0x811c9dc5;
+    for (var i = 0; i < b.length; i++) { h ^= b.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+    return h >>> 0; }
+  function shade(app) { return app === '' ? 0.26 : [1, 0.84, 0.68, 0.52][fnv(app) % 4]; }
+  function inScope(r) { return r.c === scope.cat && (scope.app === null || r.a === scope.app); }
+
+  /* Contiguous runs: same app, same device, at most one missing minute. */
+  function runsOf() {
+    var out = [];
+    for (var i = 0; i < rows.length; i++) {
+      var r = rows[i];
+      if (!inScope(r)) continue;
+      var last = out[out.length - 1];
+      if (last && r.t - last.end <= 60 && r.a === last.a && r.d === last.d) {
+        last.end = r.t + 60; last.n += 1;
+        if (r.x) last.x = r.x;
+        for (var j = 0; j < r.g.length; j++)
+          if (last.g.indexOf(r.g[j]) < 0) last.g.push(r.g[j]);
+      } else {
+        out.push({ start: r.t, end: r.t + 60, n: 1, a: r.a, d: r.d, x: r.x, g: r.g.slice() });
+      }
+    }
+    return out;
+  }
+
+  function appList(cat) {
+    var agg = {}, order = [];
+    for (var i = 0; i < rows.length; i++) {
+      var r = rows[i];
+      if (r.c !== cat) continue;
+      if (!(r.a in agg)) { agg[r.a] = 0; order.push(r.a); }
+      agg[r.a]++;
+    }
+    order.sort(function (a, b) { return agg[b] - agg[a] || (a > b ? 1 : -1); });
+    return order.map(function (a) { return { app: a, n: agg[a] }; });
+  }
+
+  function render() {
+    var cat = scope.cat, app = scope.app;
+    var color = colors[cat] || 'var(--neutral-other)';
+    var mins = 0;
+    for (var i = 0; i < rows.length; i++) if (inScope(rows[i])) mins++;
+    title.innerHTML = app === null ? esc(cat)
+      : esc(app === '' ? 'unattributed' : app) + ' <span id="psub">· ' + esc(cat) + '</span>';
+    total.textContent = hm(mins);
+    swatch.style.background = color;
+    swatch.style.opacity = app === null ? 1 : shade(app);
+    back.hidden = app === null;
+    var h = '';
+    if (app === null) {
+      var list = appList(cat);
+      if (list.length > 1 || (list.length === 1 && list[0].app !== '')) {
+        h += '<div class="papps">';
+        var max = list.length ? list[0].n : 1;
+        list.forEach(function (e) {
+          var name = e.app === '' ? 'unattributed' : e.app;
+          var tint = 'background:' + color + ';opacity:' + shade(e.app);
+          h += '<button class="papp" data-app="' + esc(e.app) + '">' +
+            '<span class="swatch" style="' + tint + '"></span>' +
+            '<span class="papp-name">' + esc(name) + '</span>' +
+            '<span class="bar-track"><span class="bar-fill" style="width:' +
+              (e.n / max * 100).toFixed(1) + '%;' + tint + '"></span></span>' +
+            '<span class="papp-val">' + hm(e.n) + '</span></button>';
+        });
+        h += '</div>';
+      }
+    }
+    var runs = runsOf();
+    runs.forEach(function (r) {
+      var tags = r.g.filter(function (t) { return t !== cat && t !== r.a; });
+      h += '<div class="prun"><div class="prun-head">' +
+        '<span class="prun-time">' + tmin(r.start) + '–' + tmin(r.end) + '</span>' +
+        '<span class="prun-dur">' + hm(r.n) + '</span>' +
+        (app === null && r.a ? '<span class="prun-app">' + esc(r.a) + '</span>' : '') +
+        (data.multi ? '<span class="prun-dev">' + esc(r.d) + '</span>' : '') +
+        '</div>' +
+        (r.x ? '<div class="prun-detail">' + esc(r.x) + '</div>' : '') +
+        (tags.length ? '<div class="prun-tags">' + esc(tags.join(' · ')) + '</div>' : '') +
+        '</div>';
+    });
+    if (!runs.length) h += '<p class="empty">No minutes in this segment.</p>';
+    h += '<p class="pfoot"><a href="/?d=' + data.day + '&cat=' + encodeURIComponent(cat) +
+      '">filter the whole page to ' + esc(cat) + ' →</a></p>';
+    body.innerHTML = h;
+    body.scrollTop = 0;
+  }
+
+  function open(cat, app) {
+    scope = { cat: cat, app: app };
+    render();
+    if (panel.hidden) {
+      panel.hidden = false; bg.hidden = false;
+      document.body.classList.add('panel-open');
+      requestAnimationFrame(function () {
+        panel.classList.add('show'); bg.classList.add('show');
+      });
+    }
+    closeBtn.focus();
+  }
+  function dismiss() {
+    if (!scope) return;
+    scope = null;
+    panel.classList.remove('show'); bg.classList.remove('show');
+    document.body.classList.remove('panel-open');
+    setTimeout(function () { panel.hidden = true; bg.hidden = true; }, 190);
+  }
+
+  document.addEventListener('click', function (e) {
+    if (!e.target.closest) return;
+    var seg = e.target.closest('a[data-cat]');
+    if (seg) {
+      e.preventDefault();
+      open(seg.getAttribute('data-cat'),
+           seg.hasAttribute('data-app') ? seg.getAttribute('data-app') : null);
+      return;
+    }
+    var ab = e.target.closest('.papp');
+    if (ab && scope) open(scope.cat, ab.getAttribute('data-app'));
+  });
+  back.addEventListener('click', function () { if (scope) open(scope.cat, null); });
+  closeBtn.addEventListener('click', dismiss);
+  bg.addEventListener('click', dismiss);
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') dismiss();
+  });
+})();
+"#;
 
 /// One row per day, midnight to midnight, coloured by category.
 ///
@@ -1165,6 +1524,87 @@ fn agent_panel(days: &[crate::agents::AgentDay], minutes: &[crate::agents::Agent
     bars.push_str("</div>");
 
     format!("{stats}<div class=\"grid\">{tools}<div>{bars}</div></div>")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg() -> ServerConfig {
+        ServerConfig::default()
+    }
+
+    fn m(cat: &str, tags: &[&str], project: Option<&str>, window: Option<&str>) -> Minute {
+        Minute {
+            category: cat.into(),
+            tags: tags.iter().map(|s| s.to_string()).collect(),
+            project: project.map(Into::into),
+            window: window.map(Into::into),
+            ..Default::default()
+        }
+    }
+
+    /// The attribution chain, in order: off-list tag, project, window class,
+    /// domain -- and None only when all four have nothing to say.
+    #[test]
+    fn app_of_prefers_the_first_off_list_tag() {
+        let cfg = cfg();
+        // "comms" and "youtube" are categories; "discord" is the app.
+        let minute = m("comms", &["comms", "discord", "youtube"], Some("time"), None);
+        assert_eq!(app_of(&cfg, &minute).as_deref(), Some("discord"));
+
+        // No off-list tag: the project carries the app by prompt convention.
+        let minute = m("comms", &["comms"], Some("Discord"), Some("firefox — x"));
+        assert_eq!(app_of(&cfg, &minute).as_deref(), Some("discord"));
+
+        // Neither: the window class, lowercased.
+        let minute = m("browsing", &["browsing"], None, Some("Firefox — dn.se"));
+        assert_eq!(app_of(&cfg, &minute).as_deref(), Some("firefox"));
+
+        let mut minute = m("browsing", &["browsing"], None, None);
+        minute.domain = Some("dn.se".into());
+        assert_eq!(app_of(&cfg, &minute).as_deref(), Some("dn.se"));
+
+        assert_eq!(app_of(&cfg, &m("idle", &["idle"], None, None)), None);
+    }
+
+    /// For `other`, the model's invented category word comes first in tags and
+    /// is off-list by construction, so it becomes the app.
+    #[test]
+    fn app_of_uses_the_invented_word_for_other() {
+        let minute = m("other", &["gardening", "music", "other"], None, None);
+        assert_eq!(app_of(&cfg(), &minute).as_deref(), Some("gardening"));
+    }
+
+    /// Segments inside a category always sum to its total (the ring must not
+    /// lie), unattributed time sorts first, and apps follow by size.
+    #[test]
+    fn app_layers_sum_and_order() {
+        let cfg = cfg();
+        let minutes = vec![
+            m("comms", &["comms", "discord"], None, None),
+            m("comms", &["comms", "discord"], None, None),
+            m("comms", &["comms", "snapchat"], None, None),
+            m("comms", &["comms"], None, None), // nothing names this one
+        ];
+        let layers = app_layers(&cfg, &minutes);
+        assert_eq!(layers.len(), 1);
+        let (cat, total, segs) = &layers[0];
+        assert_eq!(cat, "comms");
+        assert_eq!(*total, 4);
+        assert_eq!(segs.iter().map(|(_, n)| n).sum::<i64>(), *total);
+        assert_eq!(segs[0].0, "", "unattributed anchors the slice");
+        assert_eq!(segs[1], ("discord".to_string(), 2));
+        assert_eq!(segs[2], ("snapchat".to_string(), 1));
+    }
+
+    /// The tint is a pure function of the name: same app, same tint, today
+    /// and next month.
+    #[test]
+    fn shades_are_deterministic() {
+        assert_eq!(shade_for("discord"), shade_for("discord"));
+        assert!(["1", "0.84", "0.68", "0.52"].contains(&shade_for("snapchat")));
+    }
 }
 
 fn focus_panel(f: &crate::db::Focus) -> String {

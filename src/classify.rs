@@ -132,15 +132,22 @@ can be grown from real data later. Never force a bad fit.
 
 \"tags\" otherwise lists everything genuinely active this minute, from the \
 list, the category itself included. Audible media, a visible video, a live \
-chat all count; a minimised window or an idle tab is not an activity.
+chat all count; a minimised window or an idle tab is not an activity. Tags \
+must ALSO always name the specific app, service or site in use as its own \
+lowercase word (snapchat, discord, whatsapp, netflix, youtube, jodel, \
+gmail, ...) whenever one is identifiable from the window title, package name \
+or the screen -- the chart splits every category by that word.
 
 ## The other fields
 
 - \"project\" is the repository, course, or topic if you can identify one, \
-else null.
+else null -- except communication, streaming and social minutes, where it is \
+the app's name (\"discord\", \"snapchat\") so the drill-down groups by app.
 - \"detail\" is ONE concrete sentence naming specifics: file paths, repo \
 names, page titles, what a terminal is running. It is what a later reader \
-sees without the screenshot, so be specific. When the person is away, say \
+sees without the screenshot, so be specific. For communication, name who the \
+conversation is with when the screen shows it -- contact, channel or server \
+(\"chatting with Anna on Discord #general\"). When the person is away, say \
 what the machine was doing instead.
 - Each device's previous label is given at the top. Consecutive minutes of \
 one continuous activity keep the same category and project -- flickering \
@@ -350,7 +357,10 @@ pub fn classify(
         // A full-screen image on a busy endpoint regularly takes well over a
         // minute, and a batch carries twenty of them. Timing out does not save
         // anything -- the minutes are simply lost -- so wait rather than give up.
-        .timeout(std::time::Duration::from_secs(600))
+        // Long enough for a 20-minute reasoning batch PLUS its wait in the
+        // llama-swap queue behind other batches; 600 was the queue-starvation
+        // timeout that killed the first backlog run.
+        .timeout(std::time::Duration::from_secs(1800))
         .build()?;
 
     // One retry, because these failures are transient far more often than not
@@ -667,6 +677,24 @@ mod tests {
                 "music".to_string(),
                 "other".to_string()
             ]
+        );
+    }
+
+    /// The dashboard's per-app drill-down hangs on these instructions: the
+    /// service tagged as its own word, comms projects carrying the app name,
+    /// and the counterpart named in detail.
+    #[test]
+    fn the_prompt_asks_for_app_attribution() {
+        let p = system_prompt(&cfg());
+        assert!(p.contains("lowercase word"), "app-as-tag line missing");
+        assert!(p.contains("snapchat, discord"), "app examples missing");
+        assert!(
+            p.contains("the app's name"),
+            "comms project convention missing"
+        );
+        assert!(
+            p.contains("who the conversation is with"),
+            "counterpart-in-detail line missing"
         );
     }
 
