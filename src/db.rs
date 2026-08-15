@@ -148,6 +148,9 @@ impl Db {
     pub fn open_at(path: std::path::PathBuf) -> Result<Self> {
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
+        // A reclassify run shares this database with the live server; without
+        // a timeout the second writer gets SQLITE_BUSY instead of waiting.
+        conn.busy_timeout(std::time::Duration::from_secs(30))?;
         conn.execute_batch(
             // Keyed by (device, ts) so several machines can report the same
             // minute without overwriting each other.
