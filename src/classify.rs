@@ -24,13 +24,30 @@ pub struct Label {
 /// a batch spans every device now, so the timestamp alone is not a key either.
 /// `device` is optional only for the batch-of-one-machine case, where it is
 /// unambiguous.
+///
+/// `same` is the compression: a minute that continues the previous minute's
+/// activity on the same device comes back as `{"device", "ts", "same": true}`
+/// and nothing else, and the parser copies that device's previous label in
+/// this response forward verbatim. A continuing minute is ~15 output tokens
+/// instead of a full object -- most minutes continue, so most of the decode
+/// disappears -- and deciding where "same" stops IS the temporal judgment.
+/// The label fields are individually optional because a `same` row omits
+/// them; a full row must still carry a category or it is skipped.
 #[derive(Debug, Deserialize)]
 struct Row {
     #[serde(default)]
     device: Option<String>,
     ts: i64,
-    #[serde(flatten)]
-    label: Label,
+    #[serde(default)]
+    same: bool,
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    project: Option<String>,
+    #[serde(default)]
+    detail: Option<String>,
 }
 
 /// A device's most recent labelled minute, passed back into the next call.
@@ -151,14 +168,26 @@ conversation is with when the screen shows it -- contact, channel or server \
 what the machine was doing instead.
 - Each device's previous label is given at the top. Consecutive minutes of \
 one continuous activity keep the same category and project -- flickering \
-mid-activity is the most common way these labels go wrong -- but \"detail\" \
-should still say what specifically happened in that minute.
+mid-activity is the most common way these labels go wrong.
 
-Label every (device, ts) item you are given; never merge, drop or invent \
-items. Respond with a JSON array only, no markdown fence, one object per \
-item, each carrying back the \"device\" and \"ts\" it was labelled from:
+## Output
+
+Respond with a JSON array only, no markdown fence, one object per (device, \
+ts) item. Every item you are given must appear in the array; never merge, \
+drop or invent items. For each device's FIRST minute, and for every minute \
+where the activity changes, give the full object, with \"detail\" at most \
+12 words:
 [{{\"device\": \"pc\", \"ts\": 1234567890, \"category\": \"...\", \
-\"tags\": [\"...\"], \"project\": \"...\" or null, \"detail\": \"...\"}}]",
+\"tags\": [\"...\"], \"project\": \"...\" or null, \"detail\": \"...\"}}]
+For a minute that CONTINUES the same continuous activity as that device's \
+previous minute, output only
+{{\"device\": \"pc\", \"ts\": 1234567950, \"same\": true}}
+and no other fields -- the previous label is carried forward verbatim. If a \
+device's first minute simply continues the \"previous label\" given above, \
+it too may be {{\"same\": true}}. \"same\" is a claim that NOTHING \
+meaningfully changed: a new conversation partner, a new file, a new video \
+each count as a change and need a full object. Where you stop saying \
+\"same\" is the temporal judgment this task asks for.",
         cfg.categories
             .iter()
             .map(|c| format!("- {c}"))
@@ -234,6 +263,35 @@ fn contexts(items: &[Item<'_>]) -> Vec<String> {
         out.push(context);
     }
     out
+}
+
+/// Input-token accounting for assembling a batch, shared by the live
+/// collector and `reclassify` so both cut batches the same way. The numbers
+/// are tied to the llama-server behind the endpoint: a batch whose input
+/// overflows its slot is truncated or refused, losing every minute in it. A
+/// 768px screenshot measures ~450 input tokens, a minute without one ~80
+/// (window title plus presence lines), and the system prompt with the
+/// previous-label block ~600. What a slot can take is deployment, not code
+/// -- it moves when the GPU's context grows -- so the ceiling itself is
+/// `ServerConfig::batch_token_budget`; only the per-minute estimates live
+/// here.
+pub const TOKENS_PER_IMAGE_MINUTE: u32 = 450;
+pub const TOKENS_PER_TEXT_MINUTE: u32 = 80;
+pub const TOKENS_FIXED: u32 = 600;
+
+/// Estimated input cost of a batch: one bool per minute, true when that
+/// minute carries a screenshot.
+pub fn estimated_input_tokens(minutes_with_image: impl Iterator<Item = bool>) -> u32 {
+    TOKENS_FIXED
+        + minutes_with_image
+            .map(|img| {
+                if img {
+                    TOKENS_PER_IMAGE_MINUTE
+                } else {
+                    TOKENS_PER_TEXT_MINUTE
+                }
+            })
+            .sum::<u32>()
 }
 
 /// Which model gets this batch.
@@ -323,7 +381,8 @@ pub fn classify(
         "type": "text",
         "text": format!(
             "Classify all {} items above. Return a JSON array of exactly {} objects \
-             in the same order, each carrying back its own \"device\" and \"ts\".",
+             in the same order, each carrying back its own \"device\" and \"ts\", \
+             using {{\"same\": true}} for minutes that continue the previous one.",
             items.len(),
             items.len()
         ),
@@ -331,27 +390,11 @@ pub fn classify(
 
     let model = model_for(cfg, items);
 
-    // No temperature, top_p or top_k: the server's own sampling defaults must
-    // win. Greedy decoding is a documented endless-repetition failure mode for
-    // the Qwen thinking models this runs against, and a hardcoded 0 here once
-    // forced exactly that.
-    let mut body = serde_json::json!({
-        "model": model,
-        // Per minute, plus headroom for a reasoning block. Too low truncates
-        // the array and costs the whole batch, which is far more expensive
-        // than the unused tokens this leaves on the table -- the cap reserves
-        // nothing. The server runs a reasoning budget of 3072 as a backstop,
-        // so 4096 of headroom means a full think block plus the JSON can
-        // never starve.
-        "max_tokens": per_minute_budget(cfg, model) * items.len() as u32 + 4096,
-        "messages": [
-            { "role": "system", "content": system_prompt(cfg) },
-            { "role": "user", "content": serde_json::Value::Array(content) }
-        ]
-    });
-    if cfg.json_schema {
-        body["response_format"] = response_format();
-    }
+    let mut body = request_body(cfg, model, items.len());
+    body["messages"] = serde_json::json!([
+        { "role": "system", "content": system_prompt(cfg) },
+        { "role": "user", "content": serde_json::Value::Array(content) }
+    ]);
 
     let client = reqwest::blocking::Client::builder()
         // A full-screen image on a busy endpoint regularly takes well over a
@@ -460,9 +503,9 @@ pub fn classify(
                 None
             }
         };
-        match parse_labels(content, cfg, lone) {
+        match parse_labels(content, cfg, lone, prev) {
             Ok(rows) => return Ok((rows, usage, raw)),
-            Err(e) => match parse_labels(reasoning, cfg, lone) {
+            Err(e) => match parse_labels(reasoning, cfg, lone, prev) {
                 Ok(rows) if !rows.is_empty() => return Ok((rows, usage, raw)),
                 // Neither field held an array. Say enough to tell the three
                 // causes apart without ever logging the reply itself, which
@@ -509,6 +552,22 @@ fn strip_reasoning(content: &str) -> &str {
 /// is a guaranteed source of intermittent failures. Take the outermost
 /// brackets, and accept a bare object for the batch-of-one case.
 ///
+/// `same` rows are expanded here: the row gets that device's previous label
+/// in this response, verbatim -- which is the deliberate trade of per-minute
+/// `detail` granularity for a decode that no longer repeats an unchanged
+/// label twenty times. A device's FIRST row may also be `same`: it then
+/// continues the "previous label" block the prompt opened with, i.e. `prev`
+/// -- the same map that built that block, so the parser and the prompt can
+/// never disagree about what "previous" meant. (`Previous` carries no tags,
+/// so a label continued across the batch boundary restarts its tag list at
+/// just the category; the next full row rebuilds it.)
+///
+/// The guards fail rows, never the batch: a `same` row for a device with no
+/// previous row here and none in `prev` has nothing to continue and is
+/// logged and skipped, as is a full row without a category; either minute
+/// stays pending and the caller logs the shortfall. A `same` row that also
+/// carries label fields is trusted on the `same` and the fields are ignored.
+///
 /// `lone_device` is Some when the whole batch came from one machine; a row
 /// missing its "device" is then unambiguous and accepted. In a mixed batch
 /// such a row is dropped instead -- its minute stays pending, which beats
@@ -517,6 +576,7 @@ fn parse_labels(
     content: &str,
     cfg: &ServerConfig,
     lone_device: Option<&str>,
+    prev: &[(&str, Previous<'_>)],
 ) -> Result<Vec<((String, i64), Label)>> {
     // An unterminated think block strips to nothing. That is right when the
     // narration ran out of budget mid-sentence, and wrong when a stray "<think"
@@ -545,13 +605,79 @@ fn parse_labels(
         vec![serde_json::from_str(json).with_context(|| format!("parsing label JSON: {json}"))?]
     };
 
-    Ok(rows
-        .into_iter()
-        .filter_map(|r| {
-            let device = r.device.or_else(|| lone_device.map(str::to_string))?;
-            Some(((device, r.ts), clean(r.label, cfg)))
+    // Every field except the key is optional now, so brace-shaped debris (a
+    // truncated think block, say) can deserialize without containing a single
+    // label. That is a failed parse, not an empty answer -- the caller should
+    // go on to try the reasoning half -- whereas rows skipped further down
+    // for ambiguity or a dangling "same" are answers we refused to place.
+    if !rows.is_empty() && rows.iter().all(|r| !r.same && r.category.is_none()) {
+        bail!("rows carry neither \"same\" nor a category");
+    }
+
+    // What "the previous minute's activity" resolves to, per device. Seeded
+    // from the prompt's previous-label block so a batch can open with a
+    // `same` row, then updated by every full row in reply order.
+    let mut last: std::collections::HashMap<String, Label> = prev
+        .iter()
+        .map(|(device, p)| {
+            (
+                device.to_string(),
+                clean(
+                    Label {
+                        category: p.category.to_string(),
+                        project: p.project.map(str::to_string),
+                        detail: p.detail.map(str::to_string),
+                        tags: Vec::new(),
+                    },
+                    cfg,
+                ),
+            )
         })
-        .collect())
+        .collect();
+
+    let mut out = Vec::new();
+    for r in rows {
+        let Some(device) = r.device.or_else(|| lone_device.map(str::to_string)) else {
+            continue;
+        };
+        let label = if r.same {
+            // "same" wins even when label fields tagged along: the claim of
+            // continuity is the judgment asked for, and half-filled extras
+            // next to it are decoration, not a second answer.
+            match last.get(&device) {
+                Some(l) => l.clone(),
+                None => {
+                    // Only device and timestamp, never the label: this goes
+                    // to a pod log, and labels describe the user's screen.
+                    eprintln!(
+                        "classify: {device} {} says \"same\" with nothing to continue, skipping",
+                        r.ts
+                    );
+                    continue;
+                }
+            }
+        } else {
+            let Some(category) = r.category else {
+                eprintln!(
+                    "classify: {device} {} has neither \"same\" nor a category, skipping",
+                    r.ts
+                );
+                continue;
+            };
+            clean(
+                Label {
+                    category,
+                    project: r.project,
+                    detail: r.detail,
+                    tags: r.tags,
+                },
+                cfg,
+            )
+        };
+        last.insert(device.clone(), label.clone());
+        out.push(((device, r.ts), label));
+    }
+    Ok(out)
 }
 
 fn clean(mut label: Label, cfg: &ServerConfig) -> Label {
@@ -602,6 +728,7 @@ mod tests {
                 {"device":"phone","ts":100,"category":"work_personal","tags":["youtube"],"detail":"hacking"}]"#,
             &cfg(),
             None,
+            &[],
         )
         .unwrap();
         assert_eq!(out.len(), 2);
@@ -614,16 +741,114 @@ mod tests {
         assert!(out[1].1.tags.contains(&"youtube".to_string()));
     }
 
+    /// The compression this whole format exists for: a `same` row copies that
+    /// device's previous label in the response -- per device, so interleaved
+    /// machines never bleed into each other.
+    #[test]
+    fn same_carries_the_previous_label_forward_per_device() {
+        let out = parse_labels(
+            r#"[{"device":"pc","ts":60,"category":"work_husk","tags":["work_husk"],"project":"time","detail":"editing db.rs"},
+                {"device":"phone","ts":60,"category":"youtube","tags":["youtube"],"project":"youtube","detail":"video"},
+                {"device":"pc","ts":120,"same":true},
+                {"device":"phone","ts":120,"same":true},
+                {"device":"pc","ts":180,"same":true}]"#,
+            &cfg(),
+            None,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(out.len(), 5);
+        let get = |dev: &str, ts: i64| {
+            &out.iter()
+                .find(|((d, t), _)| d == dev && *t == ts)
+                .unwrap()
+                .1
+        };
+        assert_eq!(get("pc", 120).category, "work_husk");
+        assert_eq!(get("pc", 120).project.as_deref(), Some("time"));
+        assert_eq!(get("pc", 120).detail.as_deref(), Some("editing db.rs"));
+        assert_eq!(get("phone", 120).category, "youtube");
+        // A chain of `same` keeps carrying the same full label.
+        assert_eq!(get("pc", 180).category, "work_husk");
+    }
+
+    /// A device's first row may be `same` only when the prompt's
+    /// previous-label block gave it something to continue -- the same `prev`
+    /// map the prompt was built from, so prompt and parser cannot disagree.
+    #[test]
+    fn a_leading_same_continues_the_prompts_previous_label() {
+        let prev = [(
+            "pc",
+            Previous {
+                category: "work_husk",
+                project: Some("time"),
+                detail: Some("editing db.rs"),
+            },
+        )];
+        let out = parse_labels(
+            r#"[{"device":"pc","ts":60,"same":true}]"#,
+            &cfg(),
+            None,
+            &prev,
+        )
+        .unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, ("pc".to_string(), 60));
+        assert_eq!(out[0].1.category, "work_husk");
+        assert_eq!(out[0].1.project.as_deref(), Some("time"));
+    }
+
+    /// With no previous label anywhere, a leading `same` has nothing to
+    /// continue: the row is dropped and the minute stays pending. Other
+    /// devices' rows are unaffected.
+    #[test]
+    fn a_leading_same_with_nothing_to_continue_stays_pending() {
+        let out = parse_labels(
+            r#"[{"device":"pc","ts":60,"same":true},
+                {"device":"phone","ts":60,"category":"idle"}]"#,
+            &cfg(),
+            None,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, ("phone".to_string(), 60));
+    }
+
+    /// `same` is the answer even when label fields tag along beside it, and a
+    /// row claiming neither `same` nor a category has said nothing at all.
+    #[test]
+    fn same_beats_stray_fields_and_an_empty_row_is_skipped() {
+        let out = parse_labels(
+            r#"[{"device":"pc","ts":60,"category":"work_husk","tags":["work_husk"]},
+                {"device":"pc","ts":120,"same":true,"category":"youtube"},
+                {"device":"pc","ts":180}]"#,
+            &cfg(),
+            None,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(out.len(), 2, "the empty row is skipped, not an error");
+        assert_eq!(out[1].0, ("pc".to_string(), 120));
+        assert_eq!(
+            out[1].1.category, "work_husk",
+            "same wins over the stray category"
+        );
+    }
+
     /// A batch from a single machine forgives a reply without "device"; a
     /// mixed batch cannot, and drops the row rather than guessing.
     #[test]
     fn a_single_device_batch_tolerates_rows_missing_device() {
-        let reply = r#"[{"ts":100,"category":"idle"}]"#;
-        let out = parse_labels(reply, &cfg(), Some("laptop")).unwrap();
-        assert_eq!(out.len(), 1);
+        let reply = r#"[{"ts":100,"category":"idle"},{"ts":160,"same":true}]"#;
+        let out = parse_labels(reply, &cfg(), Some("laptop"), &[]).unwrap();
+        assert_eq!(out.len(), 2);
         assert_eq!(out[0].0, ("laptop".to_string(), 100));
+        // The carry-forward works for device-less rows too.
+        assert_eq!(out[1].0, ("laptop".to_string(), 160));
+        assert_eq!(out[1].1.category, "idle");
 
-        let out = parse_labels(reply, &cfg(), None).unwrap();
+        let out = parse_labels(reply, &cfg(), None, &[]).unwrap();
         assert!(out.is_empty(), "ambiguous rows are dropped, not guessed");
     }
 
@@ -633,6 +858,7 @@ mod tests {
             "Here you go:\n```json\n[{\"device\":\"pc\",\"ts\":7,\"category\":\"idle\"}]\n```\nHope that helps!",
             &cfg(),
             None,
+            &[],
         )
         .unwrap();
         assert_eq!(out.len(), 1);
@@ -647,6 +873,7 @@ mod tests {
              [{\"device\":\"pc\",\"ts\":9,\"category\":\"work_husk\",\"tags\":[\"work_husk\"]}]",
             &cfg(),
             None,
+            &[],
         )
         .unwrap();
         assert_eq!(out.len(), 1);
@@ -655,7 +882,9 @@ mod tests {
 
     #[test]
     fn an_unclosed_think_block_is_not_an_answer() {
-        assert!(parse_labels("<think>still thinking about [{\"ts\":1}", &cfg(), None).is_err());
+        assert!(
+            parse_labels("<think>still thinking about [{\"ts\":1}", &cfg(), None, &[]).is_err()
+        );
     }
 
     /// The category folds into `other` -- an invented one cannot be charted --
@@ -667,6 +896,7 @@ mod tests {
             r#"[{"ts":1,"category":"gardening","tags":["gardening","music"]}]"#,
             &cfg(),
             Some("pc"),
+            &[],
         )
         .unwrap();
         assert_eq!(out[0].1.category, "other");
@@ -695,6 +925,22 @@ mod tests {
         assert!(
             p.contains("who the conversation is with"),
             "counterpart-in-detail line missing"
+        );
+    }
+
+    /// The output contract the parser depends on: the `same` shorthand, its
+    /// leading-row form, and that it must be an explicit claim of continuity.
+    #[test]
+    fn the_prompt_defines_the_same_shorthand() {
+        let p = system_prompt(&cfg());
+        assert!(p.contains("\"same\": true"), "same example missing");
+        assert!(
+            p.contains("NOTHING meaningfully changed"),
+            "continuity-claim line missing"
+        );
+        assert!(
+            p.contains("first minute simply continues"),
+            "leading-same-from-previous-label line missing"
         );
     }
 
@@ -737,7 +983,7 @@ mod tests {
 
     #[test]
     fn accepts_a_bare_object_for_a_single_minute() {
-        let out = parse_labels(r#"{"ts":42,"category":"idle"}"#, &cfg(), Some("pc")).unwrap();
+        let out = parse_labels(r#"{"ts":42,"category":"idle"}"#, &cfg(), Some("pc"), &[]).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].0, ("pc".to_string(), 42));
     }
@@ -796,24 +1042,140 @@ mod tests {
     fn schema_shaped_reply_parses() {
         let schema = response_format();
         assert_eq!(schema["type"], "json_schema");
-        for field in ["device", "ts", "category", "tags", "project", "detail"] {
+        for field in [
+            "device", "ts", "same", "category", "tags", "project", "detail",
+        ] {
             assert!(
                 schema["json_schema"]["schema"]["items"]["properties"][field].is_object(),
                 "schema is missing {field}"
             );
         }
+        // Only the key may be required: a `same` row omits every label field,
+        // so a grammar demanding `category` would forbid the shorthand.
+        assert_eq!(
+            schema["json_schema"]["schema"]["items"]["required"],
+            serde_json::json!(["device", "ts"])
+        );
         let out = parse_labels(
-            r#"[{"device":"pc","ts":100,"category":"idle","tags":["idle"],"project":null,"detail":"away"}]"#,
+            r#"[{"device":"pc","ts":100,"category":"idle","tags":["idle"],"project":null,"detail":"away"},
+                {"device":"pc","ts":160,"same":true}]"#,
             &cfg(),
             None,
+            &[],
         )
         .unwrap();
         assert_eq!(out[0].1.category, "idle");
         assert_eq!(out[0].0, ("pc".to_string(), 100));
+        assert_eq!(out[1].1.category, "idle");
+    }
+
+    /// `thinking = false` must reach the chat template; anything else must
+    /// leave the request alone so the model's own default wins.
+    #[test]
+    fn thinking_false_disables_thinking_in_the_request() {
+        let mut cfg = cfg();
+        let body = request_body(&cfg, "time-vision", 20);
+        assert!(
+            body.get("chat_template_kwargs").is_none(),
+            "unset thinking must not touch the template"
+        );
+        cfg.thinking = Some(true);
+        let body = request_body(&cfg, "time-vision", 20);
+        assert!(
+            body.get("chat_template_kwargs").is_none(),
+            "explicit true is also the model default; send nothing"
+        );
+        cfg.thinking = Some(false);
+        let body = request_body(&cfg, "time-vision", 20);
+        assert_eq!(
+            body["chat_template_kwargs"],
+            serde_json::json!({ "enable_thinking": false })
+        );
+    }
+
+    /// The output cap assumes a full object per three minutes plus 15 tokens
+    /// per `same` row plus reasoning headroom -- and however the numbers move,
+    /// a 60-minute thinking batch must clear its worst case: 60 full objects
+    /// (a model that ignores the shorthand, ~200 tokens each) plus a maximal
+    /// 3072-token think block.
+    #[test]
+    fn max_tokens_scales_by_thirds_not_per_minute() {
+        let mut cfg = cfg();
+        // Non-reasoning heuristic budget is 400/object.
+        assert_eq!(
+            max_tokens(&cfg, "time-vision", 60),
+            400 * 22 + 15 * 60 + 4096
+        );
+        // The deployed shape: an explicit budget for a thinking model behind
+        // an alias. Even the worst case -- a model that ignores the shorthand
+        // and writes 60 full objects (~200 tokens each) after a maximal
+        // 3072-token think block -- must clear the cap with room to spare.
+        cfg.max_tokens_per_minute = Some(1600);
+        assert!(max_tokens(&cfg, "time-vision", 60) >= 60 * 200 + 3072);
+        // A batch of one is still generous enough for a full think block.
+        assert!(max_tokens(&cfg, "time-vision", 1) >= 3072 + 200);
+    }
+
+    /// The input estimate the batch builders cut on: screenshots dominate, so
+    /// 60 text minutes fit the default budget while screenshot minutes hit
+    /// the ceiling after ~27.
+    #[test]
+    fn input_estimate_flags_image_heavy_batches() {
+        let budget = cfg().batch_token_budget;
+        assert_eq!(
+            estimated_input_tokens((0..60).map(|_| false)),
+            TOKENS_FIXED + 60 * TOKENS_PER_TEXT_MINUTE
+        );
+        assert!(estimated_input_tokens((0..60).map(|_| false)) < budget);
+        assert!(estimated_input_tokens((0..27).map(|_| true)) <= budget);
+        assert!(estimated_input_tokens((0..28).map(|_| true)) > budget);
     }
 }
 
-/// Output tokens to allow per minute in a batch.
+/// The request minus the messages: model, output cap, and the switches.
+fn request_body(cfg: &ServerConfig, model: &str, n: usize) -> serde_json::Value {
+    // No temperature, top_p or top_k: the server's own sampling defaults must
+    // win. Greedy decoding is a documented endless-repetition failure mode for
+    // the Qwen thinking models this runs against, and a hardcoded 0 here once
+    // forced exactly that.
+    let mut body = serde_json::json!({
+        "model": model,
+        "max_tokens": max_tokens(cfg, model, n),
+    });
+    // Verified against llama-server: the Qwen chat template takes
+    // `enable_thinking`, and with it false the reply carries no
+    // reasoning_content at all. Only ever sent as an explicit false; None
+    // (the config default) leaves the model's own default alone, which is
+    // right for live classification -- the thinking is what buys the
+    // presence judgment (see DESIGN.md) -- and Some(false) exists for
+    // backfills where the GPU bill outweighs it.
+    if cfg.thinking == Some(false) {
+        body["chat_template_kwargs"] = serde_json::json!({ "enable_thinking": false });
+    }
+    if cfg.json_schema {
+        body["response_format"] = response_format();
+    }
+    body
+}
+
+/// Output cap for a batch of `n` minutes.
+///
+/// With `same` compression the output no longer scales like n full label
+/// objects: most minutes continue their neighbour and cost ~15 tokens of
+/// `{"device", "ts", "same": true}`. So assume a full object for a third of
+/// the minutes -- a generous rate of activity changes -- at the per-minute
+/// budget, plus 15 tokens for every minute as if it were also a `same` row,
+/// plus 4096 of headroom so a full reasoning block (the server backstops
+/// thinking at 3072) and the JSON can never starve; the `n / 3 + 2` keeps a
+/// tiny batch generous too. Too low truncates the array and costs the whole
+/// batch, which is far more expensive than the unused tokens this leaves on
+/// the table -- the cap reserves nothing and is not billed unless used.
+fn max_tokens(cfg: &ServerConfig, model: &str, n: usize) -> u32 {
+    let n = n as u32;
+    per_minute_budget(cfg, model) * (n / 3 + 2) + 15 * n + 4096
+}
+
+/// Output tokens to allow per full label object in a batch.
 ///
 /// A reasoning model spends its budget thinking before it writes anything, and
 /// that thinking counts against `max_tokens` even though it arrives in a
@@ -860,12 +1222,16 @@ fn response_format() -> serde_json::Value {
                     "properties": {
                         "device": { "type": "string" },
                         "ts": { "type": "integer" },
+                        "same": { "type": "boolean" },
                         "category": { "type": "string" },
                         "tags": { "type": "array", "items": { "type": "string" } },
                         "project": { "type": ["string", "null"] },
                         "detail": { "type": "string" }
                     },
-                    "required": ["device", "ts", "category", "tags", "project", "detail"],
+                    // Only the key is enforced: a `same` row legitimately
+                    // omits every label field, so "either same=true or a
+                    // category" is the parser's check, not the grammar's.
+                    "required": ["device", "ts"],
                     "additionalProperties": false
                 }
             }

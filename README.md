@@ -329,13 +329,24 @@ side reads only its own, so the same file works everywhere.
   machines instead of judging each screen in isolation. A label appears up to
   `batch_wait_secs` after the minute it describes; the row itself is written
   immediately.
+- **`server.batch_token_budget`** — estimated input tokens at which a batch
+  closes early, whatever `batch_minutes` says. This is what keeps an
+  image-dense batch inside one llama-server slot (~450 tokens per screenshot
+  minute, ~80 without, ~600 fixed); it moves with the GPU's context size, so
+  it is config rather than code.
 - **`server.endpoint`** — any OpenAI-compatible chat-completions URL. The
   intended setup is a local llama-swap (llama.cpp) instance on a machine with
   a GPU; the hosted OpenCode endpoint is the works-out-of-the-box fallback.
-- **`server.max_tokens_per_minute`** — explicit output-token budget per minute
-  in a batch. Unset, the budget is guessed from the model name (reasoning
-  models get more) — a guess with nothing to go on when the "name" is a
-  llama-swap alias like `time-vision`.
+- **`server.max_tokens_per_minute`** — explicit output-token budget per full
+  label object in a batch (minutes that continue the previous one come back
+  as a ~15-token `"same"` row instead). Unset, the budget is guessed from the
+  model name (reasoning models get more) — a guess with nothing to go on when
+  the "name" is a llama-swap alias like `time-vision`.
+- **`server.thinking`** — set `false` to ask the chat template to skip the
+  model's reasoning block (llama-server honours it via `enable_thinking`).
+  Leave unset for the model's default: the thinking is what buys the
+  presence judgment, so live classification keeps it and the switch exists
+  for when the GPU bill matters more.
 - **`server.json_schema`** — ask the endpoint to enforce the label schema via
   `response_format: {"type": "json_schema", ...}`. llama.cpp's llama-server
   compiles it to a grammar; hosted gateways mostly ignore it. Off by default,
@@ -357,6 +368,7 @@ against the live labels:
 time reclassify 7                                  # dry run, last 7 days
 time reclassify 7 --device pc --limit 40           # a cheap first taste
 time reclassify 30 --model qwen3-vl-32b --endpoint http://192.168.50.232:8000/v1/chat/completions
+time reclassify 30 --pending --no-think            # backlog run, reasoning off
 time reclassify 30 --run-id qwen32b-test --apply   # believe it: rewrite labels
 ```
 
@@ -365,8 +377,12 @@ a run id (default `<model>-<YYYYMMDD-HHMM>`), and the run prints minutes sent,
 agreement %, and the top category changes (`old → new: count`). `--apply` is
 the destructive version that updates the live labels instead. `--model`
 overrides both `model` and `model_text` — a backtest asks what one model would
-have said. It runs where the server's data dir is (set `TIME_DATA_DIR` to
-point at it), because that is where the database and the frames live.
+have said. `--pending` only takes rows the classifier never labelled — the
+cheap way through an outage backlog — and `--no-think` skips the model's
+reasoning block for the run: much less GPU time per batch, at the cost of the
+presence judgment the thinking buys. It runs where the server's data dir is
+(set `TIME_DATA_DIR` to point at it), because that is where the database and
+the frames live.
 
 ## What you actually shipped
 
@@ -495,8 +511,16 @@ re-sent with every single minute:
 
 So roughly **43% off a minute with a screenshot** and **~70% off one without**
 — a phone minute is nothing but the system prompt, which is why the phone was
-the expensive device. Output is unchanged either way: the same fields have to
-come back per minute.
+the expensive device.
+
+Output no longer scales per minute either. A minute that continues the
+previous activity comes back as `{"device", "ts", "same": true}` (~15 tokens)
+instead of a full label object, and the parser carries the previous label
+forward — most minutes continue, so most of the decode disappears. On a local
+GPU decode time is watt-hours: a backlog reclassify used to run for over a day
+at 212W because every minute was a fresh labelled object plus reasoning. The
+boundary — where the model stops saying `"same"` — is itself the temporal
+judgment, made explicit instead of inferred from label flicker.
 
 Every call logs what it actually cost (`N minute(s), X in / Y out`), so the
 real numbers are in `kubectl logs`, not in this table.

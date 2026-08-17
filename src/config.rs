@@ -83,6 +83,24 @@ pub struct ServerConfig {
     #[serde(default)]
     pub json_schema: bool,
 
+    /// Whether the model may think before answering. None -- the default --
+    /// leaves the model's own default alone; `false` asks the chat template
+    /// to skip the reasoning block entirely (llama-server's
+    /// `chat_template_kwargs.enable_thinking`). Live classification wants
+    /// the thinking: it is what buys the presence judgment (see DESIGN.md).
+    /// This switch exists for backfills where the GPU bill outweighs that,
+    /// and `time reclassify --no-think` flips it per run.
+    #[serde(default)]
+    pub thinking: Option<bool>,
+
+    /// Estimated input tokens a batch may reach before the collector closes
+    /// it early -- the guard that keeps an image-dense batch inside one
+    /// llama-server slot. Deployment, not code, because it tracks the GPU's
+    /// context size: with `-c 40960 --parallel 2` (two 20480-token slots)
+    /// 13000 input leaves the slot room for thinking and the reply.
+    #[serde(default = "default_batch_token_budget")]
+    pub batch_token_budget: u32,
+
     #[serde(default = "default_port")]
     pub port: u16,
 
@@ -172,6 +190,8 @@ impl Default for ServerConfig {
             endpoint: default_endpoint(),
             max_tokens_per_minute: None,
             json_schema: false,
+            thinking: None,
+            batch_token_budget: default_batch_token_budget(),
             port: default_port(),
             idle_after_secs: default_idle_after_secs(),
             idle_distance: default_idle_distance(),
@@ -305,6 +325,12 @@ fn default_idle_distance() -> u32 {
 
 fn default_batch_minutes() -> usize {
     20
+}
+
+/// Sized for a 20480-token llama-server slot: 13000 of input leaves over
+/// 7000 for thinking and the reply. Raise it from config when the slots grow.
+fn default_batch_token_budget() -> u32 {
+    13_000
 }
 
 /// Ten minutes. Long enough that a live desktop accumulates a real run, short
@@ -527,9 +553,16 @@ mod tests {
         let cfg: super::Config = toml::from_str("[server]\n").unwrap();
         assert_eq!(cfg.server.max_tokens_per_minute, None);
         assert!(!cfg.server.json_schema);
-        let cfg: super::Config =
-            toml::from_str("[server]\nmax_tokens_per_minute = 1600\njson_schema = true\n").unwrap();
+        assert_eq!(cfg.server.thinking, None, "absent means model default");
+        assert_eq!(cfg.server.batch_token_budget, 13_000);
+        let cfg: super::Config = toml::from_str(
+            "[server]\nmax_tokens_per_minute = 1600\njson_schema = true\n\
+             thinking = false\nbatch_token_budget = 27000\n",
+        )
+        .unwrap();
         assert_eq!(cfg.server.max_tokens_per_minute, Some(1600));
         assert!(cfg.server.json_schema);
+        assert_eq!(cfg.server.thinking, Some(false));
+        assert_eq!(cfg.server.batch_token_budget, 27_000);
     }
 }

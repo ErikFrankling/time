@@ -171,7 +171,29 @@ The unplanned benefit is quality: the model now sees a run rather than twenty
 unrelated frames, which is the context it needed to tell "reading" from "left
 the room" — the distinction §3 says is the whole job.
 
----
+**Update: output is `"same"`-compressed now, and the bill is watt-hours.**
+With classification local, cost stopped being dollars and became GPU time — a
+backlog reclassify ran for over a day at 212W because the model emitted one
+full labelled object per minute, reasoning included, twenty times per batch.
+The reply format changed: a minute that continues the previous activity on
+its device comes back as `{"device", "ts", "same": true}` (~15 tokens) and
+the parser carries that device's previous label forward verbatim — including
+across batches, seeded from the prompt's previous-label block. Most minutes
+continue, so most of the decode disappears, and the boundary where the model
+stops saying `"same"` is the temporal judgment made explicit rather than
+inferred from label flicker afterwards. The deliberate trade: continuing
+minutes lose per-minute `detail`, carrying the span-opening sentence instead.
+
+Two knobs came with it. Batches grew to `batch_minutes = 60` — with output no
+longer scaling per minute, a bigger batch is pure input amortization — but are
+closed early by `batch_token_budget`, an input-token estimate (~450/screenshot
+minute, ~80 without, ~600 fixed) that keeps an image-dense batch inside one
+llama-server slot. And the reasoning-stays verdict above got a switch instead
+of a reversal: `thinking = false` (or `time reclassify --no-think`) disables
+the think block via `chat_template_kwargs.enable_thinking` for backfills
+where the energy matters more than the presence judgment; live classification
+keeps thinking, for exactly the `cargo build`-while-away reason documented
+above.
 
 ## 4. Data
 

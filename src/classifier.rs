@@ -295,6 +295,7 @@ impl Drop for Release<'_> {
 /// names its device and each device's previous label rides along.
 fn collect(cfg: &ServerConfig, queue: &Queue) {
     let size = cfg.batch_minutes.max(1);
+    let budget = cfg.batch_token_budget;
     let linger = Duration::from_secs(cfg.batch_wait_secs.max(1));
     let mut open = Bucket::default();
 
@@ -315,7 +316,7 @@ fn collect(cfg: &ServerConfig, queue: &Queue) {
             open.push(job, Instant::now());
         }
 
-        if open.ready(size, linger, Instant::now()) {
+        if open.ready(size, budget, linger, Instant::now()) {
             queue.put_batch(open.close());
         }
     }
@@ -337,12 +338,28 @@ impl Bucket {
         self.jobs.push(job);
     }
 
-    /// A batch closes once it is full, or once its oldest item has waited out
-    /// the linger -- whichever comes first.
-    fn ready(&self, size: usize, linger: Duration, now: Instant) -> bool {
+    /// A batch closes once it is full, once its estimated input would no
+    /// longer fit the server slot with one more minute in it, or once its
+    /// oldest item has waited out the linger -- whichever comes first. The
+    /// token check is what lets `batch_minutes` be 60: sixty text minutes
+    /// are one cheap call, sixty screenshots are not, and only the estimate
+    /// can tell them apart.
+    fn ready(&self, size: usize, budget: u32, linger: Duration, now: Instant) -> bool {
         !self.jobs.is_empty()
             && (self.jobs.len() >= size
+                || self.over_budget(budget)
                 || self.since.is_some_and(|s| now.duration_since(s) >= linger))
+    }
+
+    /// Whether the bucket has room for one more minute of the expensive kind.
+    /// Checked after every push, and against a screenshot minute because the
+    /// collector cannot know what arrives next -- so a closed batch is always
+    /// within budget, at the price of a text-heavy batch closing at most one
+    /// screenshot-minute's worth of tokens early.
+    fn over_budget(&self, budget: u32) -> bool {
+        classify::estimated_input_tokens(self.jobs.iter().map(|j| j.jpeg.is_some()))
+            + classify::TOKENS_PER_IMAGE_MINUTE
+            > budget
     }
 
     /// Take the batch, sorted by (ts, device) so the prompt reads as a single
@@ -614,6 +631,9 @@ mod tests {
         }
     }
 
+    /// A budget no batch reaches, for tests about the other two triggers.
+    const ROOMY: u32 = u32::MAX;
+
     /// The bucket is global: minutes from any mix of devices count towards
     /// one batch, and closing sorts them into a single (ts, device) timeline
     /// so simultaneous minutes sit next to each other.
@@ -624,9 +644,9 @@ mod tests {
         let linger = Duration::from_secs(600);
         b.push(job("pc", 120), now);
         b.push(job("phone", 60), now);
-        assert!(!b.ready(3, linger, now));
+        assert!(!b.ready(3, ROOMY, linger, now));
         b.push(job("laptop", 120), now);
-        assert!(b.ready(3, linger, now));
+        assert!(b.ready(3, ROOMY, linger, now));
 
         let order: Vec<(i64, String)> = b.close().into_iter().map(|j| (j.ts, j.device)).collect();
         assert_eq!(
@@ -648,14 +668,58 @@ mod tests {
         let mut b = Bucket::default();
         let now = Instant::now();
         let linger = Duration::from_secs(600);
-        assert!(!b.ready(20, linger, now + linger * 2), "empty never fires");
+        assert!(
+            !b.ready(20, ROOMY, linger, now + linger * 2),
+            "empty never fires"
+        );
 
         b.push(job("pc", 60), now);
         b.push(job("pc", 120), now + linger / 2);
-        assert!(!b.ready(20, linger, now + linger / 2));
-        assert!(b.ready(20, linger, now + linger));
+        assert!(!b.ready(20, ROOMY, linger, now + linger / 2));
+        assert!(b.ready(20, ROOMY, linger, now + linger));
 
         b.close();
-        assert!(!b.ready(20, linger, now + linger * 2), "closing resets it");
+        assert!(
+            !b.ready(20, ROOMY, linger, now + linger * 2),
+            "closing resets it"
+        );
+    }
+
+    /// The token guard behind batch_minutes = 60: sixty text minutes are one
+    /// batch, but screenshot minutes close the bucket at the budget -- well
+    /// before sixty -- and every closed batch's estimate is within it.
+    #[test]
+    fn a_bucket_closes_early_when_screenshots_fill_the_token_budget() {
+        let budget = crate::config::ServerConfig::default().batch_token_budget;
+        let now = Instant::now();
+        let linger = Duration::from_secs(600);
+
+        let mut b = Bucket::default();
+        for i in 0..60 {
+            b.push(job("phone", i * 60), now);
+            assert!(
+                i == 59 || !b.ready(60, budget, linger, now),
+                "a text-only bucket must not close early (minute {i})"
+            );
+        }
+        assert!(b.ready(60, budget, linger, now), "still closes on size");
+
+        let mut b = Bucket::default();
+        let mut closed_at = None;
+        for i in 0..60 {
+            let mut j = job("pc", i * 60);
+            j.jpeg = Some(vec![0; 8]);
+            b.push(j, now);
+            if b.ready(60, budget, linger, now) {
+                closed_at = Some(b.close().len());
+                break;
+            }
+        }
+        let n = closed_at.expect("an image batch must split before 60");
+        assert!(n < 60);
+        assert!(
+            classify::estimated_input_tokens((0..n).map(|_| true)) <= budget,
+            "a closed batch fits its slot"
+        );
     }
 }

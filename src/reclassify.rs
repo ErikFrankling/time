@@ -31,6 +31,20 @@ pub struct Opts {
     /// way to work through an outage backlog without re-buying every good
     /// label in the window.
     pub pending_only: bool,
+    /// Ask the endpoint's chat template to skip the reasoning block. Live
+    /// classification keeps thinking for the presence judgment; a backlog
+    /// run at 212W is where trading it for watt-hours is the right call.
+    pub no_think: bool,
+}
+
+/// A device's most recent label as this run knows it -- either produced by an
+/// earlier batch of this very run, or read from the database. Owned, unlike
+/// `classify::Previous`, because it outlives the batch that made it.
+#[derive(Debug, Clone, PartialEq)]
+struct Prev {
+    category: String,
+    project: Option<String>,
+    detail: Option<String>,
 }
 
 pub fn run(mut cfg: ServerConfig, opts: Opts) -> Result<()> {
@@ -43,6 +57,9 @@ pub fn run(mut cfg: ServerConfig, opts: Opts) -> Result<()> {
     }
     if let Some(e) = &opts.endpoint {
         cfg.endpoint = e.clone();
+    }
+    if opts.no_think {
+        cfg.thinking = Some(false);
     }
     let key = config::api_key();
     let data_dir = config::data_dir()?;
@@ -66,7 +83,7 @@ pub fn run(mut cfg: ServerConfig, opts: Opts) -> Result<()> {
         opts.days
     );
 
-    let mut batches = chunk(rows, cfg.batch_minutes.max(1));
+    let mut batches = chunk(rows, cfg.batch_minutes.max(1), cfg.batch_token_budget);
     if let Some(limit) = opts.limit {
         truncate_to(&mut batches, limit);
     }
@@ -93,6 +110,10 @@ pub fn run(mut cfg: ServerConfig, opts: Opts) -> Result<()> {
     );
 
     let mut pairs: Vec<(String, String)> = Vec::new();
+    // Each device's freshest label as this run proceeds, so consecutive
+    // batches chain: a batch may open with {"same": true} continuing the
+    // batch before it, exactly as the live classifier's prompt allows.
+    let mut fresh: HashMap<String, Prev> = HashMap::new();
     for batch in &batches {
         // A batch spans devices, exactly like the live classifier's; the log
         // line names all of them.
@@ -132,7 +153,31 @@ pub fn run(mut cfg: ServerConfig, opts: Opts) -> Result<()> {
             })
             .collect();
 
-        let (labels, usage, _raw) = match classify::classify(&cfg, key.as_deref(), &items, &[]) {
+        // The previous-label block, rebuilt the way the live classifier would
+        // have had it at this point in the timeline: this run's own labels
+        // when it has them, the database row just before the batch otherwise.
+        let prev_owned = batch_prev(batch, &fresh, |dev, ts| {
+            db.before(dev, ts).ok().flatten().map(|m| Prev {
+                category: m.category,
+                project: m.project,
+                detail: m.detail,
+            })
+        });
+        let prev: Vec<(&str, classify::Previous<'_>)> = prev_owned
+            .iter()
+            .map(|(d, p)| {
+                (
+                    d.as_str(),
+                    classify::Previous {
+                        category: &p.category,
+                        project: p.project.as_deref(),
+                        detail: p.detail.as_deref(),
+                    },
+                )
+            })
+            .collect();
+
+        let (labels, usage, _raw) = match classify::classify(&cfg, key.as_deref(), &items, &prev) {
             Ok(v) => v,
             Err(e) => {
                 // A rate limit shuts the whole endpoint, not this batch, so
@@ -160,6 +205,25 @@ pub fn run(mut cfg: ServerConfig, opts: Opts) -> Result<()> {
             }
             pairs.push((orig.category.clone(), label.category.clone()));
         }
+        // Feed each device's newest label forward so the next batch's
+        // previous-label block continues this one, not the stale database.
+        let mut newest: HashMap<&str, (i64, &classify::Label)> = HashMap::new();
+        for ((dev, ts), label) in &labels {
+            let e = newest.entry(dev.as_str()).or_insert((*ts, label));
+            if *ts >= e.0 {
+                *e = (*ts, label);
+            }
+        }
+        for (dev, (_, label)) in newest {
+            fresh.insert(
+                dev.to_string(),
+                Prev {
+                    category: label.category.clone(),
+                    project: label.project.clone(),
+                    detail: label.detail.clone(),
+                },
+            );
+        }
         eprintln!(
             "reclassify: {device} {}..{} {}/{} labelled via {}, {} in / {} out",
             span.0,
@@ -176,20 +240,65 @@ pub fn run(mut cfg: ServerConfig, opts: Opts) -> Result<()> {
     Ok(())
 }
 
+/// The per-device "previous label" block for one batch. The freshest label
+/// this run has already produced wins -- the run replays one continuous
+/// classifier, so a batch continues the batch before it -- falling back to
+/// `before`: the database row immediately before the device's first minute
+/// in this batch. A device with neither gets no entry, and the model then
+/// may not open that device with `{"same": true}`.
+fn batch_prev(
+    batch: &[Minute],
+    fresh: &HashMap<String, Prev>,
+    before: impl Fn(&str, i64) -> Option<Prev>,
+) -> Vec<(String, Prev)> {
+    let mut out: Vec<(String, Prev)> = Vec::new();
+    // Sorted by (ts, device), so the first row seen per device is its
+    // earliest minute -- the one "immediately before" is measured from.
+    for m in batch {
+        if out.iter().any(|(d, _)| d == &m.device) {
+            continue;
+        }
+        if let Some(p) = fresh
+            .get(&m.device)
+            .cloned()
+            .or_else(|| before(&m.device, m.ts))
+        {
+            out.push((m.device.clone(), p));
+        }
+    }
+    out
+}
+
 /// Sort minutes into one (ts, device) timeline across every device and cut it
-/// into runs of at most `batch` -- the same shape the live classifier sends,
-/// so the backtest measures the model under the conditions it would actually
-/// run in: simultaneous minutes from different machines sit in one batch,
-/// side by side.
-pub fn chunk(mut rows: Vec<Minute>, batch: usize) -> Vec<Vec<Minute>> {
+/// into runs -- the same shape the live classifier sends, so the backtest
+/// measures the model under the conditions it would actually run in:
+/// simultaneous minutes from different machines sit in one batch, side by
+/// side. A batch ends at `batch` minutes or at `budget` estimated input
+/// tokens, whichever comes first; unlike the live bucket this packs exactly,
+/// because the next minute is already in hand rather than yet to arrive.
+pub fn chunk(mut rows: Vec<Minute>, batch: usize, budget: u32) -> Vec<Vec<Minute>> {
     // `range` returns ts order already, but that is a property of a query
     // this function cannot see -- and the device tiebreak is this function's
     // own contract.
     rows.sort_by(|a, b| (a.ts, &a.device).cmp(&(b.ts, &b.device)));
-    let mut out = Vec::new();
-    let mut it = rows.into_iter().peekable();
-    while it.peek().is_some() {
-        out.push(it.by_ref().take(batch).collect());
+    let mut out: Vec<Vec<Minute>> = Vec::new();
+    let mut cur: Vec<Minute> = Vec::new();
+    let mut tokens = classify::TOKENS_FIXED;
+    for m in rows {
+        let cost = if m.image_path.is_some() {
+            classify::TOKENS_PER_IMAGE_MINUTE
+        } else {
+            classify::TOKENS_PER_TEXT_MINUTE
+        };
+        if !cur.is_empty() && (cur.len() >= batch || tokens + cost > budget) {
+            out.push(std::mem::take(&mut cur));
+            tokens = classify::TOKENS_FIXED;
+        }
+        tokens += cost;
+        cur.push(m);
+    }
+    if !cur.is_empty() {
+        out.push(cur);
     }
     out
 }
@@ -262,6 +371,9 @@ mod tests {
         }
     }
 
+    /// A budget no batch reaches, for the tests about the size cut.
+    const ROOMY: u32 = u32::MAX;
+
     /// The backtest batches exactly like the live classifier: one timeline
     /// across every device, sorted by (ts, device), so a batch may -- and
     /// should -- mix machines, with simultaneous minutes adjacent.
@@ -274,7 +386,7 @@ mod tests {
             m("pc", 60, "other"),
             m("pc", 120, "other"),
         ];
-        let batches = chunk(rows, 3);
+        let batches = chunk(rows, 3, ROOMY);
         assert_eq!(batches.len(), 2);
         let key = |x: &Minute| (x.ts, x.device.clone());
         assert_eq!(
@@ -291,13 +403,87 @@ mod tests {
         );
     }
 
+    /// The token guard behind batch_minutes = 60: sixty text minutes are one
+    /// call, sixty screenshot minutes split at the budget, and every batch's
+    /// estimate fits its slot.
+    #[test]
+    fn chunk_splits_on_the_token_budget_only_when_images_demand_it() {
+        let budget = crate::config::ServerConfig::default().batch_token_budget;
+        let text: Vec<Minute> = (1..=60).map(|i| m("pc", i * 60, "other")).collect();
+        assert_eq!(chunk(text, 60, budget).len(), 1);
+
+        let imaged: Vec<Minute> = (1..=60)
+            .map(|i| Minute {
+                image_path: Some(format!("frames/pc/{}.jpg", i * 60)),
+                ..m("pc", i * 60, "other")
+            })
+            .collect();
+        let batches = chunk(imaged, 60, budget);
+        assert!(batches.len() > 1, "sixty screenshots cannot be one slot");
+        assert_eq!(batches.iter().map(Vec::len).sum::<usize>(), 60);
+        for b in &batches {
+            assert!(
+                classify::estimated_input_tokens(b.iter().map(|x| x.image_path.is_some()))
+                    <= budget,
+                "batch of {} overflows the slot",
+                b.len()
+            );
+        }
+    }
+
     #[test]
     fn limit_trims_the_boundary_batch_and_drops_the_rest() {
         let rows: Vec<Minute> = (1..=10).map(|i| m("pc", i * 60, "other")).collect();
-        let mut batches = chunk(rows, 4); // 4 + 4 + 2
+        let mut batches = chunk(rows, 4, ROOMY); // 4 + 4 + 2
         truncate_to(&mut batches, 5);
         let sizes: Vec<usize> = batches.iter().map(|b| b.len()).collect();
         assert_eq!(sizes, [4, 1]);
+    }
+
+    /// Consecutive batches chain: the previous-label block prefers the label
+    /// this run just produced over the (stale) database row, and falls back
+    /// to the database only for a device the run has not labelled yet. A
+    /// device with neither gets no entry at all.
+    #[test]
+    fn batch_prev_prefers_this_runs_fresh_labels_over_the_database() {
+        let batch = vec![m("pc", 600, "other"), m("phone", 660, "other")];
+        let mut fresh = HashMap::new();
+        fresh.insert(
+            "pc".to_string(),
+            Prev {
+                category: "work_husk".into(),
+                project: Some("time".into()),
+                detail: None,
+            },
+        );
+        let db_prev = Prev {
+            category: "browsing".into(),
+            project: None,
+            detail: Some("old row".into()),
+        };
+        let prev = batch_prev(&batch, &fresh, |dev, ts| {
+            // The fallback is asked for the row just before the device's
+            // first minute in this batch.
+            assert_eq!((dev, ts), ("phone", 660));
+            Some(db_prev.clone())
+        });
+        assert_eq!(
+            prev,
+            vec![
+                (
+                    "pc".to_string(),
+                    Prev {
+                        category: "work_husk".into(),
+                        project: Some("time".into()),
+                        detail: None,
+                    }
+                ),
+                ("phone".to_string(), db_prev),
+            ]
+        );
+
+        let prev = batch_prev(&batch, &HashMap::new(), |_, _| None);
+        assert!(prev.is_empty(), "no history means no previous-label entry");
     }
 
     #[test]

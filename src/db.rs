@@ -478,6 +478,23 @@ impl Db {
             .optional()?)
     }
 
+    /// The row immediately before `ts` on one device -- what "previous label"
+    /// means when replaying history: the label a live classifier would have
+    /// had in hand at that point in the timeline.
+    pub fn before(&self, device: &str, ts: i64) -> Result<Option<Minute>> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT {COLS} FROM minute WHERE device = ?1 AND ts < ?2 \
+                     ORDER BY ts DESC LIMIT 1"
+                ),
+                rusqlite::params![device, ts],
+                row_to_minute,
+            )
+            .optional()?)
+    }
+
     pub fn last(&self, device: &str) -> Result<Option<Minute>> {
         Ok(self
             .conn

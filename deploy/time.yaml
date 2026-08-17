@@ -89,10 +89,24 @@ data:
     idle_distance = 3
     idle_after_secs = 300
     # Batching predates the local endpoint (it was about a shared weekly
-    # allowance) but is still right: twenty minutes share one system prompt
-    # and the model sees a trajectory instead of isolated frames.
-    batch_minutes = 20
+    # allowance) but is still right: the minutes share one system prompt and
+    # the model sees a trajectory instead of isolated frames. With the
+    # "same"-compressed output the reply no longer scales with batch size,
+    # so a bigger batch is pure amortization win -- 60 is a cap, not a
+    # target: batch_token_budget below closes image-dense batches long
+    # before sixty screenshots.
+    batch_minutes = 60
     batch_wait_secs = 600
+    # Estimated input tokens at which a batch closes early. Tied to the
+    # llama-server slot size: -c 40960 --parallel 2 is two 20480-token
+    # slots, and 13000 of input (~27 screenshot minutes at ~450 tokens
+    # each) leaves the slot over 7000 tokens for thinking and the reply.
+    # Flip to 27000 once the server runs -c 65536 (two 32k slots).
+    batch_token_budget = 27000
+    # Live classification keeps thinking: it is what buys the presence
+    # judgment ("is a still screen reading, or an empty room?"). Flip on if
+    # the GPU bill matters more.
+    # thinking = false
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -116,7 +130,7 @@ spec:
         # or image change only reaches the pod when something in this template
         # changes — this counter is that something. There is no config-reloader
         # on the cluster, and a ConfigMap edit alone restarts nothing.
-        time.erikfrankling.se/config-rev: "local-llm-2"
+        time.erikfrankling.se/config-rev: "local-llm-3"
     spec:
       automountServiceAccountToken: false
       containers:

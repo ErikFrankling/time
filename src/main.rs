@@ -29,11 +29,13 @@ const USAGE: &str = "time — minute-by-minute activity tracking
                 (--wait-for-browser waits out one extension heartbeat first)
   time collect  read commits, diffs and pull requests, post them to the server
   time agents   read what the coding agents did, post it to the server
-  time reclassify <days> [--pending] [--device NAME] [--model NAME] [--endpoint URL]
-                [--run-id ID] [--limit N] [--apply]
+  time reclassify <days> [--pending] [--no-think] [--device NAME] [--model NAME]
+                [--endpoint URL] [--run-id ID] [--limit N] [--apply]
                 re-judge stored minutes from the kept screenshots; results go
                 to the minute_trial table for comparison unless --apply, which
-                rewrites the live labels. Runs where the server data is.
+                rewrites the live labels. --no-think skips the model's
+                reasoning block: cheaper and faster, at the cost of the
+                presence judgment thinking buys. Runs where the server data is.
   time config   print config and database paths
 
 The agent holds no API key and makes no model calls. Everything that costs
@@ -179,6 +181,7 @@ fn main() -> Result<()> {
                 match flag {
                     "--apply" => opts.apply = true,
                     "--pending" => opts.pending_only = true,
+                    "--no-think" => opts.no_think = true,
                     "--device" | "--model" | "--endpoint" | "--run-id" | "--limit" => {
                         i += 1;
                         let v = args
@@ -203,8 +206,8 @@ fn main() -> Result<()> {
                 i += 1;
             }
             opts.days = days.context(
-                "usage: time reclassify <days> [--device NAME] [--model NAME] \
-                 [--endpoint URL] [--run-id ID] [--limit N] [--apply]",
+                "usage: time reclassify <days> [--pending] [--no-think] [--device NAME] \
+                 [--model NAME] [--endpoint URL] [--run-id ID] [--limit N] [--apply]",
             )?;
             reclassify::run(cfg.server, opts)
         }
