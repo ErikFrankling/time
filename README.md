@@ -329,6 +329,21 @@ side reads only its own, so the same file works everywhere.
   machines instead of judging each screen in isolation. A label appears up to
   `batch_wait_secs` after the minute it describes; the row itself is written
   immediately.
+- **`server.classify_at`** — local times of day at which the classifier wakes,
+  labels everything it owes, and goes quiet again: `["07:00", "13:00", "19:00"]`.
+  Empty (the default) is the original behaviour, a call every `batch_wait_secs`
+  around the clock. That is right when the endpoint is hosted and a call is
+  someone else's watt-hours; it is wrong when the endpoint is a GPU in a room
+  you sleep in, because a call every ten minutes never lets the card reach an
+  idle clock state and never lets llama-swap's `ttl` expire, so the model stays
+  resident and the fans stay up all day for labels nobody reads until evening.
+  Between windows nothing changes about ingest — rows are written and
+  screenshots stored exactly as before, and the minutes simply stay `pending`
+  until the next drain sweeps them up from `frames/`. The costs, stated plainly:
+  a minute is unlabelled for up to the gap between windows and the chart shows
+  the previous label carried forward until then, and a drain is cut off after 90
+  minutes on the assumption that anything longer is a failing model rather than
+  a busy day.
 - **`server.batch_token_budget`** — estimated input tokens at which a batch
   closes early, whatever `batch_minutes` says. This is what keeps an
   image-dense batch inside one llama-server slot (~450 tokens per screenshot
@@ -524,6 +539,36 @@ judgment, made explicit instead of inferred from label flicker.
 
 Every call logs what it actually cost (`N minute(s), X in / Y out`), so the
 real numbers are in `kubectl logs`, not in this table.
+
+### The grammar is what stops a decode
+
+With `json_schema = true` the reply cannot be anything the schema forbids, and
+the corollary matters more than the guarantee: **anything the schema leaves
+unbounded is a decode that never has to stop.** Every repeat in
+`response_format` is therefore pinned — `minItems`/`maxItems` on the array to
+the batch length, `maxItems` on `tags`, `maxLength` on each tag and on
+`detail`. Both bounds have been paid for in GPU:
+
+- 2026-08-17: one reply spent all 12,231 output tokens inside a single label's
+  `tags`, mutating one word into ever-longer variants until the cap.
+- 2026-08-17 to 08-19: the array itself had no `maxItems`, so every label
+  object the model emitted was still valid JSON-so-far and nothing could end
+  the decode but `max_tokens`. Replies reached 53 kB of content,
+  `finish_reason=length`, a truncated array, `no JSON in model output`, and the
+  whole batch lost — then each of its minutes retried twice more. Roughly 70%
+  of all calls failed this way for three days, at ~12k output tokens each,
+  which on this GPU is 8–13 minutes of decode per failure for nothing. 763
+  minutes hit `MAX_ATTEMPTS` and will not self-heal.
+
+`scripts/llm-health.sh` exists to catch exactly this, because the pod log says
+a batch failed and does not say the answers have turned to mush. Its tag
+average is the earliest signal — healthy is 1–4 per minute; the run that
+prompted the bound read 97.4.
+
+The output cap has to stay clear of what the grammar now legitimately permits,
+or the array truncates at the last row and loses the batch the same way the
+unbounded version did. `max_tokens_clears_the_largest_reply_the_grammar_allows`
+is that check.
 
 The remaining levers, in order of size:
 

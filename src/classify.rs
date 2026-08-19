@@ -1040,7 +1040,7 @@ mod tests {
     /// of one shape, and this is what keeps them from drifting apart.
     #[test]
     fn schema_shaped_reply_parses() {
-        let schema = response_format();
+        let schema = response_format(20);
         assert_eq!(schema["type"], "json_schema");
         for field in [
             "device", "ts", "same", "category", "tags", "project", "detail",
@@ -1067,6 +1067,45 @@ mod tests {
         assert_eq!(out[0].1.category, "idle");
         assert_eq!(out[0].0, ("pc".to_string(), 100));
         assert_eq!(out[1].1.category, "idle");
+    }
+
+    /// Every unbounded thing in this grammar is a decode that need never stop,
+    /// and each one has cost a real batch: `tags` on 2026-08-17, and the array
+    /// itself for the three days after. Nothing here may be open-ended.
+    #[test]
+    fn the_grammar_bounds_every_repeat() {
+        let schema = &response_format(20)["json_schema"]["schema"];
+        assert_eq!(schema["minItems"], 20, "the array must close at the batch");
+        assert_eq!(schema["maxItems"], 20);
+
+        let props = &schema["items"]["properties"];
+        assert_eq!(props["tags"]["maxItems"], 5);
+        assert_eq!(props["tags"]["items"]["maxLength"], 32);
+        assert_eq!(props["detail"]["maxLength"], 160);
+
+        // The array length tracks the batch rather than being a fixed cap: a
+        // grammar that let the model stop at twenty rows of a sixty-minute
+        // batch would leave forty minutes pending and pay for them again.
+        assert_eq!(response_format(60)["json_schema"]["schema"]["maxItems"], 60);
+    }
+
+    /// The output cap has to clear what the grammar can now legitimately
+    /// produce. Bounding the array only helps if the model can reach the
+    /// closing bracket -- too small a cap truncates at the last row and loses
+    /// the batch exactly as the unbounded array did.
+    #[test]
+    fn max_tokens_clears_the_largest_reply_the_grammar_allows() {
+        let cfg = cfg();
+        for n in [1usize, 20, 60] {
+            // ~140 tokens is a full object at every bound maxed out: five
+            // 32-char tags and a 160-char detail, plus the keys and quoting.
+            let worst = 140 * n as u32 + 3072; // + the server's reasoning budget
+            let cap = max_tokens(&cfg, "time-vision", n);
+            assert!(
+                cap > worst,
+                "{n} minutes: cap {cap} must clear the {worst} the grammar permits"
+            );
+        }
     }
 
     /// `thinking = false` must reach the chat template; anything else must
@@ -1153,7 +1192,7 @@ fn request_body(cfg: &ServerConfig, model: &str, n: usize) -> serde_json::Value 
         body["chat_template_kwargs"] = serde_json::json!({ "enable_thinking": false });
     }
     if cfg.json_schema {
-        body["response_format"] = response_format();
+        body["response_format"] = response_format(n);
     }
     body
 }
@@ -1209,7 +1248,7 @@ fn per_minute_budget(cfg: &ServerConfig, model: &str) -> u32 {
 /// cannot then be anything but the array -- no fences, no prose, no think
 /// block. The prompt keeps describing the same shape in words, so switching
 /// this off (or a gateway ignoring it) changes nothing.
-fn response_format() -> serde_json::Value {
+fn response_format(n: usize) -> serde_json::Value {
     serde_json::json!({
         "type": "json_schema",
         "json_schema": {
@@ -1217,6 +1256,26 @@ fn response_format() -> serde_json::Value {
             "strict": true,
             "schema": {
                 "type": "array",
+                // Pinned to the batch length, and this is the single most
+                // important bound here. An array with no maxItems is a grammar
+                // that never has to close: every label object the model emits
+                // is still valid JSON-so-far, so the only thing that can end
+                // the decode is the output cap. That is what was happening --
+                // replies of 44-53 kB of content, `finish_reason=length`, a
+                // truncated array, "no JSON in model output", the whole batch
+                // lost, and every one of those minutes retried twice more. It
+                // ran ~70% of all calls for three days at ~12k output tokens
+                // each, which on this GPU is 8-13 minutes of decode per failure
+                // for nothing.
+                //
+                // minItems too, not just maxItems: the prompt already demands
+                // exactly one object per (device, ts) item, so pinning both
+                // ends makes the grammar enforce the contract the parser
+                // checks. Forcing a reluctant model to emit the last row beats
+                // dropping it -- a dropped row stays pending and is paid for
+                // again next window.
+                "minItems": n,
+                "maxItems": n,
                 "items": {
                     "type": "object",
                     "properties": {
@@ -1224,9 +1283,31 @@ fn response_format() -> serde_json::Value {
                         "ts": { "type": "integer" },
                         "same": { "type": "boolean" },
                         "category": { "type": "string" },
-                        "tags": { "type": "array", "items": { "type": "string" } },
+                        // Bounded because the grammar is the only thing that
+                        // can stop a decode. An unbounded string array gives
+                        // the model no reason to ever close it, and on
+                        // 2026-08-17 one reply spent all 12231 output tokens
+                        // inside a single label's `tags`, mutating one word
+                        // into ever-longer variants ("nixos-rebuild-flake-
+                        // check-running-now-since-...", 300 chars in one tag)
+                        // until the cap. That costs ~8 minutes of GPU and
+                        // loses every minute in the batch. maxItems alone is
+                        // not enough -- one runaway string fits in one item --
+                        // so the element length is capped too. Real labels use
+                        // 1-4 tags of well under 32 chars, so nothing legitimate
+                        // is being cut off here.
+                        // 5, not 8: measured against the real failing batch the
+                        // model pins at whatever ceiling it is given, and a year
+                        // of healthy labels averages 2 tags and never exceeded 6.
+                        "tags": {
+                            "type": "array",
+                            "maxItems": 5,
+                            "items": { "type": "string", "maxLength": 32 }
+                        },
                         "project": { "type": ["string", "null"] },
-                        "detail": { "type": "string" }
+                        // Same reasoning, and the prompt already asks for at
+                        // most 12 words.
+                        "detail": { "type": "string", "maxLength": 160 }
                     },
                     // Only the key is enforced: a `same` row legitimately
                     // omits every label field, so "either same=true or a

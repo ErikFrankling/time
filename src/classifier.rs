@@ -17,9 +17,11 @@
 //! `sweep` picks the rows back up from the database.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
+
+use chrono::TimeZone;
 
 use crate::classify;
 use crate::config::ServerConfig;
@@ -39,6 +41,11 @@ const CAPACITY: usize = 256;
 /// How far back a sweep looks for minutes that never got their label. A day is
 /// generous for a process that restarts in seconds, and it stops an old
 /// database from queueing thousands of rows the first time this ships.
+///
+/// It also bounds what `classify_at` can recover: windows have to be closer
+/// together than this, and a drain that keeps hitting `MAX_DRAIN` will
+/// eventually let its oldest minutes age out of reach. Those are then
+/// `time reclassify --pending` work, not the sweep's.
 const SWEEP_SECS: i64 = 24 * 3600;
 
 /// How often to look for minutes still owed a label.
@@ -55,6 +62,38 @@ const SWEEP_EVERY: Duration = Duration::from_secs(600);
 /// will never label, and the sweep is otherwise a loop that pays for the same
 /// refusal every ten minutes forever.
 const MAX_ATTEMPTS: u32 = 3;
+
+/// How often the drain thread looks at the clock while the classifier is stood
+/// down between windows. Coarse on purpose: nothing waits on it, and a window
+/// opening up to this late is invisible next to the hours between them.
+const CLOSED_TICK: Duration = Duration::from_secs(30);
+
+/// How often a running drain re-reads the pending set. Short because this is
+/// one indexed SELECT, not a model call, and the workers should be handed the
+/// next slice the moment they finish the last -- `SWEEP_EVERY` would leave the
+/// GPU idle for ten minutes between every 256 minutes of backlog.
+const DRAIN_TICK: Duration = Duration::from_secs(10);
+
+/// How long the first minute of a batch waits for company during a drain.
+///
+/// `batch_wait_secs` is ten minutes because a live batch has to wait for
+/// devices reporting one minute at a time. A drain already holds the whole
+/// backlog, so its batches fill on size or token budget and this only ever
+/// applies to the last, partial one -- where the full linger would hold the
+/// window, and the loaded model, open for ten idle minutes at the end of
+/// every drain.
+const DRAIN_LINGER: Duration = Duration::from_secs(15);
+
+/// The longest one drain may run before it is cut off.
+///
+/// A day is ~2000 minutes across devices, ~35 batches at `batch_minutes` = 60,
+/// and two workers against a two-slot llama-server get through that well
+/// inside an hour. A drain still going after this is not making progress --
+/// a model that has started babbling burns the entire output cap per batch and
+/// then fails to parse -- and the whole point of windowing is that the GPU is
+/// never the thing keeping the room warm. Cut it off, say so, and let the next
+/// window try again: the rows stay pending and lose nothing but time.
+const MAX_DRAIN: Duration = Duration::from_secs(90 * 60);
 
 /// One minute waiting for a label.
 ///
@@ -107,6 +146,14 @@ pub struct Queue {
     /// flagged pending, so without this count the sweep would offer every one
     /// of them a second time while the first attempt was still in the air.
     held: AtomicUsize,
+    /// Whether the model may be called at all right now. Always true without
+    /// `classify_at`; otherwise false between drain windows, and read by
+    /// ingest, by the workers, and by nothing else.
+    open: AtomicBool,
+    /// Minutes ingest declined to enqueue because the window was shut.
+    /// Reported when the next one opens rather than logged one at a time: a
+    /// night of deferrals is several hundred lines that all say the same thing.
+    deferred: AtomicU64,
 }
 
 impl Queue {
@@ -121,7 +168,13 @@ impl Queue {
             filled: Condvar::new(),
             paused_until: AtomicI64::new(0),
             held: AtomicUsize::new(0),
+            open: AtomicBool::new(true),
+            deferred: AtomicU64::new(0),
         }
+    }
+
+    fn is_open(&self) -> bool {
+        self.open.load(Ordering::Relaxed)
     }
 
     /// Enqueue a minute, evicting the oldest if the queue is full.
@@ -132,6 +185,16 @@ impl Queue {
     /// minute is not lost -- its row is already in the database, unlabelled,
     /// where the next sweep will find it.
     pub fn push(&self, job: Job) -> usize {
+        // Between drain windows the model is not called at all, so holding the
+        // job -- and its JPEG -- would buy nothing and cost a day of frames in
+        // memory. Dropping it here is not a loss: the row is already written
+        // and flagged pending, its screenshot is under `frames/`, and the next
+        // drain sweeps it back up from disk. That is the same recovery path a
+        // restart and a full-queue eviction already use.
+        if !self.is_open() {
+            self.deferred.fetch_add(1, Ordering::Relaxed);
+            return 0;
+        }
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         while inner.jobs.len() >= CAPACITY {
             inner.jobs.pop_front();
@@ -230,12 +293,88 @@ impl Queue {
     }
 }
 
+/// When the classifier is allowed to call the model.
+enum Schedule {
+    /// No `classify_at`: continuous, the way this has always worked. Right for
+    /// a hosted endpoint, where a call costs someone else's watt-hours.
+    Always,
+    /// Local times of day at which a drain starts. Between them no model call
+    /// is made at all, and minutes queue up in the database instead.
+    At(Vec<(u32, u32)>),
+}
+
+impl Schedule {
+    fn new(cfg: &ServerConfig) -> Self {
+        match cfg.classify_windows() {
+            Ok(w) if !w.is_empty() => Self::At(w),
+            Ok(_) => Self::Always,
+            // Already validated at startup, so this is close to unreachable.
+            // Continuous is the safe reading of "I cannot tell when you wanted
+            // this to run": labels keep appearing, and the cost is the noise
+            // the setting was meant to remove -- which is at least loud.
+            Err(e) => {
+                eprintln!("classifier: {e:#} -- classifying continuously");
+                Self::Always
+            }
+        }
+    }
+
+    /// The most recent occurrence of any configured time at or before `now`,
+    /// as a unix timestamp: the identity of the drain that should have run.
+    /// The drain loop opens a window whenever this changes.
+    ///
+    /// None for `Always`, which has no windows to identify.
+    fn slot_at(&self, now: chrono::DateTime<chrono::Local>) -> Option<i64> {
+        let Self::At(times) = self else { return None };
+        let today = now.date_naive();
+        let yesterday = today.pred_opt()?;
+        times
+            .iter()
+            .filter_map(|&(h, m)| {
+                let at = |d: chrono::NaiveDate| {
+                    let naive = d.and_hms_opt(h, m, 0)?;
+                    // Twice a year a wall-clock time is ambiguous or does not
+                    // exist at all. Either end of the fold will do -- picking
+                    // one keeps the window, where `single()` would silently
+                    // drop it for a day -- and the worst case is one drain an
+                    // hour early or late.
+                    let local = chrono::Local.from_local_datetime(&naive);
+                    local.earliest().or_else(|| local.latest())
+                };
+                let t = at(today)?;
+                if t <= now {
+                    Some(t.timestamp())
+                } else {
+                    at(yesterday).map(|t| t.timestamp())
+                }
+            })
+            .max()
+    }
+}
+
 /// Start the pool and hand back the queue ingest should push to.
 ///
 /// `key` is None for endpoints without auth -- the local llama-swap setup --
 /// and every call then goes out without an Authorization header.
 pub fn start(cfg: Arc<ServerConfig>, db: Arc<Mutex<Db>>, key: Option<String>) -> Arc<Queue> {
     let queue = Arc::new(Queue::new());
+    let schedule = Schedule::new(&cfg);
+
+    // Windowed mode starts shut and waits for its first window. Continuous
+    // mode is open from boot and never closes, which is what makes every gate
+    // on this flag a no-op there.
+    let linger = match &schedule {
+        Schedule::Always => Duration::from_secs(cfg.batch_wait_secs.max(1)),
+        Schedule::At(times) => {
+            queue.open.store(false, Ordering::Relaxed);
+            let at: Vec<String> = times
+                .iter()
+                .map(|(h, m)| format!("{h:02}:{m:02}"))
+                .collect();
+            eprintln!("classifier: draining at {} local", at.join(", "));
+            DRAIN_LINGER
+        }
+    };
 
     for _ in 0..WORKERS {
         let (cfg, db, key, queue) = (cfg.clone(), db.clone(), key.clone(), queue.clone());
@@ -245,27 +384,30 @@ pub fn start(cfg: Arc<ServerConfig>, db: Arc<Mutex<Db>>, key: Option<String>) ->
             // would otherwise wake straight into a call it had already been
             // told not to make.
             queue.wait_out_pause();
+            // A window can shut while batches are already queued behind it --
+            // the drain cap trips, or the collector's last bucket lingers out
+            // after the drain was declared finished. Dropping the batch is
+            // what makes the cap a real stop rather than an intention: `run`
+            // would otherwise spend a full model call per batch still in the
+            // pipe. The rows are pending and lose nothing but time.
+            if !queue.is_open() {
+                queue.release(batch.len());
+                continue;
+            }
             run(&cfg, &db, key.as_deref(), &queue, batch);
         });
     }
 
     {
-        let (cfg, queue) = (cfg.clone(), queue.clone());
-        std::thread::spawn(move || collect(&cfg, &queue));
+        let queue = queue.clone();
+        std::thread::spawn(move || collect(&cfg, &queue, linger));
     }
 
     // On its own thread so a slow or large database cannot delay the listener.
     // Being reachable is the whole point of this change.
     {
         let (db, queue) = (db.clone(), queue.clone());
-        std::thread::spawn(move || loop {
-            match sweep(&db, &queue) {
-                Ok(0) => {}
-                Ok(n) => eprintln!("classifier: requeued {n} unlabelled minute(s)"),
-                Err(e) => eprintln!("classifier: sweep: {e:#}"),
-            }
-            std::thread::sleep(SWEEP_EVERY);
-        });
+        std::thread::spawn(move || drain(&db, &queue, &schedule));
     }
 
     queue
@@ -283,7 +425,11 @@ impl Drop for Release<'_> {
 ///
 /// Devices report a minute at a time, so waiting is the only way a batch ever
 /// forms: without a linger the queue holds exactly one job and nothing is
-/// saved. The cost is that a label appears up to `batch_wait_secs` after the
+/// saved. `linger` is `batch_wait_secs` when minutes trickle in live, and the
+/// much shorter `DRAIN_LINGER` in windowed mode, where the backlog is already
+/// in hand and waiting for company buys nothing.
+///
+/// The cost is that a label appears up to `linger` after the
 /// minute it describes -- acceptable because ingest already writes the row
 /// with the previous label carried forward, so the chart is approximately
 /// right in the meantime and exactly right once the batch lands.
@@ -293,10 +439,9 @@ impl Drop for Release<'_> {
 /// lets it tell "typing here while a video plays there" from two independent
 /// activities. Per-device continuity survives interleaving because every item
 /// names its device and each device's previous label rides along.
-fn collect(cfg: &ServerConfig, queue: &Queue) {
+fn collect(cfg: &ServerConfig, queue: &Queue, linger: Duration) {
     let size = cfg.batch_minutes.max(1);
     let budget = cfg.batch_token_budget;
-    let linger = Duration::from_secs(cfg.batch_wait_secs.max(1));
     let mut open = Bucket::default();
 
     loop {
@@ -379,11 +524,15 @@ impl Bucket {
 /// a re-queued minute is re-read from disk and classified with the same pixels
 /// the first attempt had; rows without a file -- phones, and history from
 /// before frames were kept -- fall back to window and presence alone.
-fn sweep(db: &Mutex<Db>, queue: &Queue) -> Result<usize, anyhow::Error> {
+/// `Ok(None)` means it did not look, because work is still in flight;
+/// `Ok(Some(0))` means it looked and there is nothing owed. A drain uses that
+/// difference to know it has finished, so the two cannot collapse into one
+/// zero the way they did when this only ever ran on a timer.
+fn sweep(db: &Mutex<Db>, queue: &Queue) -> Result<Option<usize>, anyhow::Error> {
     // A pending row is pending until it is labelled, in-flight ones included,
     // so sweeping over live work would queue every minute twice.
     if !queue.idle() {
-        return Ok(0);
+        return Ok(None);
     }
 
     let since = chrono::Utc::now().timestamp() - SWEEP_SECS;
@@ -414,7 +563,87 @@ fn sweep(db: &Mutex<Db>, queue: &Queue) -> Result<usize, anyhow::Error> {
             prev: None,
         });
     }
-    Ok(n)
+    Ok(Some(n))
+}
+
+/// Decide when the model may be called, and keep the pending set moving while
+/// it may.
+///
+/// Both jobs live in one loop because they are the same question asked at two
+/// rates: is anything owed a label, and am I allowed to pay for it right now.
+fn drain(db: &Mutex<Db>, queue: &Queue, schedule: &Schedule) {
+    // Continuous mode is the old sweep thread verbatim: the window opened at
+    // boot and never shuts, so this is only ever the timer.
+    let Schedule::At(_) = schedule else {
+        loop {
+            match sweep(db, queue) {
+                Ok(None) | Ok(Some(0)) => {}
+                Ok(Some(n)) => eprintln!("classifier: requeued {n} unlabelled minute(s)"),
+                Err(e) => eprintln!("classifier: sweep: {e:#}"),
+            }
+            std::thread::sleep(SWEEP_EVERY);
+        }
+    };
+
+    // Seeded with the window that has already passed, so booting does not fire
+    // one. A crash-looping pod would otherwise drain on every restart, which
+    // is the exact opposite of what this setting is for; the minutes it skips
+    // are pending, and the next window takes them along with everything else.
+    let mut last_slot = schedule.slot_at(chrono::Local::now()).unwrap_or(0);
+    let mut started: Option<Instant> = None;
+
+    loop {
+        let Some(since) = started else {
+            let slot = schedule.slot_at(chrono::Local::now()).unwrap_or(0);
+            if slot != last_slot {
+                last_slot = slot;
+                started = Some(Instant::now());
+                let waiting = queue.deferred.swap(0, Ordering::Relaxed);
+                eprintln!(
+                    "classifier: drain window open, {waiting} minute(s) deferred since the last"
+                );
+                // Last, so no worker can take a batch before the log line that
+                // explains why the GPU is about to spin up.
+                queue.open.store(true, Ordering::Relaxed);
+                // Straight to the first sweep rather than through the closed
+                // tick: nothing has been queued yet, so that sleep would be
+                // half a minute of a window that exists to be short.
+                continue;
+            }
+            std::thread::sleep(CLOSED_TICK);
+            continue;
+        };
+
+        match sweep(db, queue) {
+            // Nothing in flight and nothing owed: the backlog is labelled.
+            Ok(Some(0)) => {
+                queue.open.store(false, Ordering::Relaxed);
+                started = None;
+                eprintln!(
+                    "classifier: drain done in {}s, going quiet until the next window",
+                    since.elapsed().as_secs()
+                );
+                continue;
+            }
+            Ok(Some(n)) => eprintln!("classifier: drain queued {n} minute(s)"),
+            // Still out at the model. Say nothing and look again shortly.
+            Ok(None) => {}
+            Err(e) => eprintln!("classifier: sweep: {e:#}"),
+        }
+
+        if since.elapsed() >= MAX_DRAIN {
+            queue.open.store(false, Ordering::Relaxed);
+            started = None;
+            eprintln!(
+                "classifier: drain hit its {}min cap with work still owed -- stopping \
+                 anyway, the next window retries. Check scripts/llm-health.sh: a drain \
+                 this long usually means the model is failing, not that the day was busy.",
+                MAX_DRAIN.as_secs() / 60
+            );
+            continue;
+        }
+        std::thread::sleep(DRAIN_TICK);
+    }
 }
 
 fn run(cfg: &ServerConfig, db: &Mutex<Db>, key: Option<&str>, queue: &Queue, batch: Vec<Job>) {
@@ -720,6 +949,74 @@ mod tests {
         assert!(
             classify::estimated_input_tokens((0..n).map(|_| true)) <= budget,
             "a closed batch fits its slot"
+        );
+    }
+
+    fn local(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> chrono::DateTime<chrono::Local> {
+        chrono::Local
+            .from_local_datetime(
+                &chrono::NaiveDate::from_ymd_opt(y, mo, d)
+                    .unwrap()
+                    .and_hms_opt(h, mi, 0)
+                    .unwrap(),
+            )
+            .earliest()
+            .unwrap()
+    }
+
+    /// The slot identifies which drain is owed, so it must be the most recent
+    /// window and it must be stable for the whole gap after it -- the drain
+    /// loop opens a window precisely when this value changes, so a slot that
+    /// moved on its own would re-fire the drain every tick.
+    #[test]
+    fn the_slot_is_the_most_recent_window_and_holds_until_the_next() {
+        let s = Schedule::At(vec![(7, 0), (13, 0), (19, 0)]);
+        let seven = s.slot_at(local(2026, 8, 19, 7, 0)).unwrap();
+
+        assert_eq!(
+            seven,
+            local(2026, 8, 19, 7, 0).timestamp(),
+            "fires on the dot"
+        );
+        assert_eq!(s.slot_at(local(2026, 8, 19, 12, 59)).unwrap(), seven);
+        assert_ne!(s.slot_at(local(2026, 8, 19, 13, 0)).unwrap(), seven);
+        assert_eq!(
+            s.slot_at(local(2026, 8, 19, 6, 59)).unwrap(),
+            local(2026, 8, 18, 19, 0).timestamp(),
+            "before the day's first window the owed drain is last night's"
+        );
+    }
+
+    #[test]
+    fn a_schedule_without_times_is_continuous() {
+        assert!(Schedule::slot_at(&Schedule::Always, local(2026, 8, 19, 7, 0)).is_none());
+    }
+
+    /// The memory argument for gating at ingest: a shut window must not hold
+    /// jobs -- and their JPEGs -- for the hours until the next drain.
+    #[test]
+    fn a_shut_window_defers_instead_of_queueing() {
+        let q = Queue::new();
+        q.open.store(false, Ordering::Relaxed);
+
+        assert_eq!(q.push(job("pc", 60)), 0);
+        assert_eq!(q.push(job("pc", 120)), 0);
+        assert_eq!(q.deferred.load(Ordering::Relaxed), 2);
+        assert!(
+            q.idle(),
+            "nothing queued, so a drain would call itself done"
+        );
+
+        q.open.store(true, Ordering::Relaxed);
+        assert_eq!(
+            q.push(job("pc", 180)),
+            1,
+            "and it takes them again once open"
+        );
+        assert_eq!(
+            q.deferred.swap(0, Ordering::Relaxed),
+            2,
+            "the count is what the next window reports"
         );
     }
 }

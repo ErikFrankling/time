@@ -97,6 +97,19 @@ data:
     # before sixty screenshots.
     batch_minutes = 60
     batch_wait_secs = 600
+    # Three drains a day instead of a call every ten minutes around the
+    # clock. The endpoint is a GPU in a room someone sleeps in, and a call
+    # every ten minutes never lets that card reach an idle clock state --
+    # it also keeps llama-swap's ttl from ever expiring, so the model stays
+    # resident and the fans stay up for labels nobody reads until evening.
+    #
+    # Nothing after 19:00 on purpose: the evening and the night are the
+    # hours the noise actually cost something. The last stretch of a day is
+    # labelled at 07:00 the next morning, which is well before anyone looks
+    # at it. Minutes still land in the database the moment they arrive --
+    # only the model calls wait -- so the only visible cost is that recent
+    # minutes show the previous label carried forward until the next drain.
+    classify_at = ["07:00", "13:00", "19:00"]
     # Estimated input tokens at which a batch closes early. Tied to the
     # llama-server slot size: -c 40960 --parallel 2 is two 20480-token
     # slots, and 13000 of input (~27 screenshot minutes at ~450 tokens
@@ -130,7 +143,7 @@ spec:
         # or image change only reaches the pod when something in this template
         # changes — this counter is that something. There is no config-reloader
         # on the cluster, and a ConfigMap edit alone restarts nothing.
-        time.erikfrankling.se/config-rev: "local-llm-3"
+        time.erikfrankling.se/config-rev: "classify-windows-1"
     spec:
       automountServiceAccountToken: false
       containers:

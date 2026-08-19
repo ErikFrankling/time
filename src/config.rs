@@ -127,6 +127,26 @@ pub struct ServerConfig {
     #[serde(default = "default_batch_wait_secs")]
     pub batch_wait_secs: u64,
 
+    /// Local times of day at which the classifier wakes, labels everything it
+    /// owes, and goes quiet again -- `["07:00", "13:00", "19:00"]`.
+    ///
+    /// Empty (the default) keeps the original behaviour: a batch closes every
+    /// `batch_wait_secs` around the clock. That is right for a hosted endpoint,
+    /// where a call is someone else's watt-hours and latency is all that is
+    /// being traded. It is wrong for a GPU in the room you sleep in: a call
+    /// every ten minutes never lets the card reach an idle clock state, and
+    /// llama-swap's `ttl` never expires either, so the model stays resident and
+    /// the fans stay up all day for work that nobody reads until the evening.
+    ///
+    /// Set this and the day's minutes queue up unlabelled instead -- their rows
+    /// are written at ingest exactly as before, and their screenshots are on
+    /// disk under `frames/` -- until the next window sweeps the lot in one
+    /// burst. The trade is honest and worth naming: a minute is unlabelled for
+    /// up to the gap between windows, and the dashboard shows the previous
+    /// label carried forward until then.
+    #[serde(default)]
+    pub classify_at: Vec<String>,
+
     /// Directories searched for git repositories. The search stops at the first
     /// `.git` on a path, so listing a parent of everything is the intent.
     #[serde(default = "default_code_roots")]
@@ -197,6 +217,7 @@ impl Default for ServerConfig {
             idle_distance: default_idle_distance(),
             batch_minutes: default_batch_minutes(),
             batch_wait_secs: default_batch_wait_secs(),
+            classify_at: Vec::new(),
             code_roots: default_code_roots(),
             code_authors: Vec::new(),
             github_user: None,
@@ -204,6 +225,35 @@ impl Default for ServerConfig {
             agent_tools: default_agent_tools(),
             agent_days: default_agent_days(),
         }
+    }
+}
+
+impl ServerConfig {
+    /// `classify_at` as local (hour, minute) pairs, sorted and deduplicated.
+    ///
+    /// A bad entry is an error, not a skipped one. A typo'd time quietly
+    /// dropped leaves a window that never fires, which from the outside is
+    /// indistinguishable from the classifier being broken -- and the whole
+    /// point of this setting is that long silences are now expected, so
+    /// nobody would go looking.
+    pub fn classify_windows(&self) -> Result<Vec<(u32, u32)>> {
+        let mut out = Vec::with_capacity(self.classify_at.len());
+        for raw in &self.classify_at {
+            let s = raw.trim();
+            let bad = || anyhow::anyhow!("classify_at: {s:?} is not a HH:MM local time");
+            let (h, m) = s.split_once(':').ok_or_else(bad)?;
+            let (h, m) = (
+                h.parse::<u32>().map_err(|_| bad())?,
+                m.parse::<u32>().map_err(|_| bad())?,
+            );
+            if h > 23 || m > 59 {
+                return Err(bad());
+            }
+            out.push((h, m));
+        }
+        out.sort_unstable();
+        out.dedup();
+        Ok(out)
     }
 }
 
@@ -433,6 +483,15 @@ idle_after_secs = 300
 batch_minutes = 20
 batch_wait_secs = 600
 
+# Local times of day at which the classifier drains everything it owes and then
+# goes silent. Empty means the old behaviour -- a call every batch_wait_secs,
+# around the clock -- which is right for a hosted endpoint and wrong for a GPU
+# in the room you sleep in. Minutes still land in the database the moment they
+# arrive; only the model calls are held back.
+#
+#   classify_at = ["07:00", "13:00", "19:00"]
+classify_at = []
+
 # `time collect` reads how much you actually produced -- commits, diffs, pull
 # requests -- and joins it to the timeline. Run it nightly; commit timestamps
 # are retrospective, so there is nothing to gain from running it more often.
@@ -483,6 +542,9 @@ impl Config {
         if !cfg.server.categories.iter().any(|c| c == "other") {
             cfg.server.categories.push("other".into());
         }
+        // Parsed and thrown away: this is the startup check, so a typo is a
+        // refusal to boot rather than a classifier that never runs.
+        cfg.server.classify_windows()?;
         Ok(cfg)
     }
 }
