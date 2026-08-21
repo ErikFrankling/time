@@ -5,6 +5,17 @@ pub struct Db {
     conn: Connection,
 }
 
+/// How far one device has reported.
+#[derive(Debug, Clone)]
+pub struct Watermark {
+    pub device: String,
+    /// Newest minute this device has sent. It has said something about every
+    /// minute up to here and nothing at all about anything after it.
+    pub through: i64,
+    /// When that newest row arrived, or None for rows predating the column.
+    pub arrived: Option<i64>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Minute {
     pub ts: i64,
@@ -185,6 +196,14 @@ impl Db {
             ("image_path", "TEXT"),
             ("note", "TEXT"),
             ("blocked", "INTEGER NOT NULL DEFAULT 0"),
+            // When the row reached the server, as opposed to the minute it
+            // describes. Without the two recorded separately they are
+            // indistinguishable in history, and the gap between them is the
+            // whole question when a device reports retrospectively: the
+            // phone's sync lag could only ever be bounded from `llm_call`,
+            // never measured, because the one table that would have shown it
+            // did not record arrival.
+            ("inserted", "INTEGER"),
         ] {
             let exists: bool = conn
                 .prepare("SELECT 1 FROM pragma_table_info('minute') WHERE name = ?1")?
@@ -316,9 +335,14 @@ impl Db {
             "INSERT OR REPLACE INTO minute
                (ts, device, category, project, detail, window, phash, model,
                 keys, mouse, idle_secs, apps, workspaces, classified, tags, domain,
-                pending, image_path, note, blocked)
+                pending, image_path, note, blocked, inserted)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,
-                     ?18,?19,?20)",
+                     ?18,?19,?20,
+                     -- COALESCE, because labelling re-inserts the row: without
+                     -- it every UPDATE would restamp arrival, and the column
+                     -- would mean last-touched rather than first-seen.
+                     COALESCE((SELECT inserted FROM minute
+                                WHERE device = ?2 AND ts = ?1), ?21))",
             rusqlite::params![
                 m.ts,
                 m.device,
@@ -340,6 +364,7 @@ impl Db {
                 m.image_path,
                 m.note,
                 m.blocked as i32,
+                chrono::Utc::now().timestamp(),
             ],
         )?;
         Ok(())
@@ -376,6 +401,10 @@ impl Db {
     /// Minutes still owed a label, newest first so a truncated sweep picks up
     /// the ones a person is most likely to be looking at.
     ///
+    /// `until` is the completeness frontier: minutes newer than it are held
+    /// back because some device has not reported that far, and a timeline with
+    /// a machine missing from it is one the model reads as absence.
+    ///
     /// Rows that have already been offered `max_attempts` times are skipped. A
     /// minute the model will not label is not rare -- a truncated array, a
     /// dropped entry, an unparseable answer -- and without this it stays
@@ -384,15 +413,16 @@ impl Db {
     pub fn pending_since(
         &self,
         since: i64,
+        until: i64,
         limit: usize,
         max_attempts: u32,
     ) -> Result<Vec<Minute>> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {COLS} FROM minute WHERE pending = 1 AND ts >= ?1 \
-             AND attempts < ?3 ORDER BY ts DESC LIMIT ?2"
+             AND ts <= ?4 AND attempts < ?3 ORDER BY ts DESC LIMIT ?2"
         ))?;
         let rows = stmt.query_map(
-            rusqlite::params![since, limit as i64, max_attempts],
+            rusqlite::params![since, limit as i64, max_attempts, until],
             row_to_minute,
         )?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -493,6 +523,32 @@ impl Db {
                 row_to_minute,
             )
             .optional()?)
+    }
+
+    /// How far each device has reported: its newest minute, and when that row
+    /// actually arrived.
+    ///
+    /// This is the whole basis for deciding whether a gap in the timeline is
+    /// real. A device that has reported past minute T has, by reporting, said
+    /// what it was doing at T -- including nothing, which is then a fact. A
+    /// device whose newest minute is older than T has said nothing about T at
+    /// all, and treating that silence as absence is how a phone that simply
+    /// had not synced turned into "the room was empty".
+    ///
+    /// `arrived` is NULL for rows written before the column existed, which
+    /// callers must read as "unknown" rather than "ancient".
+    pub fn watermarks(&self) -> Result<Vec<Watermark>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT device, MAX(ts), MAX(inserted) FROM minute GROUP BY device")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(Watermark {
+                device: r.get(0)?,
+                through: r.get(1)?,
+                arrived: r.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     pub fn last(&self, device: &str) -> Result<Option<Minute>> {

@@ -127,6 +127,32 @@ pub struct ServerConfig {
     #[serde(default = "default_batch_wait_secs")]
     pub batch_wait_secs: u64,
 
+    /// How long a device may be silent before the classifier stops waiting for
+    /// it and labels the minutes it is missing from.
+    ///
+    /// A device that reports retrospectively -- the phone reads Android's usage
+    /// event log in bulk, hours or days after the fact -- is not absent while
+    /// it is behind, it is late. Classifying a minute before it has arrived
+    /// shows the model a timeline with a machine missing from it, and the
+    /// prompt asks the model to read exactly that as absence: "a long stretch
+    /// of zero input everywhere ... is absence". So the minute gets labelled
+    /// idle, or the person gets read as away, on the strength of data that had
+    /// simply not turned up yet.
+    ///
+    /// Zero disables the wait entirely and restores the old behaviour.
+    #[serde(default = "default_device_wait_hours")]
+    pub device_wait_hours: u64,
+
+    /// How long a device may be silent before it stops counting as in service.
+    ///
+    /// Without this, one retired device holds up every minute forever: a real
+    /// database here carries `tagtest` and `phone-test`, last seen weeks ago,
+    /// and waiting for those two would mean never classifying anything again.
+    /// A device past this is not late, it is gone -- it is dropped from the
+    /// set the frontier waits on, and the model is told nothing about it.
+    #[serde(default = "default_device_active_hours")]
+    pub device_active_hours: u64,
+
     /// Local times of day at which the classifier wakes, labels everything it
     /// owes, and goes quiet again -- `["07:00", "13:00", "19:00"]`.
     ///
@@ -218,6 +244,8 @@ impl Default for ServerConfig {
             batch_minutes: default_batch_minutes(),
             batch_wait_secs: default_batch_wait_secs(),
             classify_at: Vec::new(),
+            device_wait_hours: default_device_wait_hours(),
+            device_active_hours: default_device_active_hours(),
             code_roots: default_code_roots(),
             code_authors: Vec::new(),
             github_user: None,
@@ -255,6 +283,21 @@ impl ServerConfig {
         out.dedup();
         Ok(out)
     }
+}
+
+/// A day. Long enough for the phone's usual overnight lag (measured at ~12h
+/// average, with a 6-day worst case) without holding the dashboard a whole
+/// day behind in the normal case, since a device that is keeping up advances
+/// the frontier immediately and this ceiling never applies.
+fn default_device_wait_hours() -> u64 {
+    24
+}
+
+/// Three days: longer than any plausible sync gap for a device still in use,
+/// short enough that a machine genuinely retired stops mattering within the
+/// week.
+fn default_device_active_hours() -> u64 {
+    72
 }
 
 fn default_code_roots() -> Vec<String> {

@@ -61,6 +61,58 @@ A stranded minute is classified from its window, apps and domain instead, which
 is how every minute the phone sends is classified anyway. Minutes that go out
 while the server is up still carry their screenshot.
 
+### Incomplete timelines
+
+Devices do not report at the same speed. The desktop agent posts the minute it
+just observed; the phone reads Android's usage event log in bulk, hours later,
+and has been measured up to six days behind. So at any moment the newest
+minutes exist for some machines and not others.
+
+That matters because the prompt asks the model to correlate devices, and tells
+it that *"a long stretch of zero input everywhere ... is absence"*. A minute
+classified before the phone has reported it shows the model a timeline with a
+machine missing from it — and the model dutifully reads the gap as an empty
+room. **A device that has not synced is late, not silent**, and the two were
+indistinguishable.
+
+So the classifier tracks a **completeness frontier**: the newest minute every
+in-service device has reported past. Nothing after it goes to the model.
+
+- A device that has reported past minute T has, by reporting, said what it was
+  doing at T — *including nothing at all*, which is then a fact about the
+  minute rather than a hole in it. This is why the frontier works even across a
+  phone being switched off: when it comes back and syncs, its watermark jumps
+  past the dead hours, and those minutes become complete with no rows in them.
+- **`server.device_active_hours`** (default 72) keeps a retired device from
+  freezing the timeline forever. This database carries `tagtest` and
+  `phone-test` from weeks ago; waiting on those would mean never labelling
+  another minute.
+- **`server.device_wait_hours`** (default 24) is the ceiling. Past it the
+  minutes go out anyway, but the prompt now opens with an `INCOMPLETE TIMELINE`
+  block naming every absent device and saying plainly that its silence is
+  UNKNOWN, not absence. Set it to `0` to restore the old behaviour.
+
+In the normal case this costs almost nothing — with all three devices keeping
+up, the frontier sits about half an hour back. It only bites when something is
+genuinely behind, which is exactly when the old behaviour was inventing
+answers.
+
+The log distinguishes the two failures that look identical from outside:
+
+```
+classifier: device_wait_hours ran out -- labelling without
+  phone (60h behind, last heard from 2h ago)
+```
+
+*Behind but recently heard from* is a device syncing retrospectively — normal
+for the phone. *Behind and not heard from* is one that is off, flat or broken.
+Only the second is worth chasing.
+
+`minute.inserted` records when a row arrived, as opposed to the minute it
+describes. Without it the two are indistinguishable in history and the sync lag
+can only be bounded from `llm_call`, never measured — which is the state this
+was diagnosed in.
+
 ## Why a model instead of rules
 
 Window titles get you maybe 60% of the way and then fall apart: Electron apps
@@ -329,6 +381,12 @@ side reads only its own, so the same file works everywhere.
   machines instead of judging each screen in isolation. A label appears up to
   `batch_wait_secs` after the minute it describes; the row itself is written
   immediately.
+- **`server.device_wait_hours`** / **`server.device_active_hours`** — how long
+  to wait for a device that has not reported yet, and how long before one
+  counts as retired rather than late. See [Incomplete
+  timelines](#incomplete-timelines): a minute is not offered to the model until
+  every in-service device has reported past it, because a machine missing from
+  the timeline reads to the model as a person who was not there.
 - **`server.classify_at`** — local times of day at which the classifier wakes,
   labels everything it owes, and goes quiet again: `["07:00", "13:00", "19:00"]`.
   Empty (the default) is the original behaviour, a call every `batch_wait_secs`

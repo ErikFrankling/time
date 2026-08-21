@@ -134,6 +134,12 @@ background -- categorise the typing, tag the video.
 - A long stretch of zero input everywhere while screens merely change -- \
 builds scrolling, videos looping, AI agents editing files -- is absence: \
 label those minutes \"idle\" however work-like the windows look.
+- That last rule holds only when every device has actually reported. Any \
+device named as MISSING above has not sent these minutes yet; it is late, not \
+silent, and it may have been in constant use. Never read absence off a \
+timeline you have been told is incomplete -- judge from the devices that did \
+report, and where the missing one is the only thing that could settle it, \
+carry the previous label forward rather than calling the minute \"idle\".
 - A device whose idle time is UNKNOWN cannot count input either (a phone \
 reports neither), so its zeros mean nothing; the foreground app is the whole \
 signal there.
@@ -194,6 +200,35 @@ each count as a change and need a full object. Where you stop saying \
             .collect::<Vec<_>>()
             .join("\n")
     )
+}
+
+/// The warning that goes above everything else when the batch is missing a
+/// machine, or None when the timeline is complete.
+///
+/// Split out so it can be asserted on without an endpoint: this text is the
+/// only thing standing between "the phone had not synced" and the model
+/// reporting an empty room, and it is worth a test of its own.
+fn missing_block(missing: &[(&str, i64)]) -> Option<String> {
+    if missing.is_empty() {
+        return None;
+    }
+    let mut text = String::from(
+        "INCOMPLETE TIMELINE. These devices are MISSING from the minutes \
+         below -- they have not reported this far yet, so nothing here says \
+         what they were doing:\n",
+    );
+    for (device, through) in missing {
+        let when = chrono::DateTime::from_timestamp(*through, 0)
+            .map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string())
+            .unwrap_or_else(|| "never".into());
+        text.push_str(&format!("- {device}: last reported {when}\n"));
+    }
+    text.push_str(
+        "Their silence below is UNKNOWN, not absence. Do not conclude the \
+         person was away, idle, or doing nothing from the fact that these \
+         devices show no activity.\n",
+    );
+    Some(text)
 }
 
 /// The per-item preambles, one per item in order, each sitting in front of
@@ -342,10 +377,18 @@ pub fn classify(
     key: Option<&str>,
     items: &[Item<'_>],
     prev: &[(&str, Previous<'_>)],
+    missing: &[(&str, i64)],
 ) -> Result<(Vec<((String, i64), Label)>, Usage, String)> {
     anyhow::ensure!(!items.is_empty(), "nothing to classify");
 
-    let mut content: Vec<serde_json::Value> = Vec::with_capacity(items.len() * 2 + 2);
+    let mut content: Vec<serde_json::Value> = Vec::with_capacity(items.len() * 2 + 3);
+    // Before everything, because it changes how the whole timeline below reads.
+    // A batch that is missing a machine is not a batch showing an idle machine,
+    // and without this line the model cannot tell the two apart -- it sees a
+    // person at one desk and concludes the rest of the world was quiet.
+    if let Some(text) = missing_block(missing) {
+        content.push(serde_json::json!({ "type": "text", "text": text }));
+    }
     if !prev.is_empty() {
         // Once, at the top, rather than woven into the items: each device gets
         // exactly one "where you left off" line, which is what carries an
@@ -1106,6 +1149,42 @@ mod tests {
                 "{n} minutes: cap {cap} must clear the {worst} the grammar permits"
             );
         }
+    }
+
+    /// A complete timeline must say nothing at all -- an unconditional
+    /// "devices missing: none" line would be tokens on every batch forever.
+    #[test]
+    fn a_complete_timeline_gets_no_warning() {
+        assert!(missing_block(&[]).is_none());
+    }
+
+    /// The single line standing between "the phone had not synced" and the
+    /// model reporting an empty room.
+    #[test]
+    fn a_missing_device_is_named_and_its_silence_disclaimed() {
+        let text = missing_block(&[("phone", 1_787_000_000)]).expect("a warning");
+        assert!(text.contains("MISSING"), "has to be unmissable: {text}");
+        assert!(text.contains("phone"), "names the device: {text}");
+        assert!(
+            text.contains("2026-08-17 20:53 UTC"),
+            "says how far it got: {text}"
+        );
+        assert!(
+            text.contains("UNKNOWN, not absence"),
+            "the whole point of the block: {text}"
+        );
+    }
+
+    /// The prompt's absence rule has to be qualified in the same breath, or
+    /// the model applies it to a timeline it has just been told is partial.
+    #[test]
+    fn the_prompt_qualifies_the_absence_rule() {
+        let p = system_prompt(&cfg());
+        assert!(p.contains("MISSING"));
+        assert!(
+            p.contains("late, not \nsilent") || p.contains("late, not silent"),
+            "the prompt must distinguish late from silent"
+        );
     }
 
     /// `thinking = false` must reach the chat template; anything else must

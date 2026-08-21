@@ -154,6 +154,13 @@ pub struct Queue {
     /// Reported when the next one opens rather than logged one at a time: a
     /// night of deferrals is several hundred lines that all say the same thing.
     deferred: AtomicU64,
+    /// Newest minute the whole device fleet has reported past. Minutes after it
+    /// are held: the timeline there is still missing machines, and a model shown
+    /// an incomplete timeline reads the gaps as absence.
+    complete_through: AtomicI64,
+    /// In-service devices behind the frontier, and how far behind. Kept here so
+    /// a worker can name them in the prompt without re-querying per batch.
+    stale: Mutex<Vec<(String, i64)>>,
 }
 
 impl Queue {
@@ -170,6 +177,11 @@ impl Queue {
             held: AtomicUsize::new(0),
             open: AtomicBool::new(true),
             deferred: AtomicU64::new(0),
+            // i64::MAX until the drain thread computes the real one, which it
+            // does before any minute can be swept. Starting at 0 would defer
+            // every minute for that first instant.
+            complete_through: AtomicI64::new(i64::MAX),
+            stale: Mutex::new(Vec::new()),
         }
     }
 
@@ -192,6 +204,14 @@ impl Queue {
         // drain sweeps it back up from disk. That is the same recovery path a
         // restart and a full-queue eviction already use.
         if !self.is_open() {
+            self.deferred.fetch_add(1, Ordering::Relaxed);
+            return 0;
+        }
+        // Too new to judge: some device has not reported this far yet, so the
+        // timeline around this minute still has a machine missing from it.
+        // Deferred exactly like a shut window -- the row is pending, and the
+        // sweep takes it once the frontier passes it.
+        if job.ts > self.complete_through.load(Ordering::Relaxed) {
             self.deferred.fetch_add(1, Ordering::Relaxed);
             return 0;
         }
@@ -290,6 +310,58 @@ impl Queue {
     fn pause_for(&self, d: Duration) {
         let until = chrono::Utc::now().timestamp() + d.as_secs() as i64;
         self.paused_until.fetch_max(until, Ordering::Relaxed);
+    }
+}
+
+/// How far the timeline is complete, and who is missing from it.
+///
+/// A device that has reported past minute T has, by reporting, said what it
+/// was doing at T -- including nothing at all, which is then a fact about the
+/// minute. A device whose newest minute is older than T has said nothing about
+/// T, and that silence is not evidence of anything. The classifier used to
+/// treat the two identically, which is how a phone that had simply not synced
+/// yet became a model reading an empty room.
+struct Frontier {
+    /// Newest minute every in-service device has reported past. Nothing after
+    /// this is offered to the model.
+    through: i64,
+    /// In-service devices still behind `through` -- only ever non-empty when
+    /// `device_wait_hours` ran out and the frontier moved without them. The
+    /// model is told their silence means nothing, because for these minutes it
+    /// genuinely does not.
+    stale: Vec<(String, i64)>,
+}
+
+/// Where the timeline stops being trustworthy.
+fn frontier(cfg: &ServerConfig, marks: &[crate::db::Watermark], now: i64) -> Frontier {
+    let no_wait = Frontier {
+        through: now,
+        stale: Vec::new(),
+    };
+    if cfg.device_wait_hours == 0 {
+        return no_wait;
+    }
+    let in_service = now - (cfg.device_active_hours.saturating_mul(3600)) as i64;
+    let active: Vec<&crate::db::Watermark> =
+        marks.iter().filter(|w| w.through >= in_service).collect();
+    // Nothing in service: a fresh database, or every device retired. Waiting
+    // for a set with no members would stall forever on nobody.
+    if active.is_empty() {
+        return no_wait;
+    }
+    let slowest = active.iter().map(|w| w.through).min().unwrap_or(now);
+    // The ceiling is what stops a dead phone from freezing the whole timeline.
+    // Past it the minutes go out regardless, labelled as incomplete rather
+    // than silently pretending the device said something.
+    let ceiling = now - (cfg.device_wait_hours.saturating_mul(3600)) as i64;
+    let through = slowest.max(ceiling);
+    Frontier {
+        through,
+        stale: active
+            .iter()
+            .filter(|w| w.through < through)
+            .map(|w| (w.device.clone(), w.through))
+            .collect(),
     }
 }
 
@@ -399,7 +471,7 @@ pub fn start(cfg: Arc<ServerConfig>, db: Arc<Mutex<Db>>, key: Option<String>) ->
     }
 
     {
-        let queue = queue.clone();
+        let (cfg, queue) = (cfg.clone(), queue.clone());
         std::thread::spawn(move || collect(&cfg, &queue, linger));
     }
 
@@ -407,7 +479,7 @@ pub fn start(cfg: Arc<ServerConfig>, db: Arc<Mutex<Db>>, key: Option<String>) ->
     // Being reachable is the whole point of this change.
     {
         let (db, queue) = (db.clone(), queue.clone());
-        std::thread::spawn(move || drain(&db, &queue, &schedule));
+        std::thread::spawn(move || drain(&cfg, &db, &queue, &schedule));
     }
 
     queue
@@ -538,7 +610,12 @@ fn sweep(db: &Mutex<Db>, queue: &Queue) -> Result<Option<usize>, anyhow::Error> 
     let since = chrono::Utc::now().timestamp() - SWEEP_SECS;
     let rows = {
         let db = db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
-        db.pending_since(since, CAPACITY, MAX_ATTEMPTS)?
+        db.pending_since(
+            since,
+            queue.complete_through.load(Ordering::Relaxed),
+            CAPACITY,
+            MAX_ATTEMPTS,
+        )?
     };
     let n = rows.len();
     for m in rows {
@@ -566,16 +643,66 @@ fn sweep(db: &Mutex<Db>, queue: &Queue) -> Result<Option<usize>, anyhow::Error> 
     Ok(Some(n))
 }
 
+/// Recompute where the timeline is complete and publish it for ingest and the
+/// sweep to read. Cheap enough for every tick: one grouped read, on a table
+/// the classifier is otherwise sitting idle on.
+fn refresh_frontier(cfg: &ServerConfig, db: &Mutex<Db>, queue: &Queue) {
+    let marks = db
+        .lock()
+        .map_err(|e| anyhow::anyhow!("db lock: {e}"))
+        .and_then(|db| db.watermarks());
+    let marks = match marks {
+        Ok(m) => m,
+        Err(e) => {
+            // Leave the previous frontier standing rather than guessing. A
+            // stale frontier holds minutes back, which is the safe direction.
+            eprintln!("classifier: watermarks: {e:#}");
+            return;
+        }
+    };
+    let f = frontier(cfg, &marks, chrono::Utc::now().timestamp());
+    let moved = queue.complete_through.swap(f.through, Ordering::Relaxed) != f.through;
+    // Only when it moves, or a device that stays behind prints this every tick.
+    if moved && !f.stale.is_empty() {
+        let now = chrono::Utc::now().timestamp();
+        let who: Vec<String> = f
+            .stale
+            .iter()
+            .map(|(d, t)| {
+                // Two different faults wearing the same face, and this is what
+                // tells them apart. A device that is hours behind but was heard
+                // from minutes ago is syncing and merely retrospective -- the
+                // phone, normally. One whose last row also arrived hours ago is
+                // off, flat, or broken. Only the second is worth chasing.
+                let heard = marks
+                    .iter()
+                    .find(|w| w.device == *d)
+                    .and_then(|w| w.arrived)
+                    .map(|a| format!("last heard from {}h ago", (now - a) / 3600))
+                    .unwrap_or_else(|| "never heard from since this column existed".into());
+                format!("{d} ({}h behind, {heard})", (f.through - t) / 3600)
+            })
+            .collect();
+        eprintln!(
+            "classifier: device_wait_hours ran out -- labelling without {}; \
+             their minutes will be marked unknown, not absent",
+            who.join(", ")
+        );
+    }
+    *queue.stale.lock().unwrap_or_else(|e| e.into_inner()) = f.stale;
+}
+
 /// Decide when the model may be called, and keep the pending set moving while
 /// it may.
 ///
 /// Both jobs live in one loop because they are the same question asked at two
 /// rates: is anything owed a label, and am I allowed to pay for it right now.
-fn drain(db: &Mutex<Db>, queue: &Queue, schedule: &Schedule) {
+fn drain(cfg: &ServerConfig, db: &Mutex<Db>, queue: &Queue, schedule: &Schedule) {
     // Continuous mode is the old sweep thread verbatim: the window opened at
     // boot and never shuts, so this is only ever the timer.
     let Schedule::At(_) = schedule else {
         loop {
+            refresh_frontier(cfg, db, queue);
             match sweep(db, queue) {
                 Ok(None) | Ok(Some(0)) => {}
                 Ok(Some(n)) => eprintln!("classifier: requeued {n} unlabelled minute(s)"),
@@ -593,6 +720,7 @@ fn drain(db: &Mutex<Db>, queue: &Queue, schedule: &Schedule) {
     let mut started: Option<Instant> = None;
 
     loop {
+        refresh_frontier(cfg, db, queue);
         let Some(since) = started else {
             let slot = schedule.slot_at(chrono::Local::now()).unwrap_or(0);
             if slot != last_slot {
@@ -708,7 +836,22 @@ fn run(cfg: &ServerConfig, db: &Mutex<Db>, key: Option<&str>, queue: &Queue, bat
             eprintln!("classify {}: recording llm_call: {e:#}", call.device);
         }
     };
-    let (labels, usage, raw) = match classify::classify(cfg, key, &items, &prev) {
+    // Only the devices that are behind THIS batch: a device can be behind the
+    // fleet frontier and still have reported past an older batch, and naming
+    // it missing there would be a lie the model has to reason around.
+    let latest = batch.iter().map(|j| j.ts).max().unwrap_or(span.1);
+    let behind = queue
+        .stale
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let missing: Vec<(&str, i64)> = behind
+        .iter()
+        .filter(|(_, through)| *through < latest)
+        .map(|(d, through)| (d.as_str(), *through))
+        .collect();
+
+    let (labels, usage, raw) = match classify::classify(cfg, key, &items, &prev, &missing) {
         Ok(v) => v,
         Err(e) => {
             // A weekly cap is not a transient failure. Hammering it burns
@@ -1018,5 +1161,116 @@ mod tests {
             2,
             "the count is what the next window reports"
         );
+    }
+
+    fn mark(device: &str, through: i64) -> crate::db::Watermark {
+        crate::db::Watermark {
+            device: device.into(),
+            through,
+            arrived: None,
+        }
+    }
+
+    fn waits() -> crate::config::ServerConfig {
+        crate::config::ServerConfig {
+            device_wait_hours: 24,
+            device_active_hours: 72,
+            ..Default::default()
+        }
+    }
+
+    const NOW: i64 = 1_787_000_000;
+    const HOUR: i64 = 3600;
+
+    /// The whole point: the slowest in-service device sets where the timeline
+    /// stops being trustworthy. The phone reports retrospectively, so the pc
+    /// being current says nothing about whether a minute is complete.
+    #[test]
+    fn the_frontier_waits_for_the_slowest_device() {
+        let f = frontier(
+            &waits(),
+            &[
+                mark("pc", NOW),
+                mark("framework", NOW - HOUR),
+                mark("phone", NOW - 6 * HOUR),
+            ],
+            NOW,
+        );
+        assert_eq!(f.through, NOW - 6 * HOUR, "the phone decides, not the pc");
+        assert!(
+            f.stale.is_empty(),
+            "a device that is merely behind is not stale -- it is being waited for"
+        );
+    }
+
+    /// A real database carries `tagtest` and `phone-test`, last seen weeks ago.
+    /// Waiting for those would mean never labelling another minute.
+    #[test]
+    fn a_retired_device_does_not_hold_the_frontier() {
+        let f = frontier(
+            &waits(),
+            &[
+                mark("pc", NOW),
+                mark("phone", NOW - 2 * HOUR),
+                mark("tagtest", NOW - 454 * HOUR),
+                mark("phone-test", NOW - 454 * HOUR),
+            ],
+            NOW,
+        );
+        assert_eq!(
+            f.through,
+            NOW - 2 * HOUR,
+            "only devices still in service count"
+        );
+        assert!(f.stale.is_empty());
+    }
+
+    /// A phone that is off for days must not freeze the timeline behind it --
+    /// but the minutes it is missing from have to say so, or the model reads
+    /// the gap as the person being away.
+    #[test]
+    fn the_wait_ceiling_releases_a_stuck_device_and_names_it() {
+        let f = frontier(
+            &waits(),
+            &[mark("pc", NOW), mark("phone", NOW - 60 * HOUR)],
+            NOW,
+        );
+        assert_eq!(f.through, NOW - 24 * HOUR, "capped at device_wait_hours");
+        assert_eq!(
+            f.stale,
+            vec![("phone".to_string(), NOW - 60 * HOUR)],
+            "and the phone is named, so the prompt can mark it unknown"
+        );
+    }
+
+    #[test]
+    fn zero_wait_restores_the_old_behaviour() {
+        let cfg = crate::config::ServerConfig {
+            device_wait_hours: 0,
+            ..Default::default()
+        };
+        let f = frontier(&cfg, &[mark("phone", NOW - 60 * HOUR)], NOW);
+        assert_eq!(f.through, NOW);
+        assert!(f.stale.is_empty());
+    }
+
+    /// An empty fleet must not stall on nobody -- a fresh database has no
+    /// watermarks at all, and waiting for a set with no members never ends.
+    #[test]
+    fn an_empty_fleet_does_not_stall() {
+        assert_eq!(frontier(&waits(), &[], NOW).through, NOW);
+    }
+
+    /// Ingest has to honour the frontier too, or a minute that arrives during
+    /// a drain skips the wait the sweep would have imposed on it.
+    #[test]
+    fn a_minute_past_the_frontier_is_deferred() {
+        let q = Queue::new();
+        q.complete_through.store(1000, Ordering::Relaxed);
+
+        assert_eq!(q.push(job("pc", 1060)), 0, "newer than the frontier");
+        assert_eq!(q.push(job("pc", 1000)), 1, "exactly at it is complete");
+        assert_eq!(q.push(job("pc", 940)), 2, "older than it is complete");
+        assert_eq!(q.deferred.load(Ordering::Relaxed), 1);
     }
 }

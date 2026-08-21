@@ -177,7 +177,10 @@ pub fn run(mut cfg: ServerConfig, opts: Opts) -> Result<()> {
             })
             .collect();
 
-        let (labels, usage, _raw) = match classify::classify(&cfg, key.as_deref(), &items, &prev) {
+        let (labels, usage, _raw) = match // A backtest replays what was stored, and every device that was ever going
+        // to report has long since done so. There is nothing outstanding to warn
+        // about, and inventing a warning would change the answers being compared.
+        classify::classify(&cfg, key.as_deref(), &items, &prev, &[]) {
             Ok(v) => v,
             Err(e) => {
                 // A rate limit shuts the whole endpoint, not this batch, so

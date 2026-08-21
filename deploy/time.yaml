@@ -97,6 +97,20 @@ data:
     # before sixty screenshots.
     batch_minutes = 60
     batch_wait_secs = 600
+    # A minute is not sent to the model until every in-service device has
+    # reported past it. The phone reads Android's usage log in bulk, hours
+    # late; classifying before it arrives showed the model a timeline with a
+    # machine missing from it, and the prompt tells the model to read exactly
+    # that as absence -- so real activity was being labelled as an empty room.
+    #
+    # Costs ~30 minutes of latency when all three devices keep up, which is
+    # the normal case. 24h is the ceiling for a device that is genuinely
+    # stuck: past it the minutes go out anyway, flagged to the model as an
+    # incomplete timeline rather than silently pretending the device spoke.
+    device_wait_hours = 24
+    # tagtest and phone-test are still in this database from weeks ago.
+    # Without this the frontier waits on them forever and nothing is labelled.
+    device_active_hours = 72
     # Three drains a day instead of a call every ten minutes around the
     # clock. The endpoint is a GPU in a room someone sleeps in, and a call
     # every ten minutes never lets that card reach an idle clock state --
@@ -143,7 +157,7 @@ spec:
         # or image change only reaches the pod when something in this template
         # changes — this counter is that something. There is no config-reloader
         # on the cluster, and a ConfigMap edit alone restarts nothing.
-        time.erikfrankling.se/config-rev: "classify-windows-1"
+        time.erikfrankling.se/config-rev: "device-frontier-1"
     spec:
       automountServiceAccountToken: false
       containers:
