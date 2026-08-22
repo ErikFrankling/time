@@ -430,6 +430,21 @@ impl Schedule {
 /// and every call then goes out without an Authorization header.
 pub fn start(cfg: Arc<ServerConfig>, db: Arc<Mutex<Db>>, key: Option<String>) -> Arc<Queue> {
     let queue = Arc::new(Queue::new());
+
+    // `classify = false`: hand back a queue that is shut forever and start no
+    // threads at all. Ingest keeps working exactly as it does between drain
+    // windows -- the row is written, the screenshot is kept, the minute is
+    // counted as deferred -- so nothing is lost but the label, and the backlog
+    // is `time reclassify --pending` work whenever this comes back on.
+    if !cfg.classify {
+        queue.open.store(false, Ordering::Relaxed);
+        eprintln!(
+            "classifier: classify = false -- no model calls will be made; \
+             minutes are stored unlabelled for later reclassification"
+        );
+        return queue;
+    }
+
     let schedule = Schedule::new(&cfg);
 
     // Windowed mode starts shut and waits for its first window. Continuous

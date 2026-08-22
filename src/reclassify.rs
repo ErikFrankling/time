@@ -48,6 +48,16 @@ struct Prev {
 }
 
 pub fn run(mut cfg: ServerConfig, opts: Opts) -> Result<()> {
+    // Refused rather than allowed through as "well, you typed it": `classify
+    // = false` is a standing instruction that this endpoint is to be left
+    // alone, and a backfill is the largest pile of calls this program can
+    // make. Overriding it is one word in the config file.
+    anyhow::ensure!(
+        cfg.classify,
+        "classify = false in {}: model calls are switched off. \
+         Set classify = true to run a reclassification.",
+        config::config_path()?.display()
+    );
     // `--model` overrides both models on purpose: a backtest asks "what would
     // model X have said", and letting text-only batches quietly slip through
     // to the old `model_text` would answer a different question.

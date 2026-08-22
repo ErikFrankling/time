@@ -65,6 +65,14 @@ data:
       "idle",
       "other",
     ]
+    # Model calls are OFF, indefinitely, by request: the GPU was running far
+    # more than the labels were worth. Nothing else changes -- every minute
+    # still arrives, its row is still written, its screenshot is still kept
+    # under frames/ -- so the whole dark stretch can be labelled in one pass
+    # with `time reclassify <days> --pending --apply` once this is true again.
+    # The dashboard meanwhile shows each device's last real label carried
+    # forward, which is what it already does between drain windows.
+    classify = false
     # Classification runs against llama-swap on the pc (LAN), serving a local
     # Qwen VL model on its GPU: free, private, and off any usage allowance —
     # no screenshot leaves the LAN any more. `model` and `model_text` are
@@ -157,7 +165,7 @@ spec:
         # or image change only reaches the pod when something in this template
         # changes — this counter is that something. There is no config-reloader
         # on the cluster, and a ConfigMap edit alone restarts nothing.
-        time.erikfrankling.se/config-rev: "device-frontier-1"
+        time.erikfrankling.se/config-rev: "classify-off-1"
     spec:
       automountServiceAccountToken: false
       containers:

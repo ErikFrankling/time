@@ -387,6 +387,17 @@ side reads only its own, so the same file works everywhere.
   timelines](#incomplete-timelines): a minute is not offered to the model until
   every in-service device has reported past it, because a machine missing from
   the timeline reads to the model as a person who was not there.
+- **`server.classify`** — the master switch. `false` and the server makes no
+  model calls at all: no classifier threads start, no batch is ever formed, no
+  request reaches `endpoint`, and `time reclassify` refuses to run rather than
+  quietly making the largest pile of calls the program is capable of. Ingest is
+  untouched — every minute's row is written and every screenshot is kept under
+  `frames/` — so a dark stretch is caught up in one pass with `time reclassify
+  <days> --pending --apply` once it is switched back on. The dashboard shows
+  each device's last real label carried forward in the meantime, exactly as it
+  does between drain windows. **Currently `false` in `deploy/time.yaml`.**
+  Use `classify_at` instead when the intent is to call the model less often
+  rather than not at all.
 - **`server.classify_at`** — local times of day at which the classifier wakes,
   labels everything it owes, and goes quiet again: `["07:00", "13:00", "19:00"]`.
   Empty (the default) is the original behaviour, a call every `batch_wait_secs`

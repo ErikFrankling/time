@@ -55,6 +55,18 @@ pub struct ServerConfig {
     #[serde(default = "default_categories")]
     pub categories: Vec<String>,
 
+    /// Master switch for every model call the server makes. `false` and no
+    /// classification happens at all: no worker threads, no batches, no
+    /// request ever reaches `endpoint`, and `time reclassify` refuses to run.
+    ///
+    /// Not the same as `classify_at`, which only decides *when* the calls go
+    /// out. Off means off, for as long as it is set, and it costs nothing
+    /// permanent: ingest still writes every minute's row and still keeps its
+    /// screenshot under `frames/`, so the whole silent stretch is
+    /// `time reclassify --pending` work once this is flipped back.
+    #[serde(default = "default_classify")]
+    pub classify: bool,
+
     #[serde(default = "default_model")]
     pub model: String,
 
@@ -231,6 +243,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             categories: default_categories(),
+            classify: default_classify(),
             model: default_model(),
             model_text: default_model_text(),
             endpoint: default_endpoint(),
@@ -374,6 +387,12 @@ fn default_categories() -> Vec<String> {
     .collect()
 }
 
+/// On. A server that silently labelled nothing would be indistinguishable
+/// from a broken one, so that state has to be asked for.
+fn default_classify() -> bool {
+    true
+}
+
 fn default_model() -> String {
     "qwen3.6-plus".into()
 }
@@ -491,6 +510,14 @@ categories = [
   "idle",
   "other",
 ]
+
+# The master switch for model calls. false and the server never calls the
+# endpoint at all -- no live classification, and `time reclassify` refuses.
+# Minutes still land in the database and their screenshots are still kept, so
+# a silent stretch is `time reclassify --pending` work once this goes back on.
+# Use it when the endpoint should be left alone entirely; classify_at is the
+# knob for merely calling less often.
+classify = true
 
 # Two models, chosen per call by whether the batch carries screenshots.
 # `model` must have vision; `model_text` need not, and is much cheaper, which
@@ -651,6 +678,16 @@ mod tests {
         let cfg: super::Config =
             toml::from_str("[server]\nphone_categories = [\"com.spotify=music\"]\n").unwrap();
         assert_eq!(cfg.server.port, super::default_port());
+    }
+
+    /// The one key whose default is "yes, spend money": absent must mean on,
+    /// or an old config file would silently stop classifying on upgrade.
+    #[test]
+    fn classification_is_on_unless_switched_off() {
+        let cfg: super::Config = toml::from_str("[server]\n").unwrap();
+        assert!(cfg.server.classify);
+        let cfg: super::Config = toml::from_str("[server]\nclassify = false\n").unwrap();
+        assert!(!cfg.server.classify);
     }
 
     #[test]
