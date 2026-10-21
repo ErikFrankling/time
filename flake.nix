@@ -15,6 +15,7 @@
     }:
     {
       homeManagerModules.default = import ./nix/hm-module.nix { inherit self; };
+      homeManagerModules.agent-v2 = import ./nix/hm-module-v2.nix { inherit self; };
     }
     // flake-utils.lib.eachDefaultSystem (
       system:
@@ -28,7 +29,10 @@
         # Enough SDK to build the APK and run it in an emulator, so the Android
         # client can be tested here rather than only on a real phone.
         android = pkgs.androidenv.composeAndroidPackages {
-          platformVersions = [ "35" "36" ];
+          platformVersions = [
+            "35"
+            "36"
+          ];
           buildToolsVersions = [ "35.0.0" ];
           includeEmulator = true;
           includeSystemImages = true;
@@ -101,7 +105,8 @@
             pkgs.gh
             pkgs.gradle
             android.androidsdk
-          ] ++ runtimeDeps;
+          ]
+          ++ runtimeDeps;
 
           RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
 
