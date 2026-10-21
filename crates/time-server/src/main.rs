@@ -119,5 +119,6 @@ async fn serve(path: &Path) -> anyhow::Result<()> {
         state.classifier.current().rules.rules.len()
     );
     tokio::spawn(classify::run_forever(state.clone()));
+    time_server::apk::spawn_poller(state.apk.clone());
     time_server::serve(listener, state).await
 }

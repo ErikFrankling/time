@@ -4,6 +4,7 @@
 //! typed events, deduplicated by `event.id`. Nothing derived (minutes,
 //! reports, the status screen) is ever the only copy of a fact.
 
+pub mod apk;
 pub mod classify;
 pub mod config;
 pub mod day;
@@ -33,6 +34,8 @@ pub struct AppState {
     /// gateway authenticates devices; this guards the server itself.
     pub ingest_token: Option<String>,
     pub tz: chrono_tz::Tz,
+    /// The Android APK served at `/app`.
+    pub apk: apk::Shared,
     pub started_ms: Millis,
     pub counters: Counters,
 }
@@ -58,6 +61,14 @@ impl AppState {
             );
         }
         let tz = config.tz()?;
+        let apk = apk::Apk::open(
+            config
+                .apk_path
+                .clone()
+                .unwrap_or_else(|| config.data_dir.join("time.apk")),
+            config.apk_path.is_some(),
+            config.apk_repo.clone(),
+        );
         let ingest_token = std::env::var("TIME_INGEST_TOKEN")
             .ok()
             .filter(|t| !t.is_empty());
@@ -65,6 +76,7 @@ impl AppState {
         Ok(Arc::new(Self {
             ingest_token,
             tz,
+            apk,
             config,
             store,
             clock,

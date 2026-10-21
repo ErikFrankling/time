@@ -139,6 +139,8 @@ impl World {
             rules: None,
             classify_every_secs: 10,
             timezone: "Europe/Stockholm".into(),
+            apk_repo: "ErikFrankling/time".into(),
+            apk_path: None,
         };
         std::fs::create_dir_all(&config.data_dir)?;
         let store = Store::open(&config.data_dir.join("time.db"))?;

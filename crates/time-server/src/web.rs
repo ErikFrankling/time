@@ -758,6 +758,49 @@ pub fn week_page(days: &[crate::day::Day], this_week: bool) -> String {
     )
 }
 
+/// `/app/`: what the server is handing out to the phone, and how to install it.
+pub fn app_page(s: &crate::apk::State, repo: &str, tz: chrono_tz::Tz) -> String {
+    let mut body = String::new();
+    match &s.meta {
+        Some(m) => {
+            let _ = write!(
+                body,
+                r#"<section><h2>Android app</h2><dl>
+<dt>Version</dt><dd>{} (versionCode {})</dd>
+<dt>Signed with</dt><dd>{} key</dd>
+<dt>Size</dt><dd>{:.1} MB</dd>
+<dt>Published</dt><dd>{}</dd>
+<dt>SHA-256</dt><dd>{}</dd>
+</dl><p><a href="/app">Download the APK</a></p></section>"#,
+                esc(&m.version),
+                m.version_code,
+                esc(&m.signing),
+                m.size as f64 / 1e6,
+                esc(&m.published),
+                esc(&m.sha256),
+            );
+        }
+        None => body.push_str(
+            r#"<section><div class="banner t-warn">No APK has been fetched yet.</div></section>"#,
+        ),
+    }
+    if !s.error.is_empty() {
+        let _ = write!(
+            body,
+            r#"<section><div class="sub t-warn">Last check failed, so this may be out of date: {}</div></section>"#,
+            esc(&s.error)
+        );
+    }
+    let checked = (s.checked > 0).then_some(s.checked * 1000);
+    let _ = write!(
+        body,
+        r#"<section><h2>Installing</h2><div class="sub">Recommended: point <a href="https://github.com/ImranR98/Obtainium">Obtainium</a> at <code>https://github.com/{}</code>. Apps installed from a browser download get usage access greyed out on Android 13+; then use Settings → Apps → time → ⋮ → Allow restricted settings. Last checked for a new release: {}.</div></section>"#,
+        esc(repo),
+        clock_time(tz, checked),
+    );
+    page("Time · App", "/app/", None, &body)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

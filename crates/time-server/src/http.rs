@@ -27,6 +27,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/metrics", get(metrics))
         .route("/api/status", get(api_status))
         .route("/status", get(status_html))
+        .route("/app", get(app_apk))
+        .route("/app/", get(app_page))
+        .route("/app/version", get(app_version))
         .route("/inbox", get(inbox_html))
         .route("/inbox/rule", post(inbox_rule))
         .route("/", get(today_html))
@@ -357,4 +360,58 @@ async fn week_html(
         }
         Err(e) => e.into_response(),
     }
+}
+
+/// What the phone's updater reads. Field names and the relative `url` are
+/// the contract the installed app already parses (Update.kt).
+async fn app_version(State(state): State<Arc<AppState>>) -> Response {
+    let s = state.apk.snapshot();
+    match s.meta {
+        Some(m) => Json(json!({
+            "version": m.version,
+            "versionCode": m.version_code,
+            "sha256": m.sha256,
+            "url": "/app",
+            "published": m.published,
+            "size": m.size,
+            "signing": m.signing,
+            "stale": !s.error.is_empty(),
+        }))
+        .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "no APK published" })),
+        )
+            .into_response(),
+    }
+}
+
+async fn app_apk(State(state): State<Arc<AppState>>) -> Response {
+    let path = state.apk.path.clone();
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => (
+            [
+                (
+                    header::CONTENT_TYPE,
+                    "application/vnd.android.package-archive",
+                ),
+                (
+                    header::CONTENT_DISPOSITION,
+                    "attachment; filename=\"time.apk\"",
+                ),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(_) => (StatusCode::NOT_FOUND, "no APK published yet\n").into_response(),
+    }
+}
+
+async fn app_page(State(state): State<Arc<AppState>>) -> Response {
+    axum::response::Html(crate::web::app_page(
+        &state.apk.snapshot(),
+        &state.apk.repo,
+        state.tz,
+    ))
+    .into_response()
 }

@@ -434,3 +434,13 @@ fn the_week_page_sums_the_days() {
     assert!(html.contains(r#"href="/day/2026-10-21""#));
     assert!(html.contains("3\u{2009}000"), "steps from Wednesday");
 }
+
+#[test]
+fn the_app_endpoints_answer_honestly_without_an_apk() {
+    let w = morning();
+    assert_eq!(w.get("/app/version").unwrap().0, 404);
+    assert_eq!(w.get("/app").unwrap().0, 404);
+    let (code, html) = w.get("/app/").unwrap();
+    assert_eq!(code, 200);
+    assert!(html.contains("No APK has been fetched yet."));
+}

@@ -23,6 +23,12 @@ pub struct Config {
     /// A rules file; the rules shipped with Time when absent.
     #[serde(default)]
     pub rules: Option<PathBuf>,
+    /// GitHub `owner/repo` whose releases carry the Android APK served at `/app`.
+    #[serde(default = "default_apk_repo")]
+    pub apk_repo: String,
+    /// Serve this APK file as is instead of fetching releases.
+    #[serde(default)]
+    pub apk_path: Option<PathBuf>,
     /// IANA zone for days and clock times on the website.
     #[serde(default = "default_timezone")]
     pub timezone: String,
@@ -43,6 +49,10 @@ pub enum DeviceKind {
 #[serde(deny_unknown_fields)]
 pub struct DeviceConfig {
     pub kind: DeviceKind,
+}
+
+fn default_apk_repo() -> String {
+    "ErikFrankling/time".into()
 }
 
 fn default_timezone() -> String {

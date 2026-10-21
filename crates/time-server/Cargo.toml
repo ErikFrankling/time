@@ -10,6 +10,8 @@ name = "time-server"
 path = "src/main.rs"
 
 [dependencies]
+reqwest.workspace = true
+sha2 = "0.10"
 regex.workspace = true
 anyhow.workspace = true
 axum.workspace = true
@@ -24,4 +26,3 @@ toml.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-reqwest.workspace = true
