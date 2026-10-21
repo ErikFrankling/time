@@ -20,15 +20,6 @@ data class Session(val pkg: String, val start: Long, val end: Long)
  */
 data class Ev(val type: Int, val pkg: String, val ts: Long)
 
-/** One minute of phone activity, matching the server's Frame shape. */
-data class MinuteFrame(
-    val ts: Long,
-    val window: String,
-    val apps: List<String>,
-    /** Null, always: Android exposes no seconds-since-last-touch to an app. */
-    val idleSecs: Int?,
-    val note: String?,
-)
 
 object Usage {
 
@@ -110,8 +101,11 @@ object Usage {
         return out
     }
 
-    /** Fan sessions out into one frame per minute. */
-    fun frames(ctx: Context, sessions: List<Session>): List<MinuteFrame> {
+    /**
+     * Sessions as events. The server turns spans into minutes; doing it here
+     * (as v1 did) threw away the exact boundaries and multiplied the data.
+     */
+    fun spans(ctx: Context, device: String, sessions: List<Session>, media: Set<Long>): List<Envelope> {
         val pm = ctx.packageManager
         val labels = mutableMapOf<String, String>()
         fun label(pkg: String) = labels.getOrPut(pkg) {
@@ -121,37 +115,8 @@ object Usage {
                 pkg
             }
         }
-
-        // Several sessions can touch the same minute; the longest one wins it,
-        // and every app that appeared is kept in `apps`.
-        val byMinute = sortedMapOf<Long, MutableMap<String, Long>>()
-        for (s in sessions) {
-            var m = s.start / 60_000 * 60
-            while (m * 1000 < s.end) {
-                val slotStart = maxOf(s.start, m * 1000)
-                val slotEnd = minOf(s.end, (m + 60) * 1000)
-                val overlap = (slotEnd - slotStart).coerceAtLeast(0)
-                byMinute.getOrPut(m) { mutableMapOf() }
-                    .merge(s.pkg, overlap) { a, b -> a + b }
-                m += 60
-            }
-        }
-
-        return byMinute.map { (ts, pkgs) ->
-            val winner = pkgs.maxByOrNull { it.value }!!.key
-            MinuteFrame(
-                ts = ts,
-                window = "${label(winner)} — $winner",
-                apps = pkgs.keys.sorted(),
-                // There is no way to know how long since a touch here, and 0
-                // would be a lie the server cannot see through: paired with the
-                // zero key and pointer counts a phone always sends, it claims
-                // both "input this instant" and "no input this minute". These
-                // frames are reconstructed hours after the fact, so that skews
-                // every one of them towards present. Unknown is the truth.
-                idleSecs = null,
-                note = null,
-            )
+        return sessions.map { s ->
+            Envelope.appSpan(device, s.pkg, label(s.pkg), s.start, s.end, MediaSamples.mostlyPlaying(media, s.start, s.end))
         }
     }
 

@@ -54,7 +54,19 @@ class SyncService : Service() {
 
         if (loop?.isActive != true) {
             loop = scope.launch {
+                var lastSync = 0L
                 while (isActive) {
+                    // Media is sampled every minute; the sync runs every PERIOD_MS.
+                    val now = System.currentTimeMillis()
+                    try {
+                        MediaSamples.of(this@SyncService).record(now / 60_000 * 60_000, MediaSamples.playingNow(this@SyncService))
+                    } catch (_: Throwable) {
+                    }
+                    if (now - lastSync < PERIOD_MS) {
+                        delay(60_000)
+                        continue
+                    }
+                    lastSync = now
                     try {
                         Sync.performSync(this@SyncService)
                     } catch (t: Throwable) {
@@ -69,7 +81,7 @@ class SyncService : Service() {
                         }
                     }
                     notifyStatus()
-                    delay(PERIOD_MS)
+                    delay(60_000)
                 }
             }
         }
@@ -143,7 +155,7 @@ class SyncService : Service() {
         /** Update.kt owns notification id 1. */
         private const val ID = 2
 
-        private const val PERIOD_MS = 30 * 60_000L
+        private const val PERIOD_MS = 15 * 60_000L
 
         /**
          * Start the service, or poke a running one into refreshing its

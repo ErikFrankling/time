@@ -12,8 +12,6 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkerParameters
 import androidx.work.WorkManager
-import org.json.JSONArray
-import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
@@ -39,6 +37,21 @@ object Prefs {
     var Context.watermark: Long
         get() = get(this).getLong("watermark", 0)
         set(v) = get(this).edit().putLong("watermark", v).apply()
+
+    /** Where events go: the homelab OTLP gateway, LAN and tailnet only. */
+    var Context.otlpEndpoint: String
+        get() = get(this).getString("otlp", "https://otlp.erikfrankling.duckdns.org/v1/logs")!!
+        set(v) = get(this).edit().putString("otlp", v).apply()
+
+    /** The gateway's bearer token. Device-local; never in the repo. */
+    var Context.token: String
+        get() = get(this).getString("token", "")!!
+        set(v) = get(this).edit().putString("token", v).apply()
+
+    /** How far Health Connect has been read (an hour boundary). */
+    var Context.healthWatermark: Long
+        get() = get(this).getLong("healthWatermark", 0)
+        set(v) = get(this).edit().putLong("healthWatermark", v).apply()
 
     var Context.lastSync: Long
         get() = get(this).getLong("lastSync", 0)
@@ -177,60 +190,55 @@ object Sync {
     private fun syncUsage(ctx: Context): Outcome {
         with(Prefs) {
             ctx.lastAttempt = System.currentTimeMillis()
-
-            if (!Usage.hasAccess(ctx)) {
-                ctx.lastError = "Usage access is not granted, so there is nothing to send."
-                ctx.lastErrorDetail = ""
-                return Outcome.FAILURE
-            }
-            // queryEvents returns null before first unlock on credential-
-            // encrypted storage. Retry rather than treat it as no data.
-            if (ctx.getSystemService(UserManager::class.java)?.isUserUnlocked == false) {
-                return Outcome.RETRY
-            }
-
             val now = System.currentTimeMillis()
-            // The system keeps ~7 days; clamp so a long absence doesn't ask
-            // for a window that no longer exists. Overlap slightly, because
-            // recent events can be truncated, and let the server dedupe on
-            // (device, ts).
-            // A fresh install has no watermark. Backfilling the full week
-            // the system retains means thousands of minutes and a model call
-            // for each, to reconstruct days nobody asked about. Start shallow;
-            // an existing install keeps its watermark and loses nothing.
-            val floor = if (ctx.watermark == 0L) now - 6 * 3600_000L
-                        else now - 7 * 24 * 3600_000L
-            // A watermark older than the floor means the event log expired
-            // before it was read: that stretch is unrecoverable. Say so, on
-            // the record, instead of leaving a silent blank on the chart.
-            if (ctx.watermark in 1..<floor) {
-                ctx.lastGapStart = ctx.watermark
-                ctx.lastGapEnd = floor
+            val spool = Spool(File(ctx.filesDir, "spool-v2.json"))
+            val fresh = mutableListOf<Envelope>()
+
+            // App usage. Locked storage before first unlock returns no events;
+            // that is a retry, not an empty day.
+            if (Usage.hasAccess(ctx)) {
+                if (ctx.getSystemService(UserManager::class.java)?.isUserUnlocked == false) return Outcome.RETRY
+                // The system keeps ~7 days. A fresh install starts shallow.
+                val floor = if (ctx.watermark == 0L) now - 6 * 3600_000L else now - 7 * 24 * 3600_000L
+                if (ctx.watermark in 1..<floor) {
+                    ctx.lastGapStart = ctx.watermark
+                    ctx.lastGapEnd = floor
+                }
+                // Re-read four hours back: a span is only emitted once it has
+                // ended, and its start must be inside the read to be seen.
+                // Re-read spans carry the same id and are stored once.
+                val from = maxOf(ctx.watermark - 4 * 3600_000L, floor)
+                val events = Usage.query(ctx, from, now) ?: return Outcome.RETRY
+                fresh += Usage.spans(ctx, ctx.device, Usage.sessions(Usage.drain(events)), MediaSamples.of(ctx).load())
+                ctx.watermark = now
             }
-            val from = maxOf(ctx.watermark - 120_000L, floor)
 
-            val events = Usage.query(ctx, from, now) ?: return Outcome.RETRY
-            val fresh = Usage.frames(ctx, Usage.sessions(Usage.drain(events))).map { frame(ctx, it) }
-
-            // Derived minutes go to disk before anything is attempted over the
-            // network, and the watermark follows the disk rather than the
-            // upload. The system event log is only a write-ahead log for as
-            // long as it retains the events; past that it forgets them without
-            // saying so, which is a week of silence away from being a week of
-            // missing chart.
-            val spool = Spool(File(ctx.filesDir, "spool.json"))
-            val pending = spool.merge(fresh, now / 1000)
-            ctx.watermark = now
-
-            if (pending.isEmpty()) {
-                ctx.lastSync = now
-                ctx.lastError = ""
-                ctx.lastErrorDetail = ""
-                return Outcome.SUCCESS
+            // Steps and distance, settled hours only.
+            try {
+                val from = if (ctx.healthWatermark == 0L) now - 7 * 24 * 3600_000L else ctx.healthWatermark
+                Health.read(ctx, ctx.device, from, now)?.let { (events, until) ->
+                    fresh += events
+                    ctx.healthWatermark = until
+                }
+            } catch (_: Exception) {
+                // Reported through the heartbeat's `missing`, not fatal to the
+                // rest of the sync.
             }
+
+            // Everything read goes to disk before the network is touched.
+            val pending = spool.merge(fresh, now)
+            val heartbeat = Envelope.heartbeat(
+                nowMs = now,
+                // Everything pending rides in this request; what is left
+                // behind afterwards is reported by the next heartbeat.
+                pending = 0,
+                version = BuildConfig.VERSION_NAME,
+                coveredUntil = ctx.watermark,
+                missing = missing(ctx),
+            )
 
             return try {
-                post(ctx, spool, pending)
+                post(ctx, spool, pending, heartbeat)
                 ctx.lastSync = now
                 ctx.lastError = ""
                 ctx.lastErrorDetail = ""
@@ -239,85 +247,52 @@ object Sync {
                 val (why, detail) = describe(e)
                 ctx.lastError = why
                 ctx.lastErrorDetail = detail
-
-                // Being away from the LAN is the normal state, not a fault, and
-                // retrying does not help: the route is unreachable until the
-                // phone comes home. Reporting failure would be worse than
-                // useless, because WorkManager's exponential backoff replaces
-                // the 30-minute period and saturates at five hours after about
-                // six consecutive misses -- so a day out of the house would
-                // leave the next attempt hours past the point it would have
-                // worked. Nothing is lost by waiting: whatever was not accepted
-                // is still in the spool.
+                // Off the LAN/VPN is the normal state, and WorkManager's
+                // backoff would push the next attempt hours past the moment it
+                // could work. Nothing is lost by waiting: it is all spooled.
                 if (isUnreachable(e)) Outcome.SUCCESS else Outcome.RETRY
             }
         }
     }
 
+    /** What the status screen should say is wrong with this phone. */
+    fun missing(ctx: Context): List<String> = buildList {
+        if (!Usage.hasAccess(ctx)) add("usage access not granted: no phone app data")
+        addAll(Health.missing(ctx))
+        val pm = ctx.getSystemService(android.os.PowerManager::class.java)
+        if (pm?.isIgnoringBatteryOptimizations(ctx.packageName) == false) {
+            add("battery exemption not granted: Android may sync only a few times a day")
+        }
+    }
+
     /**
-     * The whole backlog in one request.
-     *
-     * A phone reports retrospectively, so a normal run has dozens of minutes
-     * to send. One request each meant dozens of round trips, each holding a
-     * server thread for as long as the model took — which is how the server
-     * ran out of threads and started failing its health probes. `/v1/frames`
-     * takes the lot as an array. `/v1/frame` stays for the desktop agent,
-     * which really does have exactly one minute to send.
+     * The backlog in chunks, the heartbeat riding on the last one. Each chunk
+     * leaves the spool as soon as the server has taken it, so an interrupted
+     * run resumes rather than replays.
      */
-    /** One minute in the shape the server's `Frame` expects. */
-    private fun frame(ctx: Context, f: MinuteFrame): JSONObject = with(Prefs) {
-        JSONObject().apply {
-            put("ts", f.ts)
-            put("device", ctx.device)
-            put("window", f.window)
-            put("blocked", false)
-            put("keys", 0)
-            put("mouse", 0)
-            put("workspaces", 0)
-            put("apps", JSONArray(f.apps))
-            // Omitted rather than zeroed: the field is optional on the server
-            // and absence reads as "unknown", which is what a phone knows.
-            f.idleSecs?.let { put("idle_secs", it) }
-            f.note?.let { put("note", it) }
+    private fun post(ctx: Context, spool: Spool, events: List<Envelope>, heartbeat: Envelope) {
+        val chunks = events.chunked(CHUNK).ifEmpty { listOf(emptyList()) }
+        for ((i, chunk) in chunks.withIndex()) {
+            val batch = if (i == chunks.lastIndex) chunk + heartbeat else chunk
+            postChunk(ctx, batch)
+            spool.ack(chunk.map { it.id })
         }
     }
 
-    private fun post(ctx: Context, spool: Spool, frames: List<JSONObject>) {
-        // Chunked because the server caps a batch, and a first sync after a
-        // fresh install can hold days of minutes. Sent whole it is rejected,
-        // nothing ever drains, and the next run rebuilds the same oversized
-        // batch -- a deadlock that never resolves itself.
-        //
-        // Each chunk leaves the spool as soon as the server has taken it, so an
-        // interrupted run resumes rather than replaying the whole backlog.
-        for (chunk in frames.chunked(CHUNK)) {
-            postChunk(ctx, chunk)
-            spool.ack(chunk.map { it.optLong("ts") })
-        }
-    }
-
-    private fun postChunk(ctx: Context, frames: List<JSONObject>) {
+    private fun postChunk(ctx: Context, events: List<Envelope>) {
         with(Prefs) {
-            val base = ctx.server.trimEnd('/')
-            val body = JSONArray(frames).toString()
-
-            val conn = (URL("$base/v1/frames").openConnection() as HttpURLConnection).apply {
+            val body = Otlp.encode(ctx.device, BuildConfig.VERSION_NAME, events).toString()
+            val conn = (URL(ctx.otlpEndpoint).openConnection() as HttpURLConnection).apply {
                 requestMethod = "POST"
                 doOutput = true
                 connectTimeout = 15_000
-                // Ingest stores and queues; it never waits on the model now, so
-                // a reply that takes minutes means something is broken rather
-                // than merely busy.
                 readTimeout = 60_000
                 setRequestProperty("Content-Type", "application/json")
+                if (ctx.token.isNotEmpty()) setRequestProperty("Authorization", "Bearer ${ctx.token}")
             }
             conn.outputStream.use { it.write(body.toByteArray()) }
             val code = conn.responseCode
             conn.disconnect()
-
-            // Any non-2xx leaves the chunk in the spool, to be offered again
-            // next run. 403 in particular is not a rejection but a location:
-            // the ingest route is lan-only.
             if (code !in 200..299) throw HttpError(code)
         }
     }

@@ -530,3 +530,51 @@ mod tests {
         assert_eq!(a.id, b.id);
     }
 }
+
+/// The contract with the Android app: the fixture its encoder must reproduce
+/// (see `android/app/src/test/.../OtlpTest.kt`) must decode here into exactly
+/// these events.
+#[cfg(test)]
+mod phone_contract {
+    use super::*;
+    use crate::event::*;
+
+    #[test]
+    fn the_phone_fixture_decodes() {
+        let text = include_str!("../../../fixtures/otlp/phone-batch.json");
+        let req: ExportLogsRequest = serde_json::from_str(text).unwrap();
+        let got: Vec<Envelope> = decode(&req).into_iter().map(Result::unwrap).collect();
+        assert_eq!(got.len(), 3);
+        assert!(got
+            .iter()
+            .all(|e| e.device == "phone" && e.service == "time-android"));
+        assert_eq!(
+            got[0].event,
+            Event::PhoneApp(PhoneApp {
+                package: "com.twitter.android".into(),
+                label: "X".into(),
+                media_playing: false
+            })
+        );
+        assert_eq!(
+            (got[0].start_ms, got[0].end_ms),
+            (1_792_566_000_000, 1_792_566_600_000)
+        );
+        assert_eq!(
+            got[1].event,
+            Event::HealthSteps(HealthSteps {
+                steps: 1200,
+                distance_m: 850.5
+            })
+        );
+        assert_eq!(
+            got[2].event,
+            Event::Heartbeat(Heartbeat {
+                spool_pending: 0,
+                app_version: "test".into(),
+                covered_until_ms: Some(1_792_566_900_000),
+                missing: vec!["health: steps/distance permission not granted".into()],
+            })
+        );
+    }
+}

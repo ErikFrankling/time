@@ -21,7 +21,7 @@ android {
         // The workflow run number is the only counter that is guaranteed to be
         // monotonic without committing a bumped file back to the repo.
         versionCode = System.getenv("ANDROID_VERSION_CODE")?.toIntOrNull() ?: 1
-        versionName = "0.1.0"
+        versionName = "2.0.0"
     }
 
     // BuildConfig is off by default in AGP 8+, and versionName is shown in the
@@ -79,6 +79,8 @@ dependencies {
     implementation("androidx.work:work-runtime-ktx:2.10.0")
     // FileProvider, for handing the downloaded APK to the package installer.
     implementation("androidx.core:core-ktx:1.13.1")
+    // Steps and distance. Aggregation per hour happens inside Health Connect.
+    implementation("androidx.health.connect:connect-client:1.1.0")
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")
     // android.jar's org.json is a stub that throws on every call, so the spool
