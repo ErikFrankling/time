@@ -8,9 +8,10 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection};
-use time_core::clock::Millis;
+use rusqlite::{params, Connection, OptionalExtension};
+use time_core::clock::{floor_minute, Millis, MINUTE_MS};
 use time_core::event::{Envelope, Event};
+use time_core::label::MinuteLabel;
 
 /// Numbered migrations. Each runs once, in order, inside a transaction, and
 /// `PRAGMA user_version` records how far a database has come. Never edit a
@@ -39,6 +40,22 @@ const MIGRATIONS: &[&str] = &[
         app_version       TEXT,
         missing           TEXT
      );",
+    // 2: derived minute labels, and the queue of minutes to (re)compute.
+    "CREATE TABLE minute (
+        ts            INTEGER PRIMARY KEY,
+        place         TEXT NOT NULL,
+        device        TEXT,
+        activity      TEXT,
+        project       TEXT,
+        background    TEXT,
+        rule          TEXT NOT NULL,
+        decider       TEXT NOT NULL,
+        complete      INTEGER NOT NULL,
+        rules_version TEXT NOT NULL,
+        computed_ms   INTEGER NOT NULL
+     );
+     CREATE TABLE dirty (ts INTEGER PRIMARY KEY);
+     CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
 ];
 
 pub struct Store {
@@ -105,6 +122,7 @@ impl Store {
                 "INSERT INTO device (name, last_event_ms) VALUES (?1, ?2)
                  ON CONFLICT(name) DO UPDATE SET last_event_ms = max(coalesce(last_event_ms, 0), excluded.last_event_ms)",
             )?;
+            let mut dirty = tx.prepare_cached("INSERT OR IGNORE INTO dirty (ts) VALUES (?1)")?;
             let mut beat = tx.prepare_cached(
                 "UPDATE device SET last_heartbeat_ms = ?2, spool_pending = ?3, app_version = ?4,
                         covered_until_ms = coalesce(?5, covered_until_ms), missing = ?6
@@ -128,6 +146,11 @@ impl Store {
                 }
                 out.new += 1;
                 seen.execute(params![env.device, env.end_ms])?;
+                if !matches!(env.event, Event::Heartbeat(_)) {
+                    for ts in minutes_touched(env.start_ms, env.end_ms) {
+                        dirty.execute([ts])?;
+                    }
+                }
                 if let Event::Heartbeat(hb) = &env.event {
                     beat.execute(params![
                         env.device,
@@ -237,6 +260,232 @@ impl Store {
             .conn()
             .query_row("PRAGMA user_version", [], |r| r.get(0))?)
     }
+
+    /// Up to `limit` minutes waiting to be (re)labelled, oldest first.
+    pub fn dirty_batch(&self, limit: usize) -> Result<Vec<Millis>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT ts FROM dirty ORDER BY ts LIMIT ?1")?;
+        let rows = stmt.query_map([limit as i64], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn dirty_stats(&self) -> Result<(u64, Option<Millis>)> {
+        Ok(self
+            .conn()
+            .query_row("SELECT count(*), min(ts) FROM dirty", [], |r| {
+                Ok((r.get::<_, i64>(0)? as u64, r.get(1)?))
+            })?)
+    }
+
+    pub fn mark_dirty(&self, from: Millis, to: Millis) -> Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        {
+            let mut stmt = tx.prepare_cached("INSERT OR IGNORE INTO dirty (ts) VALUES (?1)")?;
+            for ts in minutes_touched(from, to) {
+                stmt.execute([ts])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Queue every minute that has a label or any event, e.g. after the
+    /// rules changed. Returns the queue length.
+    pub fn mark_all_dirty(&self) -> Result<u64> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        tx.execute("INSERT OR IGNORE INTO dirty (ts) SELECT ts FROM minute", [])?;
+        let spans: Vec<(Millis, Millis)> = {
+            let mut stmt =
+                tx.prepare("SELECT start_ms, end_ms FROM event WHERE name != 'time.heartbeat'")?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        {
+            let mut stmt = tx.prepare_cached("INSERT OR IGNORE INTO dirty (ts) VALUES (?1)")?;
+            for (a, b) in spans {
+                for ts in minutes_touched(a, b) {
+                    stmt.execute([ts])?;
+                }
+            }
+        }
+        let n: i64 = tx.query_row("SELECT count(*) FROM dirty", [], |r| r.get(0))?;
+        tx.commit()?;
+        Ok(n as u64)
+    }
+
+    /// Store labels and take their minutes off the queue, in one transaction.
+    pub fn write_labels(
+        &self,
+        labels: &[MinuteLabel],
+        rules_version: &str,
+        computed_ms: Millis,
+    ) -> Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        {
+            let mut up = tx.prepare_cached(
+                "INSERT INTO minute (ts, place, device, activity, project, background, rule, decider, complete, rules_version, computed_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                 ON CONFLICT(ts) DO UPDATE SET place = excluded.place, device = excluded.device,
+                    activity = excluded.activity, project = excluded.project, background = excluded.background,
+                    rule = excluded.rule, decider = excluded.decider, complete = excluded.complete,
+                    rules_version = excluded.rules_version, computed_ms = excluded.computed_ms",
+            )?;
+            let mut done = tx.prepare_cached("DELETE FROM dirty WHERE ts = ?1")?;
+            for l in labels {
+                up.execute(params![
+                    l.ts,
+                    enum_str(&l.place),
+                    l.device,
+                    l.activity.map(|a| a.as_str()),
+                    l.project,
+                    l.background.map(|a| a.as_str()),
+                    l.rule,
+                    enum_str(&l.decider),
+                    l.complete,
+                    rules_version,
+                    computed_ms,
+                ])?;
+                done.execute([l.ts])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn labels_between(&self, from: Millis, to: Millis) -> Result<Vec<MinuteLabel>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT ts, place, device, activity, project, background, rule, decider, complete
+             FROM minute WHERE ts >= ?1 AND ts < ?2 ORDER BY ts",
+        )?;
+        let rows = stmt.query_map([from, to], |r| {
+            Ok((
+                r.get::<_, Millis>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, Option<String>>(5)?,
+                r.get::<_, String>(6)?,
+                r.get::<_, String>(7)?,
+                r.get::<_, bool>(8)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (ts, place, device, activity, project, background, rule, decider, complete) = row?;
+            out.push(MinuteLabel {
+                ts,
+                place: parse_enum(&place)?,
+                device,
+                activity: activity
+                    .map(|a| a.parse())
+                    .transpose()
+                    .map_err(anyhow::Error::msg)?,
+                project,
+                background: background
+                    .map(|a| a.parse())
+                    .transpose()
+                    .map_err(anyhow::Error::msg)?,
+                rule,
+                decider: parse_enum(&decider)?,
+                complete,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Labelled minutes overall, and since `since`: how many, how many
+    /// unknown, how many still waiting on a late device.
+    pub fn label_stats(&self, since: Millis) -> Result<LabelStats> {
+        let conn = self.conn();
+        let total: i64 = conn.query_row("SELECT count(*) FROM minute", [], |r| r.get(0))?;
+        let (recent, unknown, incomplete): (i64, i64, i64) = conn.query_row(
+            "SELECT count(*), coalesce(sum(activity = 'unknown'), 0), coalesce(sum(NOT complete), 0)
+             FROM minute WHERE ts >= ?1",
+            [since],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        let rules_version: Option<String> =
+            conn.query_row("SELECT max(rules_version) FROM minute", [], |r| r.get(0))?;
+        Ok(LabelStats {
+            total: total as u64,
+            recent: recent as u64,
+            unknown: unknown as u64,
+            incomplete: incomplete as u64,
+            rules_version,
+        })
+    }
+
+    /// How far each device is known to have reported.
+    pub fn coverage(&self) -> Result<std::collections::HashMap<String, Millis>> {
+        Ok(self
+            .devices()?
+            .into_iter()
+            .filter_map(|d| d.covered_until_ms.or(d.last_event_ms).map(|c| (d.name, c)))
+            .collect())
+    }
+
+    /// Minutes not yet complete, newer than `since`: recomputed as late
+    /// devices catch up.
+    pub fn incomplete_since(&self, since: Millis, limit: usize) -> Result<Vec<Millis>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT ts FROM minute WHERE NOT complete AND ts >= ?1 ORDER BY ts LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![since, limit as i64], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn meta(&self, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn()
+            .query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
+            .optional()?)
+    }
+
+    pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
+        self.conn().execute(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [key, value],
+        )?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LabelStats {
+    pub total: u64,
+    pub recent: u64,
+    pub unknown: u64,
+    pub incomplete: u64,
+    pub rules_version: Option<String>,
+}
+
+/// Every minute start an interval touches. Instants touch their own minute;
+/// anything longer than a day is clipped to its first day (no real event
+/// is that long, and a corrupt one must not queue millions of rows).
+pub fn minutes_touched(start: Millis, end: Millis) -> impl Iterator<Item = Millis> {
+    let first = floor_minute(start);
+    let end = end.max(start + 1).min(start + 24 * 60 * MINUTE_MS);
+    (first..end).step_by(MINUTE_MS as usize)
+}
+
+fn enum_str<T: serde::Serialize>(v: &T) -> String {
+    match serde_json::to_value(v) {
+        Ok(serde_json::Value::String(s)) => s,
+        _ => unreachable!("label enums serialize as strings"),
+    }
+}
+
+fn parse_enum<T: serde::de::DeserializeOwned>(s: &str) -> Result<T> {
+    Ok(serde_json::from_value(serde_json::Value::String(
+        s.to_owned(),
+    ))?)
 }
 
 fn migrate(conn: &mut Connection) -> Result<()> {

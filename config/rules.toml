@@ -1,0 +1,306 @@
+# Time's rule table. First match wins; order matters.
+#
+# Activities: work, study, comms, video, social, browsing, music, games, other.
+# Anything no rule matches is `unknown` and lands in the inbox; labelling it
+# there adds a rule here. Built from the window classes, titles, hosts and
+# phone packages actually seen in the v1 database (Aug-Oct 2026).
+#
+# Conditions in one rule must all hold; the patterns in one list are
+# alternatives. `class` and `package` take `*` wildcards; `host` also matches
+# subdomains; `title` is a regex.
+
+# ---------------------------------------------------------------- study
+# Course codes and course tools come first, so a Claude chat or a Google Doc
+# about homework counts as study rather than work.
+
+[[rule]]
+id = "study.course-title"
+activity = "study"
+project = "kth"
+title = "(?i)\\b(IK2218|EP2120|SF1688|DD2440|DA2210|homework|hw ?\\d|ladok|canvas|exam|quiz|seminari|lab ?\\d|kth\\b|tentamen|grafteori|overleaf)"
+
+[[rule]]
+id = "study.course-sites"
+activity = "study"
+project = "kth"
+host = ["kth.se", "canvas.kth.se", "ladok.se", "overleaf.com"]
+
+[[rule]]
+id = "study.phone-canvas"
+activity = "study"
+project = "kth"
+package = ["com.instructure.candroid"]
+
+# ---------------------------------------------------------------- video
+
+[[rule]]
+id = "video.sites"
+activity = "video"
+host = [
+  "youtube.com", "youtu.be", "netflix.com", "play.hbomax.com", "hbomax.com", "max.com",
+  "disneyplus.com", "primevideo.com", "svtplay.se", "tv4play.se", "twitch.tv",
+  "1shows.bz", "1shows.org", "1shows.cx", "67movies.st", "stellar.gdn", "cineyz.com",
+  "321movies.co.uk", "7reels.cc", "123movieshdtv.net", "bcine.com",
+]
+
+[[rule]]
+id = "video.titles"
+activity = "video"
+class = ["firefox", "zen*", "helium", "google-chrome", "chromium*", "brave-browser"]
+title = "(?i)(- youtube\\b|^youtube\\b|\\bnetflix\\b|hbo max|disney\\+|1shows|67movies|stellar\\b|bcine|watch movies|prime video|svt play|twitch)"
+
+[[rule]]
+id = "video.players"
+activity = "video"
+class = ["mpv", "vlc", "org.videolan.VLC", "celluloid"]
+
+[[rule]]
+id = "video.phone"
+activity = "video"
+package = [
+  "com.google.android.youtube", "com.netflix.mediaclient", "com.wbd.stream",
+  "com.disney.disneyplus", "se.svt.svtplay.android", "se.tv4.tv4playtab",
+  "com.amazon.avod.thirdpartyclient",
+]
+
+# ---------------------------------------------------------------- social
+
+[[rule]]
+id = "social.sites"
+activity = "social"
+host = ["x.com", "twitter.com", "reddit.com", "instagram.com", "tiktok.com", "facebook.com", "linkedin.com", "jodel.com"]
+
+[[rule]]
+id = "social.titles"
+activity = "social"
+class = ["firefox", "zen*", "helium", "google-chrome", "chromium*", "brave-browser"]
+title = "(?i)( / x( —|$)| on x: |home / x|explore / x|\\| linkedin|\\breddit\\b|instagram|tiktok|4chan)"
+
+[[rule]]
+id = "social.phone"
+activity = "social"
+package = [
+  "com.twitter.android", "com.instagram.android", "com.zhiliaoapp.musically",
+  "com.linkedin.android", "com.tellm.android.app", "com.reddit.frontpage",
+  "com.facebook.katana", "com.substack.app", "ai.x.grok", "ai.x.grok.bot",
+]
+
+[[rule]]
+id = "social.grok"
+activity = "social"
+class = ["grok-bot"]
+
+# ---------------------------------------------------------------- comms
+
+[[rule]]
+id = "comms.desktop"
+activity = "comms"
+class = ["webcord", "discord", "vesktop", "thunderbird", "Slack", "signal", "org.telegram.desktop"]
+
+[[rule]]
+id = "comms.titles"
+activity = "comms"
+class = ["firefox", "zen*", "helium", "google-chrome", "chromium*", "brave-browser"]
+title = "(?i)(microsoft teams|\\bmail -|outlook|gmail|whatsapp|messenger|meet –|google meet|discord)"
+
+[[rule]]
+id = "comms.phone"
+activity = "comms"
+package = [
+  "com.snapchat.android", "com.discord", "com.whatsapp", "com.google.android.apps.messaging",
+  "com.google.android.dialer", "com.microsoft.teams", "com.microsoft.office.outlook", "com.Slack", "com.facebook.orca",
+  "com.google.android.gm", "org.thoughtcrime.securesms", "org.telegram.messenger",
+]
+
+# ---------------------------------------------------------------- music
+
+[[rule]]
+id = "music.apps"
+activity = "music"
+class = ["spotify", "Spotify"]
+
+[[rule]]
+id = "music.phone"
+activity = "music"
+package = ["com.spotify.music"]
+
+# ---------------------------------------------------------------- games
+
+[[rule]]
+id = "games.steam"
+activity = "games"
+class = ["steam_app_*", "steam", "KingdomsAndCastles*", "gamescope"]
+
+[[rule]]
+id = "games.browser"
+activity = "games"
+class = ["firefox", "zen*", "helium", "google-chrome", "chromium*"]
+title = "(?i)openfront"
+
+[[rule]]
+id = "games.phone"
+activity = "games"
+package = ["com.fingersoft.hcr2", "br.com.tapps.cowevolution", "com.halfbrick.jetpackjoyride", "com.halfbrick.fruitninja", "com.valvesoftware.android.steam.community"]
+
+# ---------------------------------------------------------------- work
+# Work-specific tools and project names. Which project a T3 Code minute
+# belongs to comes from the focused thread (t3.focus.span), not from here.
+
+[[rule]]
+id = "work.neptune-titles"
+activity = "work"
+project = "neptune"
+title = "(?i)(naiaclaw|naia bot|naia agent|neptune)"
+
+[[rule]]
+id = "work.husk-titles"
+activity = "work"
+project = "husk"
+title = "(?i)\\bhusk\\b"
+
+[[rule]]
+id = "work.coding-desktop"
+activity = "work"
+class = [
+  "com.t3tools.T3Code", "t3code", "kitty", "foot", "Alacritty", "org.wezfurlong.wezterm",
+  "code", "Code", "codium", "dev.zed.Zed", "ai.opencode.desktop", "codex-desktop",
+  "com.anthropic.Claude", "jetbrains-*", "org.wireshark.Wireshark", "GParted",
+  "Vncviewer", "org.remmina.Remmina", "com.obsproject.Studio",
+]
+
+[[rule]]
+id = "work.browser-tools"
+activity = "work"
+class = ["firefox", "zen*", "helium", "google-chrome", "chromium*", "brave-browser", "agent-*"]
+title = "(?i)(t3 code|github|pull requests?|issues? ·|new issue|grafana|claude|chatgpt|openrouter|google (docs|dokument)|brand hub|localhost|sillytavern|time — today)"
+
+[[rule]]
+id = "work.sites"
+activity = "work"
+host = ["github.com", "gitlab.com", "claude.ai", "chatgpt.com", "openrouter.ai", "docs.google.com", "localhost", "duckdns.org"]
+
+[[rule]]
+id = "work.phone"
+activity = "work"
+package = [
+  "com.t3tools.t3code", "com.t3tools.t3code.preview", "com.anthropic.claude",
+  "com.github.android", "com.termux", "com.openai.chatgpt", "com.tailscale.ipn",
+]
+
+[[rule]]
+id = "work.notes"
+activity = "work"
+class = ["md.Obsidian", "md.obsidian.Obsidian", "obsidian"]
+
+[[rule]]
+id = "work.notes-phone"
+activity = "work"
+package = ["md.obsidian"]
+
+# ---------------------------------------------------------------- browsing
+# News and reading: neutral, neither work nor a focus problem by default.
+
+[[rule]]
+id = "browsing.news-titles"
+activity = "browsing"
+class = ["firefox", "zen*", "helium", "google-chrome", "chromium*", "brave-browser"]
+title = "(?i)(dagens nyheter|svenska dagbladet|\\bdn\\b|the economist|aftonbladet|expressen|wikipedia|google maps|hemnet|booli)"
+
+[[rule]]
+id = "browsing.sites"
+activity = "browsing"
+host = ["dn.se", "svd.se", "economist.com", "aftonbladet.se", "expressen.se", "wikipedia.org", "nytimes.com", "hemnet.se", "booli.se"]
+
+[[rule]]
+id = "browsing.phone"
+activity = "browsing"
+package = [
+  "org.mozilla.firefox", "com.android.chrome", "se.dn", "se.svd.start",
+  "com.economist.lamarr", "com.nytimes.android", "se.hemnet.android", "se.booli",
+  "com.google.android.googlequicksearchbox", "se.appcorn.Blocket",
+]
+
+[[rule]]
+id = "other.travel-phone"
+activity = "other"
+package = ["com.google.android.apps.maps", "com.sl.SLBiljetter", "io.voiapp.voi", "se.kintomobility.carsharing", "com.ubercab", "se.parkster.client.android", "se.sj.android", "se.sas.android", "se.arlandaexpress.atrain", "dk.rejsekort.*", "com.eniro.nauticalar"]
+
+# ---------------------------------------------------------------- other
+# Phone housekeeping and system UI: real minutes, not leisure, not work.
+
+[[rule]]
+id = "other.phone-system"
+activity = "other"
+package = [
+  "com.android.systemui", "com.google.android.apps.nexuslauncher", "com.google.android.deskclock",
+  "com.google.android.assistant.hubui", "com.google.android.GoogleCamera", "com.google.android.apps.photos",
+  "com.google.android.calendar", "com.google.assistant.hubui", "com.android.*", "com.google.android.apps.weather",
+  "com.google.android.calculator", "com.android.intentresolver", "com.google.android.apps.nbu.files",
+  "com.google.android.gms", "com.google.android.projection.gearhead", "com.android.htmlviewer",
+  "com.google.android.apps.walletnfcrel", "dev.imranr.obtainium", "com.github.catfriend1.syncthingandroid",
+  "org.kde.kdeconnect_tp", "se.frankling.time", "org.zwanoo.android.speedtest", "app.eduroam.geteduroam",
+]
+
+[[rule]]
+id = "other.phone-errands"
+activity = "other"
+package = [
+  "com.bankid.bus", "se.nordea.mobilebank", "se.bankgirot.swish", "se.avanzabank.androidapplikation",
+  "com.kivra.Kivra", "com.azure.authenticator", "com.lastpass.lpandroid", "com.lastpass.authenticator",
+  "se.aptus.aptushome", "com.ingka.ikea.app", "com.capio.online", "se.sfbio.mobile.android", "se.mecenat.app",
+  "se.axfood.hemkop", "com.bring.sporing.controller", "com.amazon.mShop.android.shopping", "io.instabox.consumer",
+  "com.iboxenconsumerapp", "com.dhl.frt.mittdhl",
+  "com.luma.mobile", "com.airmee.customer", "se.slso.app4us", "se.klart.weatherapp", "dk.rejsekort.rejsebillet",
+  "com.infinity.traffix", "com.microsoft.skydrive", "com.microsoft.office.excel", "com.google.android.apps.docs*",
+]
+
+[[rule]]
+id = "other.desktop-system"
+activity = "other"
+class = [
+  "xdg-desktop-portal-*", "org.pulseaudio.pavucontrol", "nm-applet", "blueman-manager",
+  "gcr-prompter", "org.gnome.gThumb", "org.kde.kdeconnect.app", "mullvad-vpn",
+]
+
+# ---------------------------------------------------------------- fallbacks
+# Last resorts, named as such, so the label says how little it rests on.
+
+[[rule]]
+id = "fallback.browser-tab"
+activity = "browsing"
+class = ["firefox", "zen*", "helium", "google-chrome", "chromium*", "brave-browser"]
+
+[[rule]]
+id = "fallback.google-phone-app"
+activity = "other"
+package = ["com.google.android.*"]
+
+# ---------------------------------------------------------------- projects
+# Named by title or by working directory (T3 threads, terminals).
+
+[[project]]
+name = "neptune"
+title = "(?i)(naiaclaw|naia bot|naia agent|neptune)"
+paths = ["/home/erikf/projects/neptune/", "/home/erikf/projects/work/neptune/"]
+
+[[project]]
+name = "husk"
+title = "(?i)\\bhusk\\b"
+paths = ["/home/erikf/projects/husk/"]
+
+[[project]]
+name = "kth"
+title = "(?i)\\b(IK2218|EP2120|SF1688|DD2440|DA2210|kth)\\b"
+paths = ["/home/erikf/projects/kth/", "/home/erikf/kth/"]
+
+[[project]]
+name = "dotfiles"
+paths = ["/home/erikf/.dotfiles"]
+
+[[project]]
+name = "time"
+paths = ["/home/erikf/projects/personal/time"]
+
+[[project]]
+name = "t3code"
+paths = ["/home/erikf/projects/personal/t3code"]

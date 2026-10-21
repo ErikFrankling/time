@@ -151,6 +151,25 @@ pub struct Pipeline {
     pub accepted: u64,
     pub duplicate: u64,
     pub rejected: u64,
+    pub classifier: ClassifierStatus,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ClassifierStatus {
+    pub every_secs: i64,
+    pub last_run_ms: Option<Millis>,
+    pub next_run_ms: Option<Millis>,
+    /// Minutes queued for (re)labelling, and the oldest of them.
+    pub waiting: u64,
+    pub oldest_waiting_ms: Option<Millis>,
+    pub labelled_total: u64,
+    pub last_24h_minutes: u64,
+    pub last_24h_unknown: u64,
+    /// Labelled, but a device had not reported yet; relabelled when it does.
+    pub last_24h_incomplete: u64,
+    pub rules_version: String,
+    pub rules: usize,
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -233,6 +252,7 @@ pub fn collect(state: &AppState) -> anyhow::Result<Status> {
             accepted: state.counters.records_accepted.load(Relaxed),
             duplicate: state.counters.records_duplicate.load(Relaxed),
             rejected: state.counters.records_rejected.load(Relaxed),
+            classifier: classifier_status(state, now)?,
         },
         system: System {
             version: env!("CARGO_PKG_VERSION"),
@@ -240,6 +260,32 @@ pub fn collect(state: &AppState) -> anyhow::Result<Status> {
             db_bytes: state.store.size_bytes()?,
             started_ms: state.started_ms,
         },
+    })
+}
+
+fn classifier_status(state: &AppState, now: Millis) -> anyhow::Result<ClassifierStatus> {
+    use std::sync::atomic::Ordering::Relaxed;
+    let c = &state.classifier;
+    let (waiting, oldest_waiting_ms) = state.store.dirty_stats()?;
+    let stats = state.store.label_stats(now - 24 * HOUR_MS)?;
+    let at = |v: Millis| (v > 0).then_some(v);
+    Ok(ClassifierStatus {
+        every_secs: c.every_ms / 1000,
+        last_run_ms: at(c.last_run_ms.load(Relaxed)),
+        next_run_ms: at(c.next_run_ms.load(Relaxed)),
+        waiting,
+        oldest_waiting_ms,
+        labelled_total: stats.total,
+        last_24h_minutes: stats.recent,
+        last_24h_unknown: stats.unknown,
+        last_24h_incomplete: stats.incomplete,
+        rules_version: c.rules.version.clone(),
+        rules: c.rules.rules.len(),
+        last_error: c
+            .last_error
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone(),
     })
 }
 
@@ -327,6 +373,26 @@ pub fn metrics(status: &Status) -> String {
             "time_events_ingested_total{{outcome=\"{outcome}\"}} {n}"
         );
     }
+    let c = &status.pipeline.classifier;
+    let _ = writeln!(
+        out,
+        "# HELP time_classifier_waiting_minutes Minutes queued for labelling."
+    );
+    let _ = writeln!(out, "# TYPE time_classifier_waiting_minutes gauge");
+    let _ = writeln!(out, "time_classifier_waiting_minutes {}", c.waiting);
+    if let Some(t) = c.last_run_ms {
+        let _ = writeln!(
+            out,
+            "# TYPE time_classifier_last_run_timestamp_seconds gauge"
+        );
+        let _ = writeln!(
+            out,
+            "time_classifier_last_run_timestamp_seconds {}",
+            t / 1000
+        );
+    }
+    let _ = writeln!(out, "# TYPE time_minutes_unknown_24h gauge");
+    let _ = writeln!(out, "time_minutes_unknown_24h {}", c.last_24h_unknown);
     let _ = writeln!(out, "# TYPE time_db_bytes gauge");
     let _ = writeln!(out, "time_db_bytes {}", status.system.db_bytes);
     out

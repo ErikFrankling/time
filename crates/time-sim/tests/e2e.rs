@@ -212,3 +212,76 @@ fn malformed_batches_are_refused_and_partial_ones_partly_accepted() {
     let body: serde_json::Value = r.json().unwrap();
     assert_eq!(body["partialSuccess"]["rejectedLogRecords"], "1");
 }
+
+#[test]
+fn the_morning_is_labelled_minute_by_minute() {
+    use time_core::label::{Activity, Place};
+    let w = morning();
+    let at = |hhmm: &str| w.scenario.at(hhmm).unwrap();
+    let labels = w.labels(w.scenario.start_ms, w.scenario.end_ms).unwrap();
+    assert_eq!(labels.len(), 120, "every minute labelled");
+    let l = |hhmm: &str| labels.iter().find(|l| l.ts == at(hhmm)).unwrap().clone();
+
+    // Watching YouTube without touching anything: video, not away.
+    let m = l("09:05");
+    assert_eq!(
+        (m.place, m.activity, m.rule.as_str()),
+        (Place::Computer, Some(Activity::Video), "video.sites")
+    );
+    // Typing in T3 Code while X is open on the phone: the typing wins.
+    let m = l("09:45");
+    assert_eq!(
+        (m.place, m.activity),
+        (Place::Computer, Some(Activity::Work))
+    );
+    // Still typing while YouTube plays on the phone: work, with video behind it.
+    let m = l("10:07");
+    assert_eq!(
+        (m.activity, m.background),
+        (Some(Activity::Work), Some(Activity::Video))
+    );
+    // The password manager: counted, never described.
+    assert_eq!(l("10:11").rule, "blocked");
+    // dn.se in Firefox while Zen has HBO Max open: browsing, not video.
+    assert_eq!(l("10:20").activity, Some(Activity::Browsing));
+    // Nobody there.
+    assert_eq!(l("10:45").place, Place::Away);
+    assert!(
+        labels.iter().all(|l| l.complete),
+        "every device reported past every minute"
+    );
+
+    let s = w.status().unwrap();
+    let c = &s["pipeline"]["classifier"];
+    assert_eq!(c["waiting"], 0);
+    assert_eq!(c["labelled_total"], 120);
+    assert_eq!(c["last_24h_unknown"], 0);
+}
+
+#[test]
+fn a_late_phone_sync_relabels_minutes_already_labelled() {
+    use time_core::label::{Activity, Place};
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("scenarios/morning.toml");
+    let mut w = World::load(&path).unwrap();
+    let start = w.scenario.start_ms;
+    let at = |hhmm: &str| w.scenario.at(hhmm).unwrap();
+    let (t1005, t1035) = (at("10:05"), at("10:35"));
+    // Run up to 10:35 with the phone offline since 10:00, and label now.
+    for t in (start..t1035).step_by(MINUTE_MS as usize) {
+        w.step(t).unwrap();
+    }
+    w.classify().unwrap();
+    let before = w.labels(t1005, t1005 + MINUTE_MS).unwrap().remove(0);
+    assert!(!before.complete, "the phone has not reported 10:05 yet");
+    // The phone comes back at 10:40 and syncs; the minute is relabelled.
+    for t in (t1035..w.scenario.end_ms).step_by(MINUTE_MS as usize) {
+        w.step(t).unwrap();
+    }
+    w.classify().unwrap();
+    let after = w.labels(t1005, t1005 + MINUTE_MS).unwrap().remove(0);
+    assert!(after.complete);
+    assert_eq!(
+        (after.place, after.background),
+        (Place::Computer, Some(Activity::Video))
+    );
+}

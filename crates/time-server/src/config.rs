@@ -20,6 +20,12 @@ pub struct Config {
     /// "off" in words, never as merely quiet.
     #[serde(default)]
     pub channels_off: Vec<String>,
+    /// A rules file; the rules shipped with Time when absent.
+    #[serde(default)]
+    pub rules: Option<PathBuf>,
+    /// Seconds between classifier passes.
+    #[serde(default = "default_classify_every")]
+    pub classify_every_secs: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, serde::Serialize)]
@@ -34,6 +40,10 @@ pub enum DeviceKind {
 #[serde(deny_unknown_fields)]
 pub struct DeviceConfig {
     pub kind: DeviceKind,
+}
+
+fn default_classify_every() -> u64 {
+    10
 }
 
 fn default_listen() -> String {

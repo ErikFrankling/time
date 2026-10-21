@@ -4,8 +4,10 @@
 //! typed events, deduplicated by `event.id`. Nothing derived (minutes,
 //! reports, the status screen) is ever the only copy of a fact.
 
+pub mod classify;
 pub mod config;
 pub mod http;
+pub mod import_v1;
 pub mod status;
 pub mod store;
 
@@ -14,6 +16,7 @@ use std::sync::Arc;
 
 use time_core::clock::{Clock, Millis};
 
+pub use classify::Classifier;
 pub use config::Config;
 pub use store::Store;
 
@@ -22,6 +25,7 @@ pub struct AppState {
     pub config: Config,
     pub store: Store,
     pub clock: Arc<dyn Clock>,
+    pub classifier: Classifier,
     pub started_ms: Millis,
     pub counters: Counters,
 }
@@ -36,20 +40,31 @@ pub struct Counters {
 }
 
 impl AppState {
-    pub fn new(config: Config, store: Store, clock: Arc<dyn Clock>) -> Arc<Self> {
+    /// Load the rules and, if they changed since the stored labels were
+    /// made, queue all of history for relabelling.
+    pub fn new(config: Config, store: Store, clock: Arc<dyn Clock>) -> anyhow::Result<Arc<Self>> {
+        let classifier = Classifier::from_config(&config)?;
+        if let Some(n) = classifier.requeue_if_rules_changed(&store)? {
+            eprintln!(
+                "classifier: rules are new ({}), {n} minute(s) queued",
+                classifier.rules.version
+            );
+        }
         let started_ms = clock.now_ms();
-        Arc::new(Self {
+        Ok(Arc::new(Self {
             config,
             store,
             clock,
+            classifier,
             started_ms,
             counters: Counters::default(),
-        })
+        }))
     }
 }
 
 /// Serve on an already-bound listener until the future is dropped. Tests bind
-/// port 0 and read the address back; `main` binds the configured port.
+/// port 0 and read the address back; `main` binds the configured port and
+/// also starts [`classify::run_forever`].
 pub async fn serve(listener: tokio::net::TcpListener, state: Arc<AppState>) -> anyhow::Result<()> {
     axum::serve(listener, http::router(state)).await?;
     Ok(())

@@ -136,10 +136,12 @@ impl World {
             listen: "127.0.0.1:0".into(),
             devices,
             channels_off: vec![],
+            rules: None,
+            classify_every_secs: 10,
         };
         std::fs::create_dir_all(&config.data_dir)?;
         let store = Store::open(&config.data_dir.join("time.db"))?;
-        let state = AppState::new(config, store, Arc::new(clock.clone()));
+        let state = AppState::new(config, store, Arc::new(clock.clone()))?;
 
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -213,7 +215,30 @@ impl World {
         for t in minutes {
             self.step(t)?;
         }
-        self.finish()
+        self.finish()?;
+        self.classify()?;
+        Ok(())
+    }
+
+    /// Run the server's classifier until nothing is queued, as its
+    /// background loop would.
+    pub fn classify(&self) -> Result<usize> {
+        let mut total = 0;
+        loop {
+            let n = self
+                .state
+                .classifier
+                .run_once(&self.state.store, self.clock.now_ms())?;
+            total += n;
+            if n < time_server::classify::PASS_LIMIT {
+                return Ok(total);
+            }
+        }
+    }
+
+    /// The labels the server holds for `[from, to)`.
+    pub fn labels(&self, from: Millis, to: Millis) -> Result<Vec<time_core::label::MinuteLabel>> {
+        self.state.store.labels_between(from, to)
     }
 
     /// Simulate the minute starting at `t`.

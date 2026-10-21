@@ -1,0 +1,428 @@
+//! The rule table: deterministic, typed, explainable classification.
+//!
+//! A rule names an activity and the facts that imply it. Conditions within
+//! a rule must all hold; the patterns listed for one condition are
+//! alternatives. The first rule that matches wins, and its id is stored with
+//! the label so any minute can be traced to the line that decided it.
+//!
+//! ```toml
+//! [[rule]]
+//! id = "video.youtube"
+//! activity = "video"
+//! host = ["youtube.com", "youtu.be"]     # also matches subdomains
+//!
+//! [[rule]]
+//! id = "games.steam"
+//! activity = "games"
+//! class = ["steam_app_*"]                # `*` wildcards, case-insensitive
+//!
+//! [[project]]
+//! name = "husk"
+//! title = "(?i)\\bhusk\\b"               # a regex over the window title
+//! paths = ["/home/erikf/projects/husk/"] # working directories (T3, terminals)
+//! ```
+
+use regex::Regex;
+use serde::Deserialize;
+
+use crate::label::Activity;
+
+/// Which kind of device produced the facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Source {
+    Desktop,
+    Phone,
+}
+
+/// What is known about one device in one minute, as rules see it.
+#[derive(Debug, Clone, Default)]
+pub struct Facts<'a> {
+    pub source: Option<Source>,
+    pub class: &'a str,
+    pub title: &'a str,
+    pub host: Option<&'a str>,
+    pub package: Option<&'a str>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRules {
+    #[serde(default, rename = "rule")]
+    rules: Vec<RawRule>,
+    #[serde(default, rename = "project")]
+    projects: Vec<RawProject>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRule {
+    id: String,
+    activity: String,
+    #[serde(default)]
+    project: Option<String>,
+    #[serde(default)]
+    source: Option<Source>,
+    #[serde(default)]
+    class: Vec<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    host: Vec<String>,
+    #[serde(default)]
+    package: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawProject {
+    name: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    paths: Vec<String>,
+}
+
+#[derive(Debug)]
+pub struct Rule {
+    pub id: String,
+    pub activity: Activity,
+    pub project: Option<String>,
+    source: Option<Source>,
+    class: Vec<Glob>,
+    title: Option<Regex>,
+    host: Vec<String>,
+    package: Vec<Glob>,
+}
+
+#[derive(Debug)]
+pub struct Project {
+    pub name: String,
+    title: Option<Regex>,
+    paths: Vec<String>,
+}
+
+#[derive(Debug)]
+pub struct RuleSet {
+    pub rules: Vec<Rule>,
+    pub projects: Vec<Project>,
+    /// Changes whenever the file's content does, so stored labels can be
+    /// recomputed when the rules they came from are edited.
+    pub version: String,
+}
+
+/// The decision a rule made.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Match<'r> {
+    pub rule: &'r str,
+    pub activity: Activity,
+    pub project: Option<&'r str>,
+}
+
+impl RuleSet {
+    pub fn parse(text: &str) -> anyhow::Result<Self> {
+        let raw: RawRules = toml::from_str(text)?;
+        let mut rules = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for r in raw.rules {
+            if !seen.insert(r.id.clone()) {
+                anyhow::bail!("rule id {:?} is used twice", r.id);
+            }
+            let activity: Activity = r
+                .activity
+                .parse()
+                .map_err(|e| anyhow::anyhow!("rule {:?}: {e}", r.id))?;
+            if r.class.is_empty() && r.title.is_none() && r.host.is_empty() && r.package.is_empty()
+            {
+                anyhow::bail!(
+                    "rule {:?} has no conditions and would match everything",
+                    r.id
+                );
+            }
+            let title = r
+                .title
+                .as_deref()
+                .map(Regex::new)
+                .transpose()
+                .map_err(|e| anyhow::anyhow!("rule {:?}: title regex: {e}", r.id))?;
+            rules.push(Rule {
+                id: r.id,
+                activity,
+                project: r.project,
+                source: r.source,
+                class: r.class.iter().map(|p| Glob::new(p)).collect(),
+                title,
+                host: r.host.iter().map(|h| h.to_ascii_lowercase()).collect(),
+                package: r.package.iter().map(|p| Glob::new(p)).collect(),
+            });
+        }
+        let mut projects = Vec::new();
+        for p in raw.projects {
+            let title = p
+                .title
+                .as_deref()
+                .map(Regex::new)
+                .transpose()
+                .map_err(|e| anyhow::anyhow!("project {:?}: title regex: {e}", p.name))?;
+            projects.push(Project {
+                name: p.name,
+                title,
+                paths: p.paths,
+            });
+        }
+        Ok(Self {
+            rules,
+            projects,
+            version: format!("{:016x}", fnv1a(text.as_bytes())),
+        })
+    }
+
+    /// The first rule that matches, if any.
+    pub fn classify(&self, f: &Facts) -> Option<Match<'_>> {
+        self.rules.iter().find(|r| r.matches(f)).map(|r| Match {
+            rule: &r.id,
+            activity: r.activity,
+            project: r.project.as_deref(),
+        })
+    }
+
+    /// A project named by the window title.
+    pub fn project_for_title(&self, title: &str) -> Option<&str> {
+        self.projects
+            .iter()
+            .find(|p| p.title.as_ref().is_some_and(|re| re.is_match(title)))
+            .map(|p| p.name.as_str())
+    }
+
+    /// A project owning a working directory (longest prefix wins).
+    pub fn project_for_path(&self, path: &str) -> Option<&str> {
+        self.projects
+            .iter()
+            .flat_map(|p| p.paths.iter().map(move |prefix| (prefix, p)))
+            .filter(|(prefix, _)| path.starts_with(prefix.as_str()))
+            .max_by_key(|(prefix, _)| prefix.len())
+            .map(|(_, p)| p.name.as_str())
+    }
+}
+
+impl Rule {
+    fn matches(&self, f: &Facts) -> bool {
+        if self.source.is_some() && self.source != f.source {
+            return false;
+        }
+        if !self.class.is_empty() && !self.class.iter().any(|g| g.matches(f.class)) {
+            return false;
+        }
+        if let Some(re) = &self.title {
+            if !re.is_match(f.title) {
+                return false;
+            }
+        }
+        if !self.host.is_empty() {
+            let Some(host) = f.host else { return false };
+            let host = host.to_ascii_lowercase();
+            let host = host.strip_prefix("www.").unwrap_or(&host);
+            if !self
+                .host
+                .iter()
+                .any(|h| host == h || host.ends_with(&format!(".{h}")))
+            {
+                return false;
+            }
+        }
+        if !self.package.is_empty() {
+            let Some(pkg) = f.package else { return false };
+            if !self.package.iter().any(|g| g.matches(pkg)) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// Case-insensitive `*` wildcard pattern.
+#[derive(Debug)]
+struct Glob(Vec<String>);
+
+impl Glob {
+    fn new(p: &str) -> Self {
+        Glob(p.to_lowercase().split('*').map(str::to_owned).collect())
+    }
+
+    fn matches(&self, s: &str) -> bool {
+        let s = s.to_lowercase();
+        let parts = &self.0;
+        if parts.len() == 1 {
+            return s == parts[0];
+        }
+        let (first, last) = (&parts[0], &parts[parts.len() - 1]);
+        if !s.starts_with(first.as_str()) || !s[first.len()..].ends_with(last.as_str()) {
+            return false;
+        }
+        let mut rest = &s[first.len()..s.len() - last.len()];
+        for mid in &parts[1..parts.len() - 1] {
+            match rest.find(mid.as_str()) {
+                Some(i) => rest = &rest[i + mid.len()..],
+                None => return false,
+            }
+        }
+        true
+    }
+}
+
+/// A stable hash (unlike `DefaultHasher`, which may change between Rust releases).
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    h
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RULES: &str = r#"
+        [[rule]]
+        id = "video.youtube"
+        activity = "video"
+        host = ["youtube.com"]
+
+        [[rule]]
+        id = "phone.x"
+        activity = "social"
+        source = "phone"
+        package = ["com.twitter.android"]
+
+        [[rule]]
+        id = "games.steam"
+        activity = "games"
+        class = ["steam_app_*"]
+
+        [[rule]]
+        id = "work.t3"
+        activity = "work"
+        class = ["com.t3tools.T3Code"]
+
+        [[rule]]
+        id = "video.netflix-title"
+        activity = "video"
+        class = ["firefox", "zen*"]
+        title = "(?i)netflix|hbo max"
+
+        [[project]]
+        name = "husk"
+        title = "(?i)\\bhusk\\b"
+        paths = ["/home/erikf/projects/husk/"]
+
+        [[project]]
+        name = "husk-web"
+        paths = ["/home/erikf/projects/husk/web/"]
+    "#;
+
+    fn set() -> RuleSet {
+        RuleSet::parse(RULES).unwrap()
+    }
+
+    #[test]
+    fn first_match_wins_and_names_itself() {
+        let s = set();
+        let m = s
+            .classify(&Facts {
+                class: "firefox",
+                host: Some("m.youtube.com"),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!((m.rule, m.activity), ("video.youtube", Activity::Video));
+        assert!(s
+            .classify(&Facts {
+                class: "firefox",
+                host: Some("notyoutube.com"),
+                ..Default::default()
+            })
+            .is_none());
+        let m = s
+            .classify(&Facts {
+                class: "zen-beta",
+                title: "Angel Has Fallen • HBO Max — Zen",
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(m.rule, "video.netflix-title");
+    }
+
+    #[test]
+    fn source_and_package_conditions() {
+        let s = set();
+        let phone = Facts {
+            source: Some(Source::Phone),
+            package: Some("com.twitter.android"),
+            ..Default::default()
+        };
+        assert_eq!(s.classify(&phone).unwrap().activity, Activity::Social);
+        let desktop = Facts {
+            source: Some(Source::Desktop),
+            ..phone
+        };
+        assert!(s.classify(&desktop).is_none());
+    }
+
+    #[test]
+    fn globs() {
+        assert!(Glob::new("steam_app_*").matches("steam_app_410900"));
+        assert!(Glob::new("*Castles*").matches("KingdomsAndCastles.x86_64"));
+        assert!(!Glob::new("steam_app_*").matches("steam"));
+        assert!(Glob::new("a*b*c").matches("aXbYc"));
+        assert!(!Glob::new("a*b*c").matches("acb"));
+    }
+
+    #[test]
+    fn projects_by_title_and_longest_path() {
+        let s = set();
+        assert_eq!(s.project_for_title("Husk sprint planning"), Some("husk"));
+        assert_eq!(s.project_for_title("husky dogs"), None);
+        assert_eq!(
+            s.project_for_path("/home/erikf/projects/husk/web/src"),
+            Some("husk-web")
+        );
+        assert_eq!(
+            s.project_for_path("/home/erikf/projects/husk/api"),
+            Some("husk")
+        );
+    }
+
+    #[test]
+    fn mistakes_are_errors_at_load() {
+        assert!(
+            RuleSet::parse("[[rule]]\nid='a'\nactivity='twitter'\nclass=['x']").is_err(),
+            "unknown activity"
+        );
+        assert!(
+            RuleSet::parse("[[rule]]\nid='a'\nactivity='work'").is_err(),
+            "no conditions"
+        );
+        assert!(RuleSet::parse("[[rule]]\nid='a'\nactivity='work'\nclass=['x']\n[[rule]]\nid='a'\nactivity='work'\nclass=['y']").is_err(), "dup id");
+        assert!(
+            RuleSet::parse("[[rule]]\nid='a'\nactivity='work'\ntitle='('").is_err(),
+            "bad regex"
+        );
+        assert!(
+            RuleSet::parse("[[rule]]\nid='a'\nactivity='work'\nklass=['x']").is_err(),
+            "typo"
+        );
+    }
+
+    #[test]
+    fn version_tracks_content() {
+        assert_eq!(set().version, set().version);
+        assert_ne!(
+            set().version,
+            RuleSet::parse(&RULES.replace("video.youtube", "video.yt"))
+                .unwrap()
+                .version
+        );
+    }
+}
