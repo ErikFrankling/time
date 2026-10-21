@@ -282,7 +282,7 @@ fn classifier_status(state: &AppState, now: Millis) -> anyhow::Result<Classifier
         last_24h_minutes: stats.recent,
         last_24h_unknown: stats.unknown,
         last_24h_incomplete: stats.incomplete,
-        rules_version: c.rules.version.clone(),
+        rules_version: c.version.clone(),
         rules: c.rules.rules.len(),
         last_error: c
             .last_error

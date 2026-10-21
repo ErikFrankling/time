@@ -23,6 +23,11 @@ use crate::event::{Envelope, Event, Origin, ScreenMinute};
 use crate::label::{Activity, Decider, MinuteLabel, Place};
 use crate::rules::{Facts, RuleSet, Source};
 
+/// Bump whenever a change here can change a label. Stored labels carry it,
+/// and the server relabels all history when it differs, exactly as it does
+/// when the rules file changes.
+pub const LOGIC_VERSION: u32 = 2;
+
 /// Input this recent at the end of a minute means someone was there.
 const RECENT_INPUT_SECS: u32 = 90;
 /// A phone app must hold the foreground this long to own a minute.

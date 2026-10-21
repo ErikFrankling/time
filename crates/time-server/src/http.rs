@@ -26,10 +26,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/metrics", get(metrics))
         .route("/api/status", get(api_status))
         .route("/status", get(status_html))
-        .route(
-            "/",
-            get(|| async { axum::response::Redirect::temporary("/status") }),
-        )
+        .route("/", get(today_html))
+        .route("/day/{date}", get(day_html))
+        .route("/api/day/{date}", get(day_json))
         .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY))
         .with_state(state)
 }
@@ -177,6 +176,61 @@ async fn status_html(State(state): State<Arc<AppState>>) -> Response {
     let tz = state.tz;
     match collect(state).await {
         Ok(s) => axum::response::Html(crate::web::status_page(&s, tz)).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn load_day(
+    state: Arc<AppState>,
+    date: Option<String>,
+) -> Result<(crate::day::Day, bool), (StatusCode, String)> {
+    let today = crate::day::today(state.tz, state.clock.now_ms());
+    let date = match date {
+        None => today,
+        Some(d) => d.parse().map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("not a date: {d:?} (use YYYY-MM-DD)"),
+            )
+        })?,
+    };
+    let tz = state.tz;
+    let day = tokio::task::spawn_blocking(move || crate::day::summarise(&state.store, tz, date))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
+    Ok((day, date == today))
+}
+
+async fn today_html(State(state): State<Arc<AppState>>) -> Response {
+    let tz = state.tz;
+    match load_day(state, None).await {
+        Ok((day, is_today)) => {
+            axum::response::Html(crate::web::day_page(&day, tz, is_today)).into_response()
+        }
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn day_html(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(date): axum::extract::Path<String>,
+) -> Response {
+    let tz = state.tz;
+    match load_day(state, Some(date)).await {
+        Ok((day, is_today)) => {
+            axum::response::Html(crate::web::day_page(&day, tz, is_today)).into_response()
+        }
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn day_json(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(date): axum::extract::Path<String>,
+) -> Response {
+    match load_day(state, Some(date)).await {
+        Ok((day, _)) => Json(day).into_response(),
         Err(e) => e.into_response(),
     }
 }

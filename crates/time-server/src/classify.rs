@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use time_core::clock::{Millis, MINUTE_MS};
 use time_core::rules::{RuleSet, Source};
-use time_core::timeline::{label_minutes, DeviceSpec};
+use time_core::timeline::{label_minutes, DeviceSpec, LOGIC_VERSION};
 
 use crate::config::{Config, DeviceKind};
 use crate::store::Store;
@@ -32,6 +32,8 @@ const LOOKBACK_MS: Millis = 10 * MINUTE_MS;
 
 pub struct Classifier {
     pub rules: RuleSet,
+    /// Rules file version plus the labelling logic version.
+    pub version: String,
     pub devices: Vec<DeviceSpec>,
     pub every_ms: Millis,
     pub last_run_ms: AtomicI64,
@@ -60,6 +62,7 @@ impl Classifier {
             })
             .collect();
         Ok(Self {
+            version: format!("{}.{LOGIC_VERSION}", rules.version),
             rules,
             devices,
             every_ms: (config.classify_every_secs.max(1) * 1000) as Millis,
@@ -73,11 +76,11 @@ impl Classifier {
     /// When the rules differ from the ones the stored labels came from,
     /// queue all of history: labels always reflect the current rules.
     pub fn requeue_if_rules_changed(&self, store: &Store) -> Result<Option<u64>> {
-        if store.meta("rules_version")?.as_deref() == Some(self.rules.version.as_str()) {
+        if store.meta("rules_version")?.as_deref() == Some(self.version.as_str()) {
             return Ok(None);
         }
         let n = store.mark_all_dirty()?;
-        store.set_meta("rules_version", &self.rules.version)?;
+        store.set_meta("rules_version", &self.version)?;
         Ok(Some(n))
     }
 
@@ -104,7 +107,7 @@ impl Classifier {
             .into_iter()
             .filter(|l| todo.contains(&l.ts))
             .collect();
-            store.write_labels(&labels, &self.rules.version, now)?;
+            store.write_labels(&labels, &self.version, now)?;
             labelled += labels.len();
         }
         Ok(labelled)

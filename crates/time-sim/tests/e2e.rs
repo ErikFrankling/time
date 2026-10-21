@@ -322,3 +322,40 @@ fn a_silent_device_is_named_on_the_status_page() {
     );
     assert!(html.contains("Offline"));
 }
+
+#[test]
+fn the_day_page_and_api_show_the_morning() {
+    let w = morning();
+    let (code, json) = w.get("/api/day/2026-10-21").unwrap();
+    assert_eq!(code, 200, "{json}");
+    let day: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(day["steps"], 3000);
+    let total = |name: &str| {
+        day["activities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["activity"] == name)
+            .map(|a| a["computer"].as_u64().unwrap() + a["phone"].as_u64().unwrap())
+            .unwrap_or(0)
+    };
+    // 09:00-09:40 YouTube on the pc, and 10:12-10:15 on the phone while the
+    // pc only had mouse movement.
+    assert_eq!(total("video"), 43);
+    // 09:40-10:10 typing in T3 Code beats the phone.
+    assert_eq!(total("work"), 30);
+
+    let (code, html) = w.get("/day/2026-10-21").unwrap();
+    assert_eq!(code, 200);
+    for needle in [
+        "Wednesday 21 October",
+        "Hour by hour",
+        "Where the time went",
+        "3\u{2009}000",
+        "steps · 2.1 km",
+        "09:00–09:40 · video on the computer · video.sites",
+    ] {
+        assert!(html.contains(needle), "day page lacks {needle:?}");
+    }
+    assert_eq!(w.get("/day/yesterday").unwrap().0, 400);
+}

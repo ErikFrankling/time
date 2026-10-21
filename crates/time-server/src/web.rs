@@ -81,6 +81,16 @@ footer { color:var(--muted); font-size:.8rem; text-align:center; padding:0 1rem 
 "#;
 
 pub fn page(title: &str, here: &str, refresh_secs: Option<u32>, body: &str) -> String {
+    page_with(title, here, refresh_secs, "", body)
+}
+
+pub fn page_with(
+    title: &str,
+    here: &str,
+    refresh_secs: Option<u32>,
+    extra_style: &str,
+    body: &str,
+) -> String {
     let refresh = refresh_secs
         .map(|s| format!(r#"<meta http-equiv="refresh" content="{s}">"#))
         .unwrap_or_default();
@@ -96,7 +106,7 @@ pub fn page(title: &str, here: &str, refresh_secs: Option<u32>, body: &str) -> S
         })
         .collect::<String>();
     format!(
-        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">{refresh}<title>{t}</title><style>{STYLE}</style></head><body><header><h1>Time</h1>{nav}</header><main>{body}</main></body></html>"#,
+        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">{refresh}<title>{t}</title><style>{STYLE}{extra_style}</style></head><body><header><h1>Time</h1>{nav}</header><main>{body}</main></body></html>"#,
         t = esc(title),
     )
 }
@@ -264,6 +274,267 @@ pub fn status_page(s: &Status, tz: chrono_tz::Tz) -> String {
     );
 
     page("Time · Status", "/status", Some(30), &body)
+}
+
+/// Activity colours: the validated categorical palette in a fixed order,
+/// one hue per activity forever. `other` and `unknown` are neutral greys;
+/// away is the empty surface.
+const ACTIVITY_STYLE: &str = r#"
+.a-work{--c:#2a78d6} .a-social{--c:#eb6834} .a-study{--c:#1baf7a} .a-video{--c:#eda100}
+.a-comms{--c:#e87ba4} .a-browsing{--c:#008300} .a-music{--c:#6250d6} .a-games{--c:#e34948}
+.a-other{--c:#8f8e88} .a-unknown{--c:#c9c8c2}
+@media (prefers-color-scheme: dark) {
+ .a-work{--c:#3987e5} .a-social{--c:#d95926} .a-study{--c:#199e70} .a-video{--c:#c98500}
+ .a-comms{--c:#d55181} .a-browsing{--c:#008300} .a-music{--c:#9085e9} .a-games{--c:#e66767}
+ .a-other{--c:#7d7c76} .a-unknown{--c:#4a4a46} }
+.sw { display:inline-block; width:.75rem; height:.75rem; border-radius:3px; background-color:var(--c); vertical-align:-.1rem; }
+.ph, .strip > span.ph, .tot .bar > span.ph { background-image: repeating-linear-gradient(45deg, transparent 0 3px, var(--card) 3px 5px); }
+.stats { display:grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap:.8rem; }
+.stat .v { font-size:1.35rem; font-weight:650; font-variant-numeric: tabular-nums; }
+.stat .k { color:var(--muted); font-size:.85rem; }
+.daynav { display:flex; justify-content:space-between; align-items:baseline; }
+.daynav a { color:var(--muted); text-decoration:none; }
+.hours { display:grid; gap:3px; }
+.hour { display:grid; grid-template-columns: 1.6rem minmax(0,1fr); gap:.4rem; align-items:center; }
+.hour .h { color:var(--muted); font-size:.75rem; font-variant-numeric: tabular-nums; }
+.strip { display:flex; gap:1px; height:14px; background:var(--line); border-radius:4px; overflow:hidden; }
+.strip > span { min-width:0; background-color:var(--c, var(--bg)); }
+.strip > span.empty { background-color:var(--bg); }
+.legend { display:flex; flex-wrap:wrap; gap:.3rem .9rem; font-size:.85rem; color:var(--muted); margin-top:.7rem; }
+.tot { display:grid; grid-template-columns: 6.5rem minmax(0,1fr) max-content; gap:.6rem; align-items:center; padding:.3rem 0; }
+.tot .bar { display:flex; gap:2px; height:12px; }
+.tot .bar > span { background-color:var(--c); border-radius:0 4px 4px 0; }
+.tot .bar > span:first-child:not(:last-child) { border-radius:0; }
+.tot .n { text-align:right; font-variant-numeric: tabular-nums; font-size:.9rem; white-space:nowrap; }
+.steps { display:flex; align-items:flex-end; gap:2px; height:56px; }
+.steps > span { flex:1; background:#2a78d6; border-radius:3px 3px 0 0; min-height:1px; }
+@media (prefers-color-scheme: dark) { .steps > span { background:#3987e5; } }
+.axis { display:flex; justify-content:space-between; color:var(--muted); font-size:.75rem; margin-top:.2rem; }
+"#;
+
+pub fn duration(minutes: u32) -> String {
+    match (minutes / 60, minutes % 60) {
+        (0, m) => format!("{m} min"),
+        (h, 0) => format!("{h} h"),
+        (h, m) => format!("{h} h {m} min"),
+    }
+}
+
+/// The day view.
+pub fn day_page(day: &crate::day::Day, tz: chrono_tz::Tz, is_today: bool) -> String {
+    use std::collections::HashMap;
+    use time_core::label::{Activity, Place};
+
+    let mut body = String::new();
+    let prev = day
+        .date
+        .pred_opt()
+        .map(|d| format!(r#"<a href="/day/{d}">‹ {}</a>"#, d.format("%a %d")))
+        .unwrap_or_default();
+    let next = if is_today {
+        String::new()
+    } else {
+        day.date
+            .succ_opt()
+            .map(|d| format!(r#"<a href="/day/{d}">{} ›</a>"#, d.format("%a %d")))
+            .unwrap_or_default()
+    };
+    let _ = write!(
+        body,
+        r#"<section><div class="daynav">{prev}<strong>{}{}</strong><span>{next}</span></div></section>"#,
+        if is_today { "Today, " } else { "" },
+        day.date.format("%A %d %B"),
+    );
+
+    // Headline numbers.
+    let work = day
+        .activities
+        .iter()
+        .filter(|a| a.activity.is_productive())
+        .map(|a| a.total())
+        .sum::<u32>();
+    let _ = write!(
+        body,
+        r#"<section class="stats">
+<div class="stat"><div class="v">{}</div><div class="k">at the computer</div></div>
+<div class="stat"><div class="v">{}</div><div class="k">on the phone</div></div>
+<div class="stat"><div class="v">{}</div><div class="k">work and study</div></div>
+<div class="stat"><div class="v">{}</div><div class="k">steps · {:.1} km</div></div>
+</section>"#,
+        duration(day.computer_minutes),
+        duration(day.phone_minutes),
+        duration(work),
+        group_thousands(day.steps),
+        day.distance_m / 1000.0,
+    );
+
+    // Hour strips.
+    let by_ts: HashMap<Millis, &time_core::label::MinuteLabel> =
+        day.minutes.iter().map(|m| (m.ts, m)).collect();
+    let hours = ((day.end_ms - day.start_ms) / 3_600_000) as usize;
+    let _ = write!(body, r#"<section><h2>Hour by hour</h2><div class="hours">"#);
+    for h in 0..hours {
+        let hour_start = day.start_ms + h as i64 * 3_600_000;
+        let local_hour = tz
+            .timestamp_millis_opt(hour_start)
+            .single()
+            .map(|t| t.format("%H").to_string())
+            .unwrap_or_default();
+        // Runs of identical (activity, place) minutes.
+        // (activity, place, length, first minute, rule)
+        type Run<'a> = (Option<Activity>, Place, usize, Millis, Option<&'a str>);
+        let mut runs: Vec<Run> = Vec::new();
+        for i in 0..60 {
+            let ts = hour_start + i * 60_000;
+            let (a, p, rule) = match by_ts.get(&ts) {
+                Some(m) if m.place != Place::Away => (m.activity, m.place, Some(m.rule.as_str())),
+                _ => (None, Place::Away, None),
+            };
+            match runs.last_mut() {
+                Some(r) if r.0 == a && r.1 == p => r.2 += 1,
+                _ => runs.push((a, p, 1, ts, rule)),
+            }
+        }
+        let strip: String = runs
+            .iter()
+            .map(|(a, p, n, ts, rule)| match a {
+                None => format!(r#"<span class="empty" style="flex:{n}"></span>"#),
+                Some(a) => {
+                    let ph = if *p == Place::Phone { " ph" } else { "" };
+                    let from = clock_hm(tz, *ts);
+                    let to = clock_hm(tz, ts + *n as i64 * 60_000);
+                    let place = if *p == Place::Phone { "phone" } else { "computer" };
+                    format!(
+                        r#"<span class="a-{a}{ph}" style="flex:{n}" title="{from}–{to} · {a} on the {place} · {}"></span>"#,
+                        esc(rule.unwrap_or(""))
+                    )
+                }
+            })
+            .collect();
+        let _ = write!(
+            body,
+            r#"<div class="hour"><span class="h">{local_hour}</span><div class="strip">{strip}</div></div>"#
+        );
+    }
+    body.push_str(r#"</div><div class="legend">"#);
+    for a in Activity::ALL {
+        let _ = write!(body, r#"<span><span class="sw a-{a}"></span> {a}</span>"#);
+    }
+    body.push_str(r#"<span><span class="sw a-other ph"></span> striped = on the phone</span></div></section>"#);
+
+    // Totals by activity.
+    let max = day
+        .activities
+        .iter()
+        .map(|a| a.total())
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let _ = write!(body, r#"<section><h2>Where the time went</h2>"#);
+    for t in &day.activities {
+        let w = |n: u32| 100.0 * f64::from(n) / f64::from(max);
+        let mut bar = String::new();
+        if t.computer > 0 {
+            let _ = write!(
+                bar,
+                r#"<span class="a-{}" style="width:{:.1}%" title="{} at the computer"></span>"#,
+                t.activity,
+                w(t.computer),
+                duration(t.computer)
+            );
+        }
+        if t.phone > 0 {
+            let _ = write!(
+                bar,
+                r#"<span class="a-{} ph" style="width:{:.1}%" title="{} on the phone"></span>"#,
+                t.activity,
+                w(t.phone),
+                duration(t.phone)
+            );
+        }
+        let _ = write!(
+            body,
+            r#"<div class="tot"><span><span class="sw a-{a}"></span> {a}</span><div class="bar">{bar}</div><span class="n">{}</span></div>"#,
+            duration(t.total()),
+            a = t.activity,
+        );
+    }
+    if day.activities.is_empty() {
+        body.push_str(r#"<div class="sub">Nothing recorded for this day.</div>"#);
+    }
+    if day.background_minutes > 0 {
+        let _ = write!(
+            body,
+            r#"<div class="sub">Plus {} with something playing on another device.</div>"#,
+            duration(day.background_minutes)
+        );
+    }
+    if day.unknown_minutes > 0 {
+        let _ = write!(
+            body,
+            r#"<div class="sub">{} unknown: no rule matched.</div>"#,
+            duration(day.unknown_minutes)
+        );
+    }
+    body.push_str("</section>");
+
+    // Projects.
+    if !day.projects.is_empty() {
+        let _ = write!(body, r#"<section><h2>Projects</h2><dl>"#);
+        for (p, n) in &day.projects {
+            let _ = write!(body, "<dt>{}</dt><dd>{}</dd>", esc(p), duration(*n));
+        }
+        body.push_str("</dl></section>");
+    }
+
+    // Steps.
+    if day.steps > 0 {
+        let max = day.steps_by_hour.iter().copied().max().unwrap_or(1).max(1);
+        let bars: String = day
+            .steps_by_hour
+            .iter()
+            .enumerate()
+            .map(|(h, s)| {
+                format!(
+                    r#"<span style="height:{:.0}%" title="{h:02}:00 · {} steps"></span>"#,
+                    100.0 * f64::from(*s) / f64::from(max),
+                    group_thousands(*s)
+                )
+            })
+            .collect();
+        let _ = write!(
+            body,
+            r#"<section><h2>Steps by hour</h2><div class="steps">{bars}</div><div class="axis"><span>00</span><span>06</span><span>12</span><span>18</span><span>24</span></div></section>"#
+        );
+    }
+
+    let title = format!("Time · {}", day.date);
+    page_with(
+        &title,
+        "/",
+        if is_today { Some(60) } else { None },
+        ACTIVITY_STYLE,
+        &body,
+    )
+}
+
+fn clock_hm(tz: chrono_tz::Tz, t: Millis) -> String {
+    tz.timestamp_millis_opt(t)
+        .single()
+        .map(|d| d.format("%H:%M").to_string())
+        .unwrap_or_default()
+}
+
+fn group_thousands(n: u32) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
+            out.push('\u{2009}');
+        }
+        out.push(c);
+    }
+    out
 }
 
 #[cfg(test)]
