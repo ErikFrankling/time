@@ -25,7 +25,10 @@ pub struct Agent {
     input: Box<dyn Input>,
     audio: Box<dyn Audio>,
     tabs: Box<dyn Tabs>,
-    sender: Box<dyn Sender>,
+    /// Present when sending happens inline after each tick (tests); `main`
+    /// takes it to a thread of its own so a slow network never delays an
+    /// observation.
+    flusher: Option<Flusher>,
     spool: Spool,
     /// The last minute already recorded, so a late or doubled tick never
     /// records a minute twice.
@@ -58,13 +61,16 @@ impl Agent {
     ) -> Result<Self> {
         let spool = Spool::open(&config.spool_dir, 20_000)?;
         Ok(Self {
+            flusher: Some(Flusher {
+                spool: Spool::open(&config.spool_dir, 20_000)?,
+                sender,
+            }),
             config,
             clock,
             desktop,
             input,
             audio,
             tabs,
-            sender,
             spool,
             last_minute: None,
             ticks: 0,
@@ -72,8 +78,13 @@ impl Agent {
         })
     }
 
+    /// Hand the sending half to a thread of its own.
+    pub fn take_flusher(&mut self) -> Option<Flusher> {
+        self.flusher.take()
+    }
+
     /// Call once at (or just after) each minute boundary. Records the minute
-    /// that just ended, then sends what the spool holds.
+    /// that just ended, then, if sending is inline, sends what is spooled.
     pub fn tick(&mut self) -> Result<TickReport> {
         let now = self.clock.now_ms();
         let minute = floor_minute(now) - MINUTE_MS;
@@ -121,7 +132,12 @@ impl Agent {
         }
         self.ticks += 1;
 
-        self.flush(&mut report)?;
+        if let Some(f) = self.flusher.as_mut() {
+            let r = f.flush()?;
+            report.sent = r.sent;
+            report.dropped = r.dropped;
+            report.retry = r.retry;
+        }
         report.pending = self.spool.len()?;
         Ok(report)
     }
@@ -171,8 +187,24 @@ impl Agent {
         minute.browser_host = tab.map(|t| t.host);
         minute
     }
+}
 
-    fn flush(&mut self, report: &mut TickReport) -> Result<()> {
+/// The sending half: drains the spool to the receiver.
+pub struct Flusher {
+    spool: Spool,
+    sender: Box<dyn Sender>,
+}
+
+impl Flusher {
+    /// Send what is spooled, oldest first, until it is empty, the receiver
+    /// asks to retry later, or the per-call cap is reached.
+    pub fn flush(&mut self) -> Result<TickReport> {
+        let mut report = TickReport::default();
+        self.flush_into(&mut report)?;
+        Ok(report)
+    }
+
+    fn flush_into(&mut self, report: &mut TickReport) -> Result<()> {
         for _ in 0..MAX_BATCHES_PER_TICK {
             let batch = self.spool.oldest(BATCH)?;
             if batch.is_empty() {
