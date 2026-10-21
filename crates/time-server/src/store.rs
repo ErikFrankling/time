@@ -420,12 +420,29 @@ impl Store {
         })
     }
 
-    /// How far each device is known to have reported.
-    pub fn coverage(&self) -> Result<std::collections::HashMap<String, Millis>> {
+    /// How far each device is known to have reported, as of `now`.
+    ///
+    /// A device silent for longer than `asleep_after` (a laptop in a bag, a
+    /// phone in Doze) is treated as covered up to now: it is off, not late,
+    /// and waiting on it would keep days of minutes "incomplete" and being
+    /// relabelled. If it does send something late, the insert queues those
+    /// minutes again anyway.
+    pub fn coverage(
+        &self,
+        now: Millis,
+        asleep_after: Millis,
+    ) -> Result<std::collections::HashMap<String, Millis>> {
         Ok(self
             .devices()?
             .into_iter()
-            .filter_map(|d| d.covered_until_ms.or(d.last_event_ms).map(|c| (d.name, c)))
+            .filter_map(|d| {
+                let heard = d.last_heartbeat_ms.or(d.last_event_ms);
+                let covered = d.covered_until_ms.or(d.last_event_ms);
+                if heard.is_some_and(|h| now - h > asleep_after) {
+                    return Some((d.name, now));
+                }
+                covered.map(|c| (d.name, c))
+            })
             .collect())
     }
 

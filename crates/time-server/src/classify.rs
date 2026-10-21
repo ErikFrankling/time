@@ -152,7 +152,8 @@ impl Classifier {
         if todo.is_empty() {
             return Ok(0);
         }
-        let covered = store.coverage()?;
+        // Two hours of silence: off or asleep, not late.
+        let covered = store.coverage(now, 2 * 60 * MINUTE_MS)?;
         let mut labelled = 0;
         for (a, b) in runs(&todo) {
             let events = store.events_between(a - LOOKBACK_MS, b + MINUTE_MS)?;
@@ -244,5 +245,68 @@ mod tests {
         let m = |i: i64| i * MINUTE_MS;
         let set: BTreeSet<_> = [m(1), m(2), m(3), m(10), m(11)].into();
         assert_eq!(runs(&set), vec![(m(1), m(3)), (m(10), m(11))]);
+    }
+
+    #[test]
+    fn a_device_silent_for_hours_is_asleep_not_late() {
+        use time_core::event::{Envelope, Event, Heartbeat, ScreenMinute};
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::parse(&format!(
+            "data_dir = {:?}\n[devices.pc]\nkind = 'desktop'\n[devices.framework]\nkind = 'laptop'",
+            dir.path()
+        ))
+        .unwrap();
+        let c = Classifier::from_config(&config).unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let now = 1_800_000_000_000 - 1_800_000_000_000 % MINUTE_MS;
+        let minute = |t| {
+            Envelope::new(
+                "pc",
+                "time-agent",
+                t,
+                t + MINUTE_MS,
+                Event::ScreenMinute(ScreenMinute {
+                    window_class: "kitty".into(),
+                    keys: 5,
+                    ..Default::default()
+                }),
+            )
+        };
+        let beat = |device: &str, t| {
+            Envelope::new(
+                device,
+                "time-agent",
+                t,
+                t,
+                Event::Heartbeat(Heartbeat {
+                    covered_until_ms: Some(t),
+                    ..Default::default()
+                }),
+            )
+        };
+        let t = now - 10 * MINUTE_MS;
+        store.insert(&[minute(t), beat("pc", now)], now).unwrap();
+
+        // The laptop reported an hour ago: late, so the minute waits for it.
+        store
+            .insert(&[beat("framework", now - 60 * MINUTE_MS)], now)
+            .unwrap();
+        c.run_once(&store, now).unwrap();
+        assert!(!store.labels_between(t, t + MINUTE_MS).unwrap()[0].complete);
+
+        // Three days ago instead: asleep, so nothing waits for it.
+        let store = Store::open_in_memory().unwrap();
+        store
+            .insert(
+                &[
+                    minute(t),
+                    beat("pc", now),
+                    beat("framework", now - 3 * 24 * 60 * MINUTE_MS),
+                ],
+                now,
+            )
+            .unwrap();
+        c.run_once(&store, now).unwrap();
+        assert!(store.labels_between(t, t + MINUTE_MS).unwrap()[0].complete);
     }
 }
