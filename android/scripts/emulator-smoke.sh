@@ -55,6 +55,32 @@ if [ -z "$ok" ]; then
   grep -iE "time|sync" logcat.txt | tail -60 || true
   exit 1
 fi
+# Edge to edge: with a tall display cutout, the native bar must sit below
+# the status bar, and Phone settings must open. Screenshots are uploaded.
+mkdir -p shots
+adb shell cmd overlay enable com.android.internal.display.cutout.emulation.tall || true
+sleep 3
+adb shell am force-stop "$pkg"
+adb shell am start -W -n "$pkg/se.frankling.time.MainActivity"
+sleep 8
+adb exec-out screencap -p > shots/1-main.png
+adb shell uiautomator dump /sdcard/ui.xml >/dev/null && adb pull /sdcard/ui.xml shots/1-main.xml >/dev/null
+bounds=$(grep -o 'content-desc="Phone settings"[^>]*bounds="\[[0-9]*,[0-9]*\]\[[0-9]*,[0-9]*\]"' shots/1-main.xml | grep -o '\[[0-9]*,[0-9]*\]\[[0-9]*,[0-9]*\]' | head -1)
+echo "Phone settings bounds: $bounds"
+top=$(echo "$bounds" | sed -E 's/\[([0-9]+),([0-9]+)\].*/\2/')
+sb=$(adb shell dumpsys window | grep -m1 -E "type=statusBars" | grep -o 'frame=\[[0-9]*,[0-9]*\]\[[0-9]*,[0-9]*\]' | sed -E 's/.*\]\[[0-9]+,([0-9]+)\]/\1/')
+echo "status bar bottom: ${sb:-unknown}"
+[ -n "$top" ] || { echo "Phone settings button not found"; exit 1; }
+if [ -n "$sb" ] && [ "$top" -lt "$sb" ]; then echo "FAIL: Phone settings (top $top) is under the status bar (bottom $sb)"; exit 1; fi
+x=$(echo "$bounds" | sed -E 's/\[([0-9]+),([0-9]+)\]\[([0-9]+),([0-9]+)\]/\1 \3/' | awk '{print int(($1+$2)/2)}')
+y=$(echo "$bounds" | sed -E 's/\[([0-9]+),([0-9]+)\]\[([0-9]+),([0-9]+)\]/\2 \4/' | awk '{print int(($1+$2)/2)}')
+adb shell input tap "$x" "$y"
+sleep 4
+adb exec-out screencap -p > shots/2-settings.png
+adb shell uiautomator dump /sdcard/ui.xml >/dev/null && adb pull /sdcard/ui.xml shots/2-settings.xml >/dev/null
+grep -q 'text="Settings"' shots/2-settings.xml || { echo "FAIL: Phone settings did not open"; exit 1; }
+echo "edge-to-edge check passed: header below the status bar, settings open"
+
 echo "server status as seen after the phone's sync:"
 curl -s "$server/api/status" | jq '{devices, channels: [.channels[] | select(.state != "not_set_up")]}'
 echo "smoke test passed: the phone reached the server"

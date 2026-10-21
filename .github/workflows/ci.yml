@@ -81,8 +81,14 @@ jobs:
           sudo udevadm trigger --name-match=kvm
       - uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 34
+          # 35+: Android enforces edge to edge, like Erik's phone.
+          api-level: 35
           arch: x86_64
           target: google_apis
           disable-animations: true
           script: android/scripts/emulator-smoke.sh apk
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: emulator-screenshots
+          path: shots/
