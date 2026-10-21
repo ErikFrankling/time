@@ -64,6 +64,11 @@ class SettingsActivity : ComponentActivity() {
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Edge to edge like the main screen, content kept clear of the bars.
+        androidx.activity.enableEdgeToEdge(
+            statusBarStyle = androidx.activity.SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+            navigationBarStyle = androidx.activity.SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+        )
         super.onCreate(savedInstanceState)
         // Both legs, every open: the worker in case its spec died, the service
         // in case a force-stop or crash took it down. A foreground activity is
@@ -160,7 +165,10 @@ class SettingsActivity : ComponentActivity() {
             ?.takeIf { it in 1..<Long.MAX_VALUE }
 
         Column(
-            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp),
+            Modifier.fillMaxSize()
+                .windowInsetsPadding(WindowInsets.safeDrawing)
+                .verticalScroll(rememberScrollState())
+                .padding(24.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             Text("Settings", style = MaterialTheme.typography.headlineMedium)

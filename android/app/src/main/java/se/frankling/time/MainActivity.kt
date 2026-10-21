@@ -16,6 +16,10 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.SystemBarStyle
+import androidx.activity.enableEdgeToEdge
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import se.frankling.time.Prefs.lastSync
 import se.frankling.time.Prefs.server
 
@@ -34,13 +38,25 @@ class MainActivity : ComponentActivity() {
     private companion object {
         val DARK = Color.parseColor("#141413")
         val LIGHT = Color.parseColor("#ECEBE6")
+        val MUTED = Color.parseColor("#9D9C95")
+        val BAR = Color.parseColor("#1D1D1B")
     }
+
+    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
     private lateinit var web: WebView
     private lateinit var error: TextView
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Android 15 draws every app edge to edge. Say so explicitly, with light
+        // icons on the dark bars, and pad the content by the bars and the
+        // display cutout below so nothing sits under the clock or the
+        // gesture bar.
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
+        )
         super.onCreate(savedInstanceState)
         // Both legs on every open: the worker in case its spec died, the
         // service in case a force-stop took it down.
@@ -48,19 +64,30 @@ class MainActivity : ComponentActivity() {
         SyncService.start(this)
         if (lastSync < System.currentTimeMillis() - 20 * 60_000L) SyncWorker.once(this)
 
+        // The native bar: only the way to the phone's own settings. The site
+        // below has its own header with the page names.
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(24, 8, 8, 8)
+            setBackgroundColor(BAR)
+            setPadding(dp(16), 0, dp(4), 0)
+            minimumHeight = dp(48)
             addView(TextView(this@MainActivity).apply {
-                text = "Time"
-                setTextColor(LIGHT)
-                textSize = 16f
+                text = "Time app"
+                setTextColor(MUTED)
+                textSize = 14f
                 layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
             })
-            addView(Button(this@MainActivity).apply {
-                text = "Phone settings"
-                isAllCaps = false
+            addView(TextView(this@MainActivity).apply {
+                text = "Phone settings  ⚙"
+                setTextColor(LIGHT)
+                textSize = 15f
+                gravity = Gravity.CENTER
+                minHeight = dp(48)
+                setPadding(dp(12), 0, dp(12), 0)
+                isClickable = true
+                isFocusable = true
+                contentDescription = "Phone settings"
                 setOnClickListener { startActivity(Intent(this@MainActivity, SettingsActivity::class.java)) }
             })
         }
@@ -107,14 +134,20 @@ class MainActivity : ComponentActivity() {
         }
         error.tag = retry
 
-        setContentView(LinearLayout(this).apply {
+        val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(DARK)
             addView(bar, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
             addView(error, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
             addView(retry, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
             addView(web, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
-        })
+        }
+        ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
+            val b = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+            v.setPadding(b.left, b.top, b.right, b.bottom)
+            WindowInsetsCompat.CONSUMED
+        }
+        setContentView(root)
         retry.visibility = Button.GONE
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {

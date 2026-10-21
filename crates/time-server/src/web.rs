@@ -57,12 +57,14 @@ const STYLE: &str = r#"
 :root { color-scheme: dark; --bg:#141413; --fg:#ecebe6; --muted:#9d9c95; --card:#1d1d1b; --line:#2e2e2b;
   --ok:#5cc28d; --warn:#e3a33b; --bad:#f2847b; --off:#9d9c95; }
 html, body { background:#141413; }
+/* Clear of notches, the status bar and the gesture bar on phones (zero
+   inside the app, which pads natively). */
 * { box-sizing: border-box; }
 body { margin:0; font:15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; background:var(--bg); color:var(--fg); }
-header { display:flex; gap:1rem; align-items:baseline; padding:.9rem 1rem; border-bottom:1px solid var(--line); }
+header { display:flex; gap:1rem; align-items:baseline; padding:calc(.9rem + env(safe-area-inset-top)) calc(1rem + env(safe-area-inset-right)) .9rem calc(1rem + env(safe-area-inset-left)); border-bottom:1px solid var(--line); }
 header a { color:var(--muted); text-decoration:none; } header a.here { color:var(--fg); font-weight:600; }
 h1 { font-size:1.05rem; margin:0 auto 0 0; }
-main { max-width:56rem; margin:0 auto; padding:1rem; display:grid; grid-template-columns:minmax(0,1fr); gap:1rem; }
+main { max-width:56rem; margin:0 auto; padding:1rem 1rem calc(1rem + env(safe-area-inset-bottom)); display:grid; grid-template-columns:minmax(0,1fr); gap:1rem; }
 section { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:.9rem 1rem; }
 h2 { font-size:.8rem; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:0 0 .6rem; }
 .banner { font-size:1.05rem; font-weight:600; }
@@ -111,7 +113,7 @@ pub fn page_with(
     })
     .collect::<String>();
     format!(
-        r##"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark"><meta name="theme-color" content="#141413">{refresh}<title>{t}</title><style>{STYLE}{extra_style}</style></head><body><header><h1>Time</h1>{nav}</header><main>{body}</main></body></html>"##,
+        r##"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="dark"><meta name="theme-color" content="#141413">{refresh}<title>{t}</title><style>{STYLE}{extra_style}</style></head><body><header><h1>Time</h1>{nav}</header><main>{body}</main></body></html>"##,
         t = esc(title),
     )
 }
