@@ -31,6 +31,11 @@ import se.frankling.time.Prefs.server
  */
 class MainActivity : ComponentActivity() {
 
+    private companion object {
+        val DARK = Color.parseColor("#141413")
+        val LIGHT = Color.parseColor("#ECEBE6")
+    }
+
     private lateinit var web: WebView
     private lateinit var error: TextView
 
@@ -49,6 +54,7 @@ class MainActivity : ComponentActivity() {
             setPadding(24, 8, 8, 8)
             addView(TextView(this@MainActivity).apply {
                 text = "Time"
+                setTextColor(LIGHT)
                 textSize = 16f
                 layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
             })
@@ -59,6 +65,7 @@ class MainActivity : ComponentActivity() {
             })
         }
         error = TextView(this).apply {
+            setTextColor(LIGHT)
             visibility = TextView.GONE
             setPadding(48, 48, 48, 48)
             textSize = 16f
@@ -68,7 +75,8 @@ class MainActivity : ComponentActivity() {
             // interactions and costs nothing on pages that have none.
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
-            setBackgroundColor(Color.TRANSPARENT)
+            // The site is dark; so is the WebView before the first byte arrives.
+            setBackgroundColor(DARK)
             webViewClient = object : WebViewClient() {
                 override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                     // Links to Time stay in the app; anything else opens in the browser.
@@ -101,6 +109,7 @@ class MainActivity : ComponentActivity() {
 
         setContentView(LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
+            setBackgroundColor(DARK)
             addView(bar, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
             addView(error, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
             addView(retry, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))

@@ -106,7 +106,12 @@ class SettingsActivity : ComponentActivity() {
             SyncWorker.once(this)
         }
 
-        setContent { MaterialTheme { Screen() } }
+        // Dark, always: Erik never wants a white screen.
+        setContent {
+            MaterialTheme(colorScheme = darkColorScheme()) {
+                Surface(color = MaterialTheme.colorScheme.background) { Screen() }
+            }
+        }
     }
 
     @Composable

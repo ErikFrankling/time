@@ -53,10 +53,10 @@ pub fn clock_time(tz: chrono_tz::Tz, t: Option<Millis>) -> String {
 }
 
 const STYLE: &str = r#"
-:root { color-scheme: light dark; --bg:#fbfbfa; --fg:#1d1d1b; --muted:#6b6b66; --card:#fff; --line:#e6e5e1;
-  --ok:#1f7a4d; --warn:#9a6200; --bad:#b3261e; --off:#6b6b66; }
-@media (prefers-color-scheme: dark) { :root { --bg:#141413; --fg:#ecebe6; --muted:#9d9c95; --card:#1d1d1b; --line:#2e2e2b;
-  --ok:#5cc28d; --warn:#e3a33b; --bad:#f2847b; --off:#9d9c95; } }
+/* Dark, always: Erik never wants a white screen, whatever the system says. */
+:root { color-scheme: dark; --bg:#141413; --fg:#ecebe6; --muted:#9d9c95; --card:#1d1d1b; --line:#2e2e2b;
+  --ok:#5cc28d; --warn:#e3a33b; --bad:#f2847b; --off:#9d9c95; }
+html, body { background:#141413; }
 * { box-sizing: border-box; }
 body { margin:0; font:15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; background:var(--bg); color:var(--fg); }
 header { display:flex; gap:1rem; align-items:baseline; padding:.9rem 1rem; border-bottom:1px solid var(--line); }
@@ -111,7 +111,7 @@ pub fn page_with(
     })
     .collect::<String>();
     format!(
-        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">{refresh}<title>{t}</title><style>{STYLE}{extra_style}</style></head><body><header><h1>Time</h1>{nav}</header><main>{body}</main></body></html>"#,
+        r##"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark"><meta name="theme-color" content="#141413">{refresh}<title>{t}</title><style>{STYLE}{extra_style}</style></head><body><header><h1>Time</h1>{nav}</header><main>{body}</main></body></html>"##,
         t = esc(title),
     )
 }
@@ -189,6 +189,7 @@ pub fn status_page(s: &Status, tz: chrono_tz::Tz) -> String {
             let _ = write!(sub, " · {p} waiting to send");
         }
         if let Some(v) = &d.app_version {
+            let v = v.strip_prefix('v').unwrap_or(v);
             let _ = write!(sub, " · v{}", esc(v));
         }
         let missing = d
@@ -324,13 +325,9 @@ pub fn status_page(s: &Status, tz: chrono_tz::Tz) -> String {
 /// one hue per activity forever. `other` and `unknown` are neutral greys;
 /// away is the empty surface.
 const ACTIVITY_STYLE: &str = r#"
-.a-work{--c:#2a78d6} .a-social{--c:#eb6834} .a-study{--c:#1baf7a} .a-video{--c:#eda100}
-.a-comms{--c:#e87ba4} .a-browsing{--c:#008300} .a-music{--c:#6250d6} .a-games{--c:#e34948}
-.a-other{--c:#8f8e88} .a-unknown{--c:#c9c8c2}
-@media (prefers-color-scheme: dark) {
- .a-work{--c:#3987e5} .a-social{--c:#d95926} .a-study{--c:#199e70} .a-video{--c:#c98500}
+.a-work{--c:#3987e5} .a-social{--c:#d95926} .a-study{--c:#199e70} .a-video{--c:#c98500}
  .a-comms{--c:#d55181} .a-browsing{--c:#008300} .a-music{--c:#9085e9} .a-games{--c:#e66767}
- .a-other{--c:#7d7c76} .a-unknown{--c:#4a4a46} }
+ .a-other{--c:#7d7c76} .a-unknown{--c:#4a4a46}
 .sw { display:inline-block; width:.75rem; height:.75rem; border-radius:3px; background-color:var(--c); vertical-align:-.1rem; }
 .ph, .strip > span.ph, .tot .bar > span.ph { background-image: repeating-linear-gradient(45deg, transparent 0 3px, var(--card) 3px 5px); }
 .stats { display:grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap:.8rem; }
@@ -353,8 +350,7 @@ const ACTIVITY_STYLE: &str = r#"
 .tot .bar > span:first-child:not(:last-child) { border-radius:0; }
 .tot .n { text-align:right; font-variant-numeric: tabular-nums; font-size:.9rem; white-space:nowrap; }
 .steps { display:flex; align-items:flex-end; gap:2px; height:56px; }
-.steps > span { flex:1; background:#2a78d6; border-radius:3px 3px 0 0; min-height:1px; }
-@media (prefers-color-scheme: dark) { .steps > span { background:#3987e5; } }
+.steps > span { flex:1; background:#3987e5; border-radius:3px 3px 0 0; min-height:1px; }
 .axis { display:flex; justify-content:space-between; color:var(--muted); font-size:.75rem; margin-top:.2rem; }
 "#;
 
