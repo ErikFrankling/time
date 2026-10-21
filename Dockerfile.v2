@@ -1,0 +1,18 @@
+# Time v2 server image. Built from the workspace; only time-server ships.
+FROM rust:1-bookworm AS build
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+COPY config ./config
+COPY fixtures ./fixtures
+RUN cargo build --release --locked -p time-server
+
+FROM debian:bookworm-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates tzdata \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=build /src/target/release/time-server /usr/local/bin/time-server
+USER 1000:1000
+EXPOSE 7373
+ENTRYPOINT ["time-server"]
+CMD ["serve", "/config/config.toml"]

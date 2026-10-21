@@ -647,3 +647,32 @@ Progress (branch `v2`, 2026-10-21):
 LLM classifier, prompt, batching, llama-swap config, `reclassify`,
 `llm_call`/`minute_trial` tables, the screenshot archive on the server (on
 Erik's word), completeness frontier, dHash, the Compose UI.
+
+## Go-live runbook (M4, blocked on backups)
+
+Nothing below has been run. Order matters; each step can be undone.
+
+1. **Backups.** The homelab backup plan (homelab `docs/backups.md`) covers
+   the Time PVC and the Loki volume, and a restore of the Time database has
+   been tested.
+2. **Image.** Build `Dockerfile.v2` in CI and publish it as
+   `ghcr.io/erikfrankling/time:v2` (a new tag, so v1's `:latest` is
+   untouched).
+3. **Data.** On the existing PVC, `time-server import-v1 /config/config.toml
+   /data/time.db` into a new `/data/v2/` directory, then `time-server classify`.
+   v1's database is only read.
+4. **Run side by side.** A second Deployment `time-v2` on the same node,
+   mounting the same PVC with `data_dir = /data/v2`, service port 7373.
+   v1 keeps serving `time.erikfrankling.duckdns.org` meanwhile.
+5. **Point the pipes.** The gateway Alloy forwards `service.namespace=time`
+   to `time-v2:7373/v1/logs`. Desktop agents switch to `time-agent` via a v2
+   home-manager module in the dotfiles (pc, then the laptop). The phone app is
+   released from `main` once v2 is merged, keeping its signing key.
+6. **Compare for a day,** on the status screen and the day view.
+7. **Switch.** Route `time.erikfrankling.duckdns.org` to v2, scale v1 to zero,
+   and keep v1's database read-only for a month before removing it. The 3.8 GB
+   screenshot archive is deleted only on Erik's word.
+
+Still to build for M4: APK serving at `/app` (the phone's self-update; v1's
+`apk.rs` ports over unchanged), protobuf OTLP if the gateway cannot send JSON,
+and the v2 home-manager module for the agent.
