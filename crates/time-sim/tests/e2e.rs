@@ -1,0 +1,214 @@
+//! End-to-end: the real server and agent, a scripted morning, a fake world.
+
+use std::path::Path;
+
+use time_core::clock::MINUTE_MS;
+use time_core::event::{Event, ScreenMinute};
+use time_sim::world::World;
+
+fn morning() -> World {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("scenarios/morning.toml");
+    let mut w = World::load(&path).expect("scenario loads");
+    w.run().expect("scenario runs");
+    w
+}
+
+fn screen_minutes(w: &World) -> Vec<(i64, ScreenMinute)> {
+    w.events()
+        .unwrap()
+        .into_iter()
+        .filter_map(|e| match e.event {
+            Event::ScreenMinute(m) if e.device == "pc" => Some((e.start_ms, m)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn every_desktop_minute_arrives_exactly_once_despite_an_outage() {
+    let w = morning();
+    let minutes = screen_minutes(&w);
+    let start = w.scenario.start_ms;
+    let expected: Vec<i64> = (0..120).map(|i| start + i * MINUTE_MS).collect();
+    let got: Vec<i64> = minutes.iter().map(|(t, _)| *t).collect();
+    assert_eq!(
+        got, expected,
+        "120 minutes, in order, none missing, none doubled"
+    );
+}
+
+#[test]
+fn browser_host_comes_from_the_focused_browsers_tab() {
+    let w = morning();
+    let at = |hhmm: &str| w.scenario.at(hhmm).unwrap();
+    let minutes = screen_minutes(&w);
+    let host_at = |t: i64| {
+        minutes
+            .iter()
+            .find(|(m, _)| *m == t)
+            .unwrap()
+            .1
+            .browser_host
+            .clone()
+    };
+    assert_eq!(host_at(at("09:05")).as_deref(), Some("youtube.com"));
+    // v1 recorded play.hbomax.com here, from the other browser.
+    assert_eq!(host_at(at("10:15")).as_deref(), Some("dn.se"));
+    assert_eq!(host_at(at("09:50")), None, "T3 Code is not a browser");
+}
+
+#[test]
+fn blocked_windows_carry_nothing_but_the_flag() {
+    let w = morning();
+    let t = w.scenario.at("10:10").unwrap();
+    let (_, m) = screen_minutes(&w)
+        .into_iter()
+        .find(|(m, _)| *m == t)
+        .unwrap();
+    assert!(m.blocked);
+    assert!(m.window_class.is_empty() && m.window_title.is_empty() && m.browser_host.is_none());
+}
+
+#[test]
+fn an_empty_desk_is_recorded_as_no_window_and_growing_idle() {
+    let w = morning();
+    let t = w.scenario.at("10:45").unwrap();
+    let (_, m) = screen_minutes(&w)
+        .into_iter()
+        .find(|(m, _)| *m == t)
+        .unwrap();
+    assert!(m.window_class.is_empty());
+    assert_eq!((m.keys, m.mouse), (0, 0));
+    assert!(
+        m.idle_seconds.unwrap() >= 15 * 60,
+        "idle {:?}",
+        m.idle_seconds
+    );
+}
+
+#[test]
+fn phone_spans_and_steps_arrive_late_but_once() {
+    let w = morning();
+    let events = w.events().unwrap();
+    let apps: Vec<_> = events
+        .iter()
+        .filter_map(|e| match &e.event {
+            Event::PhoneApp(a) => Some((e.start_ms, e.end_ms, a.package.clone())),
+            _ => None,
+        })
+        .collect();
+    let at = |hhmm: &str| w.scenario.at(hhmm).unwrap();
+    assert_eq!(
+        apps,
+        vec![
+            (at("09:40"), at("09:50"), "com.twitter.android".to_string()),
+            // Used while offline, delivered after: present, and not doubled by re-reads.
+            (
+                at("10:05"),
+                at("10:15"),
+                "com.google.android.youtube".to_string()
+            ),
+        ]
+    );
+    let steps: u32 = events
+        .iter()
+        .filter_map(|e| match &e.event {
+            Event::HealthSteps(s) => Some(s.steps),
+            _ => None,
+        })
+        .sum();
+    assert_eq!(steps, 3000);
+    // Re-reads reached the server and were absorbed as duplicates.
+    assert!(
+        w.status().unwrap()["pipeline"]["duplicate"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+}
+
+#[test]
+fn status_reports_devices_channels_and_health() {
+    let w = morning();
+    let s = w.status().unwrap();
+    let device = |name: &str| {
+        s["devices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["name"] == name)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(device("pc")["state"], "connected");
+    assert_eq!(device("phone")["state"], "connected");
+    assert_eq!(device("pc")["spool_pending"], 0);
+    let channel = |id: &str| {
+        s["channels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == id)
+            .unwrap()["state"]
+            .clone()
+    };
+    assert_eq!(channel("screen"), "live");
+    assert_eq!(channel("health"), "live");
+    assert_eq!(
+        channel("dictation"),
+        "missing",
+        "nothing in the scenario dictates"
+    );
+
+    assert_eq!(w.get("/healthz").unwrap(), (200, "ok\n".to_string()));
+    let (code, metrics) = w.get("/metrics").unwrap();
+    assert_eq!(code, 200);
+    assert!(
+        metrics.contains("time_device_last_heartbeat_timestamp_seconds{device=\"pc\"}"),
+        "{metrics}"
+    );
+    assert!(
+        metrics.contains("time_device_spool_pending{device=\"phone\"}"),
+        "{metrics}"
+    );
+}
+
+#[test]
+fn malformed_batches_are_refused_and_partial_ones_partly_accepted() {
+    let w = morning();
+    let client = reqwest::blocking::Client::new();
+    let url = format!("{}/v1/logs", w.base_url);
+    let r = client
+        .post(&url)
+        .header("content-type", "application/json")
+        .body("{not json")
+        .send()
+        .unwrap();
+    assert_eq!(r.status(), 400);
+    let r = client
+        .post(&url)
+        .header("content-type", "application/x-protobuf")
+        .body(vec![0u8])
+        .send()
+        .unwrap();
+    assert_eq!(r.status(), 415);
+
+    let partial = serde_json::json!({"resourceLogs": [{
+        "resource": {"attributes": [
+            {"key": "host.name", "value": {"stringValue": "pc"}},
+            {"key": "service.namespace", "value": {"stringValue": "time"}}
+        ]},
+        "scopeLogs": [{"logRecords": [
+            {"attributes": [
+                {"key": "event.name", "value": {"stringValue": "time.heartbeat"}},
+                {"key": "event.id", "value": {"stringValue": "manual-1"}},
+                {"key": "time.start", "value": {"intValue": "1"}}
+            ]},
+            {"attributes": [{"key": "event.name", "value": {"stringValue": "time.heartbeat"}}]}
+        ]}]
+    }]});
+    let r = client.post(&url).json(&partial).send().unwrap();
+    assert_eq!(r.status(), 200);
+    let body: serde_json::Value = r.json().unwrap();
+    assert_eq!(body["partialSuccess"]["rejectedLogRecords"], "1");
+}

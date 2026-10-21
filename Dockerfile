@@ -4,12 +4,12 @@ FROM rust:1-bookworm AS build
 WORKDIR /src
 
 # Cache the dependency build across source-only changes.
-COPY Cargo.toml Cargo.lock ./
+COPY legacy/Cargo.toml legacy/Cargo.lock ./
 RUN mkdir src && echo 'fn main() {}' > src/main.rs \
  && cargo build --release --locked \
  && rm -rf src
 
-COPY src ./src
+COPY legacy/src ./src
 # Cargo skips rebuilding when only mtime changed, so force the real main.rs.
 RUN touch src/main.rs && cargo build --release --locked
 

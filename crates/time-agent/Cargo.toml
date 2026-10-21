@@ -1,0 +1,21 @@
+[package]
+name = "time-agent"
+description = "The desktop agent: observes the focused window, input and audio each minute and sends events."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "time-agent"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+time-core.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

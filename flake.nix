@@ -45,8 +45,8 @@
         timePkg = pkgs.rustPlatform.buildRustPackage {
           pname = "time";
           version = "0.1.0";
-          src = ./.;
-          cargoLock.lockFile = ./Cargo.lock;
+          src = ./legacy;
+          cargoLock.lockFile = ./legacy/Cargo.lock;
 
           nativeBuildInputs = [ pkgs.makeWrapper ];
 

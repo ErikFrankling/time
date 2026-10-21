@@ -1,0 +1,84 @@
+# A morning that exercises every M0 path:
+# - YouTube in Firefox while Zen has HBO Max open (the v1 domain mix-up),
+# - work in T3 Code, a password manager (blocklist), an empty desk,
+# - the pc losing the server for 20 minutes,
+# - the phone in use, offline for a stretch, then syncing late,
+# - steps from a walk.
+name = "morning"
+start = "2026-10-21T09:00:00+02:00"
+end = "11:00"
+desktops = ["pc"]
+phone_enabled = true
+
+[[desktop]]
+device = "pc"
+from = "09:00"
+to = "09:40"
+class = "firefox"
+title = "Cats compilation - YouTube — Original profile — Mozilla Firefox"
+tabs = [
+  { host = "youtube.com", title = "Cats compilation - YouTube" },
+  { host = "play.hbomax.com", title = "Angel Has Fallen • HBO Max" },
+]
+mouse = 2
+audio = true
+
+[[desktop]]
+device = "pc"
+from = "09:40"
+to = "10:10"
+class = "com.t3tools.T3Code"
+title = "T3 Code (Alpha)"
+keys = 120
+mouse = 30
+
+[[desktop]]
+device = "pc"
+from = "10:10"
+to = "10:12"
+class = "org.keepassxc.KeePassXC"
+title = "bank.kdbx - KeePassXC"
+keys = 10
+
+[[desktop]]
+device = "pc"
+from = "10:12"
+to = "10:30"
+class = "firefox"
+title = "Krönika — DN — Original profile — Mozilla Firefox"
+tabs = [
+  { host = "dn.se", title = "Krönika — DN" },
+  { host = "play.hbomax.com", title = "Angel Has Fallen • HBO Max" },
+]
+mouse = 20
+
+# 10:30-11:00: nothing focused, nobody there.
+
+[[offline]]
+device = "pc"
+from = "10:00"
+to = "10:20"
+
+[[phone]]
+from = "09:40"
+to = "09:50"
+package = "com.twitter.android"
+label = "X"
+
+[[phone]]
+from = "10:05"
+to = "10:15"
+package = "com.google.android.youtube"
+label = "YouTube"
+media = true
+
+[[offline]]
+device = "phone"
+from = "10:00"
+to = "10:40"
+
+[[steps]]
+from = "10:30"
+to = "11:00"
+steps = 3000
+meters = 2100

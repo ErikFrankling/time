@@ -1,30 +1,33 @@
-[package]
-name = "time"
-version = "0.1.0"
-edition = "2021"
+[workspace]
+resolver = "2"
+members = ["crates/time-core", "crates/time-server", "crates/time-agent", "crates/time-sim"]
+# v1 stays buildable on its own until v2 replaces it in production (M4).
+exclude = ["legacy"]
 
-[dependencies]
+[workspace.package]
+edition = "2021"
+version = "2.0.0-dev"
+license = "MIT"
+
+[workspace.dependencies]
 anyhow = "1"
+axum = "0.8"
 base64 = "0.22"
-chrono = "0.4"
-evdev = "0.12"
-# Default features pull in libssh2/openssl for network transports. Nothing here
-# ever fetches -- repositories are read off the local disk -- so the C TLS stack
-# is pure build cost and a pure CVE surface.
-git2 = { version = "0.21", default-features = false }
-image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+chrono-tz = "0.10"
+regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# The phone verifies the APK it downloads against the hash the server reports,
-# so a truncated or swapped download is caught before the installer sees it.
-sha2 = "0.10"
-tiny_http = "0.12"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time", "sync", "signal"] }
 toml = "0.8"
-# Host extraction. Already in the tree via reqwest, and getting ports, IPv6
-# literals and punycode right by hand is a bug farm for no benefit.
-url = "2"
+uuid = { version = "1", features = ["v4", "v5"] }
+time-core = { path = "crates/time-core" }
+time-server = { path = "crates/time-server" }
+time-agent = { path = "crates/time-agent" }
 
 [profile.release]
 opt-level = 2
