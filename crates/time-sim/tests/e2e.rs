@@ -423,3 +423,14 @@ fn answering_the_inbox_writes_a_rule_and_relabels_history() {
         .unwrap();
     assert_eq!(r.status(), 403);
 }
+
+#[test]
+fn the_week_page_sums_the_days() {
+    let w = morning();
+    let (code, html) = w.get("/week/2026-10-23").unwrap();
+    assert_eq!(code, 200);
+    // 2026-10-23 is a Friday; its week starts Monday 19 October.
+    assert!(html.contains("Week of 19 October"), "{html}");
+    assert!(html.contains(r#"href="/day/2026-10-21""#));
+    assert!(html.contains("3\u{2009}000"), "steps from Wednesday");
+}

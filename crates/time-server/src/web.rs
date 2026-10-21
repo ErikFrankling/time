@@ -94,17 +94,22 @@ pub fn page_with(
     let refresh = refresh_secs
         .map(|s| format!(r#"<meta http-equiv="refresh" content="{s}">"#))
         .unwrap_or_default();
-    let nav = [("/", "Today"), ("/inbox", "Inbox"), ("/status", "Status")]
-        .iter()
-        .map(|(href, label)| {
-            let class = if *href == here {
-                r#" class="here""#
-            } else {
-                ""
-            };
-            format!(r#"<a href="{href}"{class}>{label}</a>"#)
-        })
-        .collect::<String>();
+    let nav = [
+        ("/", "Today"),
+        ("/week", "Week"),
+        ("/inbox", "Inbox"),
+        ("/status", "Status"),
+    ]
+    .iter()
+    .map(|(href, label)| {
+        let class = if *href == here {
+            r#" class="here""#
+        } else {
+            ""
+        };
+        format!(r#"<a href="{href}"{class}>{label}</a>"#)
+    })
+    .collect::<String>();
     format!(
         r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">{refresh}<title>{t}</title><style>{STYLE}{extra_style}</style></head><body><header><h1>Time</h1>{nav}</header><main>{body}</main></body></html>"#,
         t = esc(title),
@@ -303,7 +308,9 @@ const ACTIVITY_STYLE: &str = r#"
 .legend { display:flex; flex-wrap:wrap; gap:.3rem .9rem; font-size:.85rem; color:var(--muted); margin-top:.7rem; }
 .tot { display:grid; grid-template-columns: 6.5rem minmax(0,1fr) max-content; gap:.6rem; align-items:center; padding:.3rem 0; }
 .tot .bar { display:flex; gap:2px; height:12px; }
-.tot .bar > span { background-color:var(--c); border-radius:0 4px 4px 0; }
+.tot .bar > span { background-color:var(--c); border-radius:0 4px 4px 0; min-width:0; }
+.tot .bar > span + span { border-radius:0; }
+.tot a { color:var(--fg); text-decoration:none; }
 .tot .bar > span:first-child:not(:last-child) { border-radius:0; }
 .tot .n { text-align:right; font-variant-numeric: tabular-nums; font-size:.9rem; white-space:nowrap; }
 .steps { display:flex; align-items:flex-end; gap:2px; height:56px; }
@@ -636,6 +643,120 @@ const INBOX_STYLE: &str = r#"
 .inbox select, .inbox button { font:inherit; padding:.35rem .6rem; border-radius:8px; border:1px solid var(--line); background:var(--bg); color:var(--fg); }
 .inbox button { cursor:pointer; font-weight:600; }
 "#;
+
+/// The week view: one stacked bar per day, then totals.
+pub fn week_page(days: &[crate::day::Day], this_week: bool) -> String {
+    use std::collections::BTreeMap;
+    use time_core::label::Activity;
+
+    let Some(first) = days.first() else {
+        return page("Time · Week", "/week", None, "");
+    };
+    let monday = first.date;
+    let mut body = String::new();
+    let prev = monday - chrono::Days::new(7);
+    let next = monday + chrono::Days::new(7);
+    let _ = write!(
+        body,
+        r#"<section><div class="daynav"><a href="/week/{prev}">‹ {}</a><strong>Week of {}</strong><span>{}</span></div></section>"#,
+        prev.format("%d %b"),
+        monday.format("%d %B"),
+        if this_week {
+            String::new()
+        } else {
+            format!(r#"<a href="/week/{next}">{} ›</a>"#, next.format("%d %b"))
+        },
+    );
+
+    let mut totals: BTreeMap<Activity, u32> = BTreeMap::new();
+    let (mut computer, mut phone, mut steps, mut meters) = (0, 0, 0, 0.0);
+    for d in days {
+        for a in &d.activities {
+            *totals.entry(a.activity).or_default() += a.total();
+        }
+        computer += d.computer_minutes;
+        phone += d.phone_minutes;
+        steps += d.steps;
+        meters += d.distance_m;
+    }
+    let work: u32 = totals
+        .iter()
+        .filter(|(a, _)| a.is_productive())
+        .map(|(_, n)| n)
+        .sum();
+    let _ = write!(
+        body,
+        r#"<section class="stats">
+<div class="stat"><div class="v">{}</div><div class="k">at the computer</div></div>
+<div class="stat"><div class="v">{}</div><div class="k">on the phone</div></div>
+<div class="stat"><div class="v">{}</div><div class="k">work and study</div></div>
+<div class="stat"><div class="v">{}</div><div class="k">steps · {:.1} km</div></div>
+</section>"#,
+        duration(computer),
+        duration(phone),
+        duration(work),
+        group_thousands(steps),
+        meters / 1000.0,
+    );
+
+    // One bar per day; width is minutes out of the longest day.
+    let longest = days
+        .iter()
+        .map(|d| d.computer_minutes + d.phone_minutes)
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let _ = write!(body, r#"<section><h2>Day by day</h2>"#);
+    for d in days {
+        let total = d.computer_minutes + d.phone_minutes;
+        let segs: String = d
+            .activities
+            .iter()
+            .map(|a| {
+                format!(
+                    r#"<span class="a-{}" style="width:{:.2}%" title="{} · {}"></span>"#,
+                    a.activity,
+                    100.0 * f64::from(a.total()) / f64::from(longest),
+                    a.activity,
+                    duration(a.total())
+                )
+            })
+            .collect();
+        let _ = write!(
+            body,
+            r#"<div class="tot"><a href="/day/{}">{}</a><div class="bar">{segs}</div><span class="n">{}</span></div>"#,
+            d.date,
+            d.date.format("%a %d"),
+            duration(total)
+        );
+    }
+    body.push_str(r#"<div class="legend">"#);
+    for a in Activity::ALL {
+        let _ = write!(body, r#"<span><span class="sw a-{a}"></span> {a}</span>"#);
+    }
+    body.push_str("</div></section>");
+
+    let mut sorted: Vec<_> = totals.into_iter().collect();
+    sorted.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+    let _ = write!(body, r#"<section><h2>The week's totals</h2><dl>"#);
+    for (a, n) in sorted {
+        let _ = write!(
+            body,
+            r#"<dt><span class="sw a-{a}"></span> {a}</dt><dd>{} · {:.1} h a day</dd>"#,
+            duration(n),
+            f64::from(n) / 60.0 / days.len() as f64
+        );
+    }
+    body.push_str("</dl></section>");
+
+    page_with(
+        &format!("Time · Week of {monday}"),
+        "/week",
+        None,
+        ACTIVITY_STYLE,
+        &body,
+    )
+}
 
 #[cfg(test)]
 mod tests {

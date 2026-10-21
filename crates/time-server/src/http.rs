@@ -31,6 +31,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/inbox/rule", post(inbox_rule))
         .route("/", get(today_html))
         .route("/day/{date}", get(day_html))
+        .route("/week", get(this_week_html))
+        .route("/week/{date}", get(week_html))
         .route("/api/day/{date}", get(day_json))
         .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY))
         .with_state(state)
@@ -304,5 +306,55 @@ async fn inbox_rule(
         Ok(Ok(_)) => axum::response::Redirect::to(&format!("/inbox?added={id}")).into_response(),
         Ok(Err(e)) => (StatusCode::BAD_REQUEST, format!("{e:#}")).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn load_week(
+    state: Arc<AppState>,
+    date: Option<String>,
+) -> Result<(Vec<crate::day::Day>, bool), (StatusCode, String)> {
+    use chrono::Datelike;
+    let today = crate::day::today(state.tz, state.clock.now_ms());
+    let date: chrono::NaiveDate = match date {
+        None => today,
+        Some(d) => d.parse().map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("not a date: {d:?} (use YYYY-MM-DD)"),
+            )
+        })?,
+    };
+    let monday = date - chrono::Days::new(u64::from(date.weekday().num_days_from_monday()));
+    let this_week = today >= monday && today < monday + chrono::Days::new(7);
+    let tz = state.tz;
+    let days = tokio::task::spawn_blocking(move || {
+        (0..7)
+            .map(|i| crate::day::summarise(&state.store, tz, monday + chrono::Days::new(i)))
+            .collect::<anyhow::Result<Vec<_>>>()
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
+    Ok((days, this_week))
+}
+
+async fn this_week_html(State(state): State<Arc<AppState>>) -> Response {
+    match load_week(state, None).await {
+        Ok((days, this_week)) => {
+            axum::response::Html(crate::web::week_page(&days, this_week)).into_response()
+        }
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn week_html(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(date): axum::extract::Path<String>,
+) -> Response {
+    match load_week(state, Some(date)).await {
+        Ok((days, this_week)) => {
+            axum::response::Html(crate::web::week_page(&days, this_week)).into_response()
+        }
+        Err(e) => e.into_response(),
     }
 }
