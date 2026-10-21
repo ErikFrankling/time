@@ -16,6 +16,50 @@ let
     inherit (cfg) device endpoint;
     inherit (cfg.collect) roots authors github;
   };
+  backupScript = pkgs.writeShellScript "time-backup" ''
+    set -euo pipefail
+    export PATH=${
+      lib.makeBinPath [
+        pkgs.openssh
+        pkgs.curl
+        pkgs.jq
+        pkgs.coreutils
+        pkgs.findutils
+        pkgs.procps
+        cfg.package
+      ]
+    }:$PATH
+    dir=${cfg.backup.dir}
+    host=${cfg.backup.host}
+    day=$(date +%F)
+    mkdir -p "$dir"
+    fail() {
+      echo "time-backup: $*" >&2
+      n=/run/current-system/sw/bin/notify-erik
+      [ -x "$n" ] && "$n" -p high -t "Time backup failed" "$*" || true
+      exit 1
+    }
+    k="sudo kubectl -n homelab exec deploy/time-v2 --"
+    ssh "$host" "$k time-server backup /config/config.toml /tmp/time-backup.db" || fail "taking the snapshot"
+    ssh "$host" "$k cat /tmp/time-backup.db" > "$dir/.time-$day.db.part" || fail "copying the snapshot"
+    ssh "$host" "$k rm -f /tmp/time-backup.db" || true
+    mv "$dir/.time-$day.db.part" "$dir/time-$day.db"
+
+    # Restore test: a throwaway v2 server on the copy must answer with data.
+    r=$(mktemp -d)
+    trap 'pkill -f "time-server serve $r/config.toml" || true; rm -rf "$r"' EXIT
+    cp "$dir/time-$day.db" "$r/time.db"
+    printf 'data_dir = "%s"\nlisten = "127.0.0.1:17373"\n' "$r" > "$r/config.toml"
+    time-server verify "$r/time.db" || fail "integrity check of $dir/time-$day.db"
+    time-server serve "$r/config.toml" > "$r/log" 2>&1 &
+    for _ in $(seq 1 60); do curl -sf http://127.0.0.1:17373/healthz >/dev/null && break; sleep 1; done
+    status=$(curl -sf http://127.0.0.1:17373/api/status) || fail "restored server did not answer"
+    labelled=$(echo "$status" | jq .pipeline.classifier.labelled_total)
+    events=$(echo "$status" | jq .pipeline.events_total)
+    [ "$events" -gt 0 ] || fail "restored copy has no events"
+    echo "$(date -Is) $dir/time-$day.db restored: $events events, $labelled labelled minutes" | tee -a "$dir/restore-test.log"
+    find "$dir" -name 'time-*.db' -mtime +14 -delete
+  '';
   agentConfig = toml.generate "time-agent.toml" {
     inherit (cfg)
       device
@@ -119,6 +163,20 @@ in
       };
     };
 
+    backup = {
+      enable = lib.mkEnableOption "the nightly off-cluster backup of Time's database, with a restore test";
+      host = lib.mkOption {
+        type = lib.types.str;
+        default = "naiaclaw";
+        description = "ssh host that can run kubectl against the cluster running time-v2.";
+      };
+      dir = lib.mkOption {
+        type = lib.types.str;
+        default = "${config.home.homeDirectory}/backups/time";
+        description = "Where the copies are kept (14 days).";
+      };
+    };
+
     heartbeatMinutes = lib.mkOption {
       type = lib.types.ints.positive;
       default = 5;
@@ -127,6 +185,23 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    systemd.user.services.time-backup = lib.mkIf cfg.backup.enable {
+      Unit.Description = "Time: pull a consistent database copy off the cluster and restore-test it";
+      Service = {
+        Type = "oneshot";
+        ExecStart = "${backupScript}";
+        Nice = 10;
+      };
+    };
+    systemd.user.timers.time-backup = lib.mkIf cfg.backup.enable {
+      Unit.Description = "Time: nightly off-cluster backup";
+      Timer = {
+        OnCalendar = "*-*-* 04:15:00";
+        Persistent = true;
+      };
+      Install.WantedBy = [ "timers.target" ];
+    };
+
     systemd.user.services.time-collect = lib.mkIf cfg.collect.enable {
       Unit.Description = "Time: commits and pull requests";
       Service = {
