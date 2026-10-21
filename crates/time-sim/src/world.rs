@@ -141,6 +141,7 @@ impl World {
             timezone: "Europe/Stockholm".into(),
             apk_repo: "ErikFrankling/time".into(),
             apk_path: None,
+            import_v1_from: None,
             public_url: "http://time.test/".into(),
             nudge: Default::default(),
         };

@@ -20,6 +20,9 @@ pub struct Config {
     /// "off" in words, never as merely quiet.
     #[serde(default)]
     pub channels_off: Vec<String>,
+    /// v1's database: imported once, when this one has no events yet.
+    #[serde(default)]
+    pub import_v1_from: Option<PathBuf>,
     /// A rules file; the rules shipped with Time when absent.
     #[serde(default)]
     pub rules: Option<PathBuf>,

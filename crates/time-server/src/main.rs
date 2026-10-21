@@ -10,7 +10,9 @@ const USAGE: &str = "usage:
   time-server serve <config.toml>             run the server
   time-server import-v1 <config.toml> <v1.db> turn v1's history into events
   time-server classify <config.toml>          label everything queued, then exit
-  time-server compare-v1 <config.toml> <v1.db> compare v2's labels with v1's";
+  time-server compare-v1 <config.toml> <v1.db> compare v2's labels with v1's
+  time-server backup <config.toml> <out.db>     consistent copy of the live database
+  time-server verify <db>                       integrity check and row counts";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -84,6 +86,26 @@ async fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
+        ("backup", Some(p)) => {
+            let out = args.get(2).context(USAGE)?;
+            let config = Config::load(&p)?;
+            let store = Store::open(&config.data_dir.join("time.db"))?;
+            let _ = std::fs::remove_file(out);
+            store.backup_to(Path::new(out))?;
+            let (ok, events, minutes) = Store::open(Path::new(out))?.verify()?;
+            println!("backup {out}: integrity {ok}, {events} events, {minutes} minutes");
+            anyhow::ensure!(ok == "ok", "backup failed its integrity check");
+            Ok(())
+        }
+        ("verify", Some(p)) => {
+            let (ok, events, minutes) = Store::open(&p)?.verify()?;
+            println!(
+                "{}: integrity {ok}, {events} events, {minutes} minutes",
+                p.display()
+            );
+            anyhow::ensure!(ok == "ok", "integrity check failed");
+            Ok(())
+        }
         _ => bail!("{USAGE}"),
     }
 }
@@ -108,6 +130,18 @@ fn open(path: &Path) -> anyhow::Result<(Config, Arc<AppState>)> {
 
 async fn serve(path: &Path) -> anyhow::Result<()> {
     let (config, state) = open(path)?;
+    if let Some(v1) = &config.import_v1_from {
+        if state.store.event_count()? == 0 && v1.exists() {
+            let desktops = devices(&config, |k| k != DeviceKind::Phone);
+            let phones = devices(&config, |k| k == DeviceKind::Phone);
+            let r = import_v1::import(v1, &state.store, &desktops, &phones, state.clock.now_ms())?;
+            eprintln!(
+                "imported v1 history from {}: {} events",
+                v1.display(),
+                r.inserted
+            );
+        }
+    }
     let listener = tokio::net::TcpListener::bind(&config.listen)
         .await
         .with_context(|| format!("binding {}", config.listen))?;

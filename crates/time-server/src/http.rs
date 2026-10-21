@@ -23,6 +23,8 @@ const MAX_BODY: usize = 32 * 1024 * 1024;
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/v1/logs", post(ingest))
+        .route("/v1/frame", post(legacy_frame))
+        .route("/v1/frames", post(legacy_frames))
         .route("/healthz", get(healthz))
         .route(
             "/v1/focus",
@@ -468,5 +470,66 @@ async fn focus_clear(State(state): State<Arc<AppState>>, headers: HeaderMap) -> 
     match state.store.set_meta("focus", "null") {
         Ok(()) => Json(json!({ "focus": null })).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")).into_response(),
+    }
+}
+
+fn phones(state: &AppState) -> Vec<String> {
+    state
+        .config
+        .devices
+        .iter()
+        .filter(|(_, d)| d.kind == crate::config::DeviceKind::Phone)
+        .map(|(n, _)| n.clone())
+        .collect()
+}
+
+async fn store_legacy(
+    state: Arc<AppState>,
+    frames: Vec<crate::legacy::Frame>,
+) -> Result<Vec<crate::legacy::Ack>, (StatusCode, String)> {
+    let now = state.clock.now_ms();
+    let phones = phones(&state);
+    let events: Vec<_> = frames
+        .iter()
+        .flat_map(|f| crate::legacy::convert(f, &phones, now))
+        .collect();
+    let acks = frames.iter().map(crate::legacy::ack).collect();
+    let st = state.clone();
+    match tokio::task::spawn_blocking(move || st.store.insert(&events, now)).await {
+        Ok(Ok(i)) => {
+            state
+                .counters
+                .records_accepted
+                .fetch_add(i.new as u64, Relaxed);
+            state
+                .counters
+                .records_duplicate
+                .fetch_add(i.duplicate as u64, Relaxed);
+            Ok(acks)
+        }
+        Ok(Err(e)) => Err((StatusCode::SERVICE_UNAVAILABLE, format!("store: {e:#}"))),
+        Err(e) => Err((StatusCode::SERVICE_UNAVAILABLE, e.to_string())),
+    }
+}
+
+/// v1 desktop agent: one frame.
+async fn legacy_frame(
+    State(state): State<Arc<AppState>>,
+    Json(frame): Json<crate::legacy::Frame>,
+) -> Response {
+    match store_legacy(state, vec![frame]).await {
+        Ok(mut acks) => Json(acks.remove(0)).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+/// v1 phone and backlogs: an array of frames.
+async fn legacy_frames(
+    State(state): State<Arc<AppState>>,
+    Json(frames): Json<Vec<crate::legacy::Frame>>,
+) -> Response {
+    match store_legacy(state, frames).await {
+        Ok(acks) => Json(acks).into_response(),
+        Err(e) => e.into_response(),
     }
 }

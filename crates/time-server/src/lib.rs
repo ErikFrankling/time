@@ -11,6 +11,7 @@ pub mod day;
 pub mod http;
 pub mod import_v1;
 pub mod inbox;
+pub mod legacy;
 pub mod nudge;
 pub mod status;
 pub mod store;

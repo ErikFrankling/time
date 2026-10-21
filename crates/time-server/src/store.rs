@@ -241,6 +241,26 @@ impl Store {
         Ok(out)
     }
 
+    /// A consistent copy of the live database at `dest`, through SQLite's
+    /// online backup API: safe while the server keeps writing.
+    pub fn backup_to(&self, dest: &Path) -> Result<()> {
+        let conn = self.conn();
+        let mut out =
+            Connection::open(dest).with_context(|| format!("opening {}", dest.display()))?;
+        let b = rusqlite::backup::Backup::new(&conn, &mut out)?;
+        b.run_to_completion(1000, std::time::Duration::from_millis(5), None)?;
+        Ok(())
+    }
+
+    /// `PRAGMA integrity_check` and row counts: what a restore test checks.
+    pub fn verify(&self) -> Result<(String, u64, u64)> {
+        let conn = self.conn();
+        let ok: String = conn.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
+        let events: i64 = conn.query_row("SELECT count(*) FROM event", [], |r| r.get(0))?;
+        let minutes: i64 = conn.query_row("SELECT count(*) FROM minute", [], |r| r.get(0))?;
+        Ok((ok, events as u64, minutes as u64))
+    }
+
     /// Prove the database accepts a write, without leaving one behind.
     pub fn check_writable(&self) -> Result<()> {
         let conn = self.conn();

@@ -582,3 +582,20 @@ fn commits_and_pull_requests_show_on_the_day() {
         .clone();
     assert_eq!(code["state"], "live");
 }
+
+#[test]
+fn the_v1_phone_app_keeps_working_against_v2() {
+    let w = morning();
+    let ts = w.scenario.at("10:50").unwrap() / 1000;
+    let frames = serde_json::json!([
+        {"ts": ts, "device": "phone", "window": "X — com.twitter.android", "blocked": false, "keys": 0, "mouse": 0, "apps": ["com.twitter.android"], "workspaces": 0}
+    ]);
+    let r = reqwest::blocking::Client::new().post(format!("{}/v1/frames", w.base_url)).json(&frames).send().unwrap();
+    assert_eq!(r.status(), 200);
+    let acks: serde_json::Value = r.json().unwrap();
+    assert_eq!(acks[0]["ts"], ts);
+    let s = w.status().unwrap();
+    let phone = s["devices"].as_array().unwrap().iter().find(|d| d["name"] == "phone").unwrap().clone();
+    assert_eq!(phone["state"], "connected");
+    assert_eq!(phone["app_version"], "v1");
+}
