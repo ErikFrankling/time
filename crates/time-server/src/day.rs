@@ -30,6 +30,7 @@ pub struct Day {
     /// Steps per local hour, 0..24 (23 or 25 on daylight-saving days).
     pub steps_by_hour: Vec<u32>,
     pub code: CodeTotals,
+    pub signals: Signals,
 }
 
 /// What was shipped that day, from git and GitHub.
@@ -159,7 +160,9 @@ pub fn summarise(store: &Store, tz: chrono_tz::Tz, date: NaiveDate) -> anyhow::R
     let mut steps_by_hour = vec![0; hours];
     let (mut steps, mut distance_m) = (0, 0.0);
     let mut code = CodeTotals::default();
-    for e in store.events_between(start_ms, end_ms)? {
+    let day_events = store.events_between(start_ms, end_ms)?;
+    let signals = signals(&minutes, &day_events, start_ms, end_ms);
+    for e in day_events {
         if e.start_ms >= start_ms && e.start_ms < end_ms {
             code.add(&e.event);
         }
@@ -193,7 +196,128 @@ pub fn summarise(store: &Store, tz: chrono_tz::Tz, date: NaiveDate) -> anyhow::R
         distance_m,
         steps_by_hour,
         code,
+        signals,
     })
+}
+
+/// A stretch of time with a name: a place, or a state like "charging".
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Span {
+    pub what: String,
+    pub from_ms: Millis,
+    pub to_ms: Millis,
+}
+
+/// Places and device states over the day, from the no-GPS signals.
+#[derive(Debug, Default, Serialize)]
+pub struct Signals {
+    /// Where Erik was, from the networks his devices were on.
+    pub places: Vec<Span>,
+    /// The phone: charging, and how many times it was unlocked.
+    pub phone: Vec<Span>,
+    pub phone_unlocks: u32,
+    /// Computers: locked, lid closed, asleep, charging.
+    pub computers: Vec<Span>,
+}
+
+/// Contiguous minutes (gaps up to `bridge` minutes allowed) into spans.
+fn spans(mut minutes: Vec<Millis>, what: &str, min_len: i64, bridge: i64) -> Vec<Span> {
+    minutes.sort_unstable();
+    minutes.dedup();
+    let mut out: Vec<Span> = Vec::new();
+    for t in minutes {
+        match out.last_mut() {
+            Some(s) if t - s.to_ms <= bridge * MINUTE_MS => s.to_ms = t + MINUTE_MS,
+            _ => out.push(Span {
+                what: what.to_owned(),
+                from_ms: t,
+                to_ms: t + MINUTE_MS,
+            }),
+        }
+    }
+    out.retain(|s| s.to_ms - s.from_ms >= min_len * MINUTE_MS);
+    out
+}
+
+pub fn signals(
+    labels: &[time_core::label::MinuteLabel],
+    events: &[time_core::event::Envelope],
+    start: Millis,
+    end: Millis,
+) -> Signals {
+    use std::collections::BTreeMap;
+    let mut sig = Signals::default();
+
+    // Places: runs of the minute labels' location, bridging short gaps.
+    let mut by_place: BTreeMap<&str, Vec<Millis>> = BTreeMap::new();
+    for l in labels {
+        if let Some(p) = &l.location {
+            by_place.entry(p).or_default().push(l.ts);
+        }
+    }
+    for (p, mins) in by_place {
+        sig.places.extend(spans(mins, p, 5, 15));
+    }
+    sig.places.sort_by_key(|s| s.from_ms);
+
+    let in_day = |t: Millis| t >= start && t < end;
+    let mut phone_charging = Vec::new();
+    let mut phone_states: Vec<(Millis, bool)> = Vec::new();
+    let mut per_device: BTreeMap<(String, &str), Vec<Millis>> = BTreeMap::new();
+    for e in events.iter().filter(|e| in_day(e.start_ms)) {
+        let ts = e.start_ms - e.start_ms.rem_euclid(MINUTE_MS);
+        match &e.event {
+            Event::PhoneState(s) => {
+                if s.charging {
+                    phone_charging.push(ts);
+                }
+                phone_states.push((ts, s.locked));
+            }
+            Event::ScreenMinute(m) => {
+                if m.locked == Some(true) {
+                    per_device
+                        .entry((e.device.clone(), "locked"))
+                        .or_default()
+                        .push(ts);
+                }
+                if m.lid_closed == Some(true) {
+                    per_device
+                        .entry((e.device.clone(), "lid closed"))
+                        .or_default()
+                        .push(ts);
+                }
+                if m.charging == Some(true) {
+                    per_device
+                        .entry((e.device.clone(), "charging"))
+                        .or_default()
+                        .push(ts);
+                }
+            }
+            Event::Asleep(_) => {
+                let mut t = e.start_ms;
+                while t < e.end_ms {
+                    per_device
+                        .entry((e.device.clone(), "asleep"))
+                        .or_default()
+                        .push(t);
+                    t += MINUTE_MS;
+                }
+            }
+            _ => {}
+        }
+    }
+    sig.phone = spans(phone_charging, "charging", 5, 2);
+    phone_states.sort_unstable();
+    sig.phone_unlocks = phone_states
+        .windows(2)
+        .filter(|w| w[0].1 && !w[1].1)
+        .count() as u32;
+    for ((device, what), mins) in per_device {
+        sig.computers
+            .extend(spans(mins, &format!("{device} {what}"), 5, 2));
+    }
+    sig.computers.sort_by_key(|s| s.from_ms);
+    sig
 }
 
 #[cfg(test)]

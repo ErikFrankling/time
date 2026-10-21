@@ -26,7 +26,7 @@ use crate::rules::{Facts, RuleSet, Source};
 /// Bump whenever a change here can change a label. Stored labels carry it,
 /// and the server relabels all history when it differs, exactly as it does
 /// when the rules file changes.
-pub const LOGIC_VERSION: u32 = 2;
+pub const LOGIC_VERSION: u32 = 3;
 
 /// Input this recent at the end of a minute means someone was there.
 const RECENT_INPUT_SECS: u32 = 90;
@@ -152,6 +152,7 @@ pub fn label_minutes(
                 },
                 decider: Decider::Presence,
                 complete,
+                location: None,
             },
             Some(p) => {
                 let mut project = p.project.clone();
@@ -190,6 +191,7 @@ pub fn label_minutes(
                     rule: p.rule.clone(),
                     decider: Decider::Rule,
                     complete,
+                    location: None,
                 }
             }
         };
@@ -206,8 +208,11 @@ fn observe_screen<'e>(
     m: &'e ScreenMinute,
 ) -> Observation<'e> {
     let recent = m.idle_seconds.is_some_and(|s| s < RECENT_INPUT_SECS);
-    let active = m.keys > 0 || m.mouse > 0 || recent;
-    let passive = m.audio_playing || m.fullscreen;
+    // A locked screen or a closed lid is nobody at that machine, whatever
+    // the input counters and players say.
+    let away = m.locked == Some(true) || m.lid_closed == Some(true);
+    let active = !away && (m.keys > 0 || m.mouse > 0 || recent);
+    let passive = !away && (m.audio_playing || m.fullscreen);
     let (activity, rule, project) = if m.blocked {
         (Activity::Other, "blocked".to_owned(), None)
     } else if m.window_class.is_empty() {
@@ -259,6 +264,40 @@ fn pick<'a, 'e>(obs: &'a [Observation<'e>]) -> Option<&'a Observation<'e>> {
             desktops()
                 .find(|o| o.passive && matches!(o.activity, Activity::Video | Activity::Music))
         })
+}
+
+/// Set each label's `location` from the network its devices reported: the
+/// device in use first, then the phone, then any computer.
+pub fn locate(
+    places: &[crate::places::PlaceSpec],
+    labels: &mut [MinuteLabel],
+    events: &[Envelope],
+) {
+    use crate::event::Network;
+    let mut nets: HashMap<(Millis, &str), &Network> = HashMap::new();
+    for e in events {
+        let ts = e.start_ms - e.start_ms.rem_euclid(MINUTE_MS);
+        let net = match &e.event {
+            Event::ScreenMinute(m) => &m.network,
+            Event::PhoneState(s) => &s.network,
+            _ => continue,
+        };
+        if net.ssid.is_some() || net.gateway.is_some() || net.domain.is_some() {
+            nets.insert((ts, e.device.as_str()), net);
+        }
+    }
+    for l in labels.iter_mut() {
+        let in_use = l.device.as_deref().and_then(|d| nets.get(&(l.ts, d)));
+        let any = || {
+            nets.iter()
+                .filter(|((t, _), _)| *t == l.ts)
+                .map(|(_, n)| *n)
+                .find(|n| crate::places::resolve(places, n).is_some())
+        };
+        if let Some(n) = in_use.copied().or_else(any) {
+            l.location = crate::places::resolve(places, n);
+        }
+    }
 }
 
 #[cfg(test)]

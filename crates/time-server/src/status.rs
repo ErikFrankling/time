@@ -47,6 +47,12 @@ pub const CHANNELS: &[Channel] = &[
         live_within_ms: 2 * HOUR_MS,
     },
     Channel {
+        id: "phone_state",
+        label: "Phone charging, lock and Wi-Fi",
+        event: "time.phone.state",
+        live_within_ms: 45 * MINUTE_MS,
+    },
+    Channel {
         id: "prompts",
         label: "T3 Code prompts",
         event: "t3.prompt.sent",

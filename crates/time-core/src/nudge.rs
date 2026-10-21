@@ -184,6 +184,7 @@ mod tests {
             rule: "r".into(),
             decider: Decider::Rule,
             complete: true,
+            location: None,
         }
     }
 

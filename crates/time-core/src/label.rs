@@ -124,6 +124,10 @@ pub struct MinuteLabel {
     /// False when a configured device had not yet reported past this minute.
     /// Recomputed when it does.
     pub complete: bool,
+    /// The place, from the network the devices were on: `home`, `KTH`,
+    /// `Wi-Fi <name>`. None when no device said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
 }
 
 #[cfg(test)]

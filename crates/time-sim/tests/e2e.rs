@@ -590,12 +590,77 @@ fn the_v1_phone_app_keeps_working_against_v2() {
     let frames = serde_json::json!([
         {"ts": ts, "device": "phone", "window": "X — com.twitter.android", "blocked": false, "keys": 0, "mouse": 0, "apps": ["com.twitter.android"], "workspaces": 0}
     ]);
-    let r = reqwest::blocking::Client::new().post(format!("{}/v1/frames", w.base_url)).json(&frames).send().unwrap();
+    let r = reqwest::blocking::Client::new()
+        .post(format!("{}/v1/frames", w.base_url))
+        .json(&frames)
+        .send()
+        .unwrap();
     assert_eq!(r.status(), 200);
     let acks: serde_json::Value = r.json().unwrap();
     assert_eq!(acks[0]["ts"], ts);
     let s = w.status().unwrap();
-    let phone = s["devices"].as_array().unwrap().iter().find(|d| d["name"] == "phone").unwrap().clone();
+    let phone = s["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["name"] == "phone")
+        .unwrap()
+        .clone();
     assert_eq!(phone["state"], "connected");
     assert_eq!(phone["app_version"], "v1");
+}
+
+#[test]
+fn places_and_signals_show_on_the_day() {
+    use time_core::event::{Envelope, Event, Network, PhoneState, ScreenMinute};
+    let w = morning();
+    let t0 = w.scenario.at("10:00").unwrap();
+    let mut events = Vec::new();
+    for i in 0..30 {
+        let t = t0 + i * MINUTE_MS;
+        let state = PhoneState {
+            charging: i < 20,
+            locked: i % 10 == 0,
+            interactive: true,
+            network: Network {
+                ssid: Some("eduroam".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        events.push(Envelope::new(
+            "phone",
+            "time-android",
+            t,
+            t + MINUTE_MS,
+            Event::PhoneState(state),
+        ));
+    }
+    // A laptop with its lid shut for 20 minutes.
+    for i in 0..20 {
+        let t = t0 + i * MINUTE_MS;
+        events.push(Envelope::new(
+            "framework",
+            "time-agent",
+            t,
+            t + MINUTE_MS,
+            Event::ScreenMinute(ScreenMinute {
+                lid_closed: Some(true),
+                ..Default::default()
+            }),
+        ));
+    }
+    let r = reqwest::blocking::Client::new()
+        .post(format!("{}/v1/logs", w.base_url))
+        .json(&time_core::otlp::encode(&events, "test"))
+        .send()
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    w.classify().unwrap();
+    let (_, html) = w.get("/day/2026-10-21").unwrap();
+    assert!(html.contains("Places and signals"), "{html}");
+    assert!(html.contains("KTH 10:00–10:30"), "eduroam names the place");
+    assert!(html.contains("charging 10:00–10:20"));
+    assert!(html.contains("unlocked 3 times"), "locked at minutes 0, 10 and 20, unlocked after each");
+    assert!(html.contains("framework lid closed 10:00–10:20"));
 }

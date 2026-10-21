@@ -35,6 +35,10 @@ pub struct Config {
     /// Where the website is reached; nudges link to it.
     #[serde(default = "default_public_url")]
     pub public_url: String,
+    /// Networks that name a place (home, KTH). Defaults: home by the home
+    /// router, KTH by eduroam or the kth.se domain.
+    #[serde(default = "time_core::places::defaults", rename = "place")]
+    pub places: Vec<time_core::places::PlaceSpec>,
     /// Focus nudges. On by default with the values in `time_core::nudge`.
     #[serde(default)]
     pub nudge: time_core::nudge::NudgeConfig,

@@ -80,6 +80,12 @@ pub enum Event {
     #[serde(rename = "time.phone.app")]
     PhoneApp(PhoneApp),
     /// Steps and distance for a stretch of time, from Health Connect.
+    /// The phone's state for one minute: charging, locked, network.
+    #[serde(rename = "time.phone.state")]
+    PhoneState(PhoneState),
+    /// A computer was asleep (suspended) or its agent was not running.
+    #[serde(rename = "time.device.asleep")]
+    Asleep(Asleep),
     #[serde(rename = "time.health.steps")]
     HealthSteps(HealthSteps),
     /// A device saying it is alive and how much it still has to send.
@@ -116,6 +122,8 @@ impl Event {
             Event::ScreenMinute(_) => "time.screen.minute",
             Event::PhoneApp(_) => "time.phone.app",
             Event::HealthSteps(_) => "time.health.steps",
+            Event::PhoneState(_) => "time.phone.state",
+            Event::Asleep(_) => "time.device.asleep",
             Event::Heartbeat(_) => "time.heartbeat",
             Event::PromptSent(_) => "t3.prompt.sent",
             Event::FocusSpan(_) => "t3.focus.span",
@@ -168,6 +176,51 @@ pub struct ScreenMinute {
     /// The window matched the blocklist: nothing else in this event is real.
     #[serde(default)]
     pub blocked: bool,
+    /// The session is locked (lock screen up).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locked: Option<bool>,
+    /// Laptop lid closed. None on a machine without a lid.
+    #[serde(
+        rename = "lid.closed",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub lid_closed: Option<bool>,
+    /// On mains power and charging (or full). None without a battery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub charging: Option<bool>,
+    #[serde(
+        rename = "battery.percent",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub battery_percent: Option<u8>,
+    #[serde(flatten)]
+    pub network: Network,
+}
+
+/// Which network a device is on: enough to tell home from school without
+/// any location data.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Network {
+    /// Wi-Fi network name, when the device may read it.
+    #[serde(rename = "wifi.ssid", default, skip_serializing_if = "Option::is_none")]
+    pub ssid: Option<String>,
+    /// The default gateway's address: the router, so home vs elsewhere even
+    /// on a cable or when the SSID is hidden from the app.
+    #[serde(
+        rename = "network.gateway",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub gateway: Option<String>,
+    /// DNS search domains handed out by the network (eduroam at KTH: kth.se).
+    #[serde(
+        rename = "network.domain",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub domain: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -379,4 +432,31 @@ pub struct PullRequest {
 pub struct Review {
     pub repo: String,
     pub number: u32,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PhoneState {
+    #[serde(default)]
+    pub charging: bool,
+    #[serde(
+        rename = "battery.percent",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub battery_percent: Option<u8>,
+    /// Lock screen up.
+    #[serde(default)]
+    pub locked: bool,
+    /// Screen on.
+    #[serde(default)]
+    pub interactive: bool,
+    #[serde(flatten)]
+    pub network: Network,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Asleep {
+    /// `suspended` (a gap in the agent's minutes) or what the OS reported.
+    #[serde(default)]
+    pub reason: String,
 }

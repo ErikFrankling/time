@@ -414,6 +414,42 @@ pub fn day_page(day: &crate::day::Day, tz: chrono_tz::Tz, is_today: bool) -> Str
         day.distance_m / 1000.0,
     );
 
+    // Places and signals: where he was and what the devices were doing.
+    let sg = &day.signals;
+    if !sg.places.is_empty()
+        || !sg.phone.is_empty()
+        || !sg.computers.is_empty()
+        || sg.phone_unlocks > 0
+    {
+        let span = |s: &crate::day::Span| {
+            format!(
+                "{} {}–{}",
+                esc(&s.what),
+                clock_hm(tz, s.from_ms),
+                clock_hm(tz, s.to_ms)
+            )
+        };
+        let list = |v: &[crate::day::Span]| v.iter().map(span).collect::<Vec<_>>().join(" · ");
+        let _ = write!(body, r#"<section><h2>Places and signals</h2><dl>"#);
+        if !sg.places.is_empty() {
+            let _ = write!(body, "<dt>Where</dt><dd>{}</dd>", list(&sg.places));
+        }
+        if !sg.phone.is_empty() || sg.phone_unlocks > 0 {
+            let mut phone = list(&sg.phone);
+            if sg.phone_unlocks > 0 {
+                if !phone.is_empty() {
+                    phone.push_str(" · ");
+                }
+                phone.push_str(&format!("unlocked {} times", sg.phone_unlocks));
+            }
+            let _ = write!(body, "<dt>Phone</dt><dd>{phone}</dd>");
+        }
+        if !sg.computers.is_empty() {
+            let _ = write!(body, "<dt>Computers</dt><dd>{}</dd>", list(&sg.computers));
+        }
+        body.push_str("</dl></section>");
+    }
+
     // Hour strips.
     let by_ts: HashMap<Millis, &time_core::label::MinuteLabel> =
         day.minutes.iter().map(|m| (m.ts, m)).collect();

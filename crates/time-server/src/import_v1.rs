@@ -125,6 +125,7 @@ pub fn events(
                 mouse: row.mouse,
                 idle_seconds: row.idle_secs,
                 blocked: row.blocked,
+                ..Default::default()
             };
             out.push(Envelope::stable(
                 &row.device,

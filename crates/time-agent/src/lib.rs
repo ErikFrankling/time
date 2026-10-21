@@ -15,6 +15,7 @@ pub mod input;
 pub mod probe;
 pub mod sender;
 pub mod spool;
+pub mod system;
 
 pub use agent::Agent;
 pub use config::AgentConfig;

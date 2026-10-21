@@ -412,6 +412,40 @@ mod tests {
                 }),
             ),
             Envelope::new(
+                "phone",
+                "time-android",
+                1_700_000_000_000,
+                1_700_000_060_000,
+                Event::PhoneState(PhoneState {
+                    charging: true,
+                    battery_percent: Some(81),
+                    locked: false,
+                    interactive: true,
+                    network: Network {
+                        ssid: Some("eduroam".into()),
+                        gateway: Some("10.0.0.1".into()),
+                        domain: Some("kth.se".into()),
+                    },
+                }),
+            ),
+            Envelope::new(
+                "framework",
+                "time-agent",
+                1_700_000_000_000,
+                1_700_000_060_000,
+                Event::ScreenMinute(ScreenMinute {
+                    lid_closed: Some(true),
+                    charging: Some(false),
+                    battery_percent: Some(40),
+                    locked: Some(true),
+                    network: Network {
+                        ssid: Some("home-5g".into()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+            ),
+            Envelope::new(
                 "pc",
                 "t3code",
                 1_700_000_010_000,
@@ -486,10 +520,10 @@ mod tests {
         let results = decode(&req);
         assert_eq!(
             results.len(),
-            4,
-            "ops record skipped, four time records seen"
+            6,
+            "ops record skipped, the five samples and the bad record seen"
         );
-        assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 3);
+        assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 5);
         assert!(matches!(
             results.iter().find(|r| r.is_err()),
             Some(Err(DecodeError::Invalid { .. }))

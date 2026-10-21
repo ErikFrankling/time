@@ -4,12 +4,13 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use time_core::clock::{floor_minute, Clock, Millis, MINUTE_MS};
-use time_core::event::{Envelope, Event, Heartbeat, ScreenMinute};
+use time_core::event::{Asleep, Envelope, Event, Heartbeat, ScreenMinute};
 
 use crate::config::AgentConfig;
 use crate::probe::{Audio, Desktop, Input, Tabs};
 use crate::sender::{Delivery, Sender};
 use crate::spool::Spool;
+use crate::system::{NoSystem, System};
 
 pub const SERVICE: &str = "time-agent";
 
@@ -25,6 +26,7 @@ pub struct Agent {
     input: Box<dyn Input>,
     audio: Box<dyn Audio>,
     tabs: Box<dyn Tabs>,
+    system: Box<dyn System>,
     /// Present when sending happens inline after each tick (tests); `main`
     /// takes it to a thread of its own so a slow network never delays an
     /// observation.
@@ -71,11 +73,18 @@ impl Agent {
             input,
             audio,
             tabs,
+            system: Box::new(NoSystem),
             spool,
             last_minute: None,
             ticks: 0,
             desktop_error: None,
         })
+    }
+
+    /// Lock, lid, power and network probing (none by default).
+    pub fn with_system(mut self, system: Box<dyn System>) -> Self {
+        self.system = system;
+        self
     }
 
     /// Hand the sending half to a thread of its own.
@@ -90,6 +99,21 @@ impl Agent {
         let minute = floor_minute(now) - MINUTE_MS;
         let mut report = TickReport::default();
 
+        // A gap in our own minutes: the machine was asleep (or the agent was
+        // not running). Said explicitly rather than left as silence.
+        if let Some(last) = self.last_minute {
+            if minute - last > 2 * MINUTE_MS {
+                self.spool.push(&Envelope::new(
+                    &self.config.device,
+                    SERVICE,
+                    last + MINUTE_MS,
+                    minute,
+                    Event::Asleep(Asleep {
+                        reason: "suspended".into(),
+                    }),
+                ))?;
+            }
+        }
         if self.last_minute.is_none_or(|m| minute > m) {
             let event = self.observe();
             self.spool.push(&Envelope::new(
@@ -145,6 +169,7 @@ impl Agent {
     fn observe(&mut self) -> ScreenMinute {
         let input = self.input.take();
         let audio_playing = self.audio.playing();
+        let sys = self.system.sample();
         let window = match self.desktop.active_window() {
             Ok(w) => {
                 self.desktop_error = None;
@@ -160,6 +185,11 @@ impl Agent {
             mouse: input.mouse,
             idle_seconds: input.idle_seconds,
             audio_playing,
+            locked: sys.locked,
+            lid_closed: sys.lid_closed,
+            charging: sys.charging,
+            battery_percent: sys.battery_percent,
+            network: sys.network,
             ..Default::default()
         };
         let Some(window) = window else {

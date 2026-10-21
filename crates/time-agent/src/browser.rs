@@ -135,6 +135,11 @@ fn serve(mut req: tiny_http::Request, beats: &Arc<Mutex<HashMap<String, Beat>>>,
         respond(req, 204, String::new());
         return;
     }
+    // The homelab's health check for the agent (dotfiles observability).
+    if url.starts_with("/health") {
+        respond(req, 200, r#"{"status":"ok"}"#.into());
+        return;
+    }
     if url.starts_with("/api/0/info") {
         let info = serde_json::json!({ "hostname": hostname, "version": concat!("time ", env!("CARGO_PKG_VERSION")), "testing": false, "device_id": hostname });
         respond(req, 200, info.to_string());

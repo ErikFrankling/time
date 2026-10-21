@@ -44,6 +44,7 @@ pub struct Loaded {
 
 pub struct Classifier {
     loaded: RwLock<Arc<Loaded>>,
+    places: Vec<time_core::places::PlaceSpec>,
     base_rules: String,
     local_path: PathBuf,
     pub devices: Vec<DeviceSpec>,
@@ -76,6 +77,7 @@ impl Classifier {
         let loaded = Self::load(&base_rules, &local_path)?;
         Ok(Self {
             loaded: RwLock::new(Arc::new(loaded)),
+            places: config.places.clone(),
             base_rules,
             local_path,
             devices,
@@ -157,7 +159,7 @@ impl Classifier {
         let mut labelled = 0;
         for (a, b) in runs(&todo) {
             let events = store.events_between(a - LOOKBACK_MS, b + MINUTE_MS)?;
-            let labels: Vec<_> = label_minutes(
+            let mut labels: Vec<_> = label_minutes(
                 &loaded.rules,
                 &self.devices,
                 &events,
@@ -168,6 +170,7 @@ impl Classifier {
             .into_iter()
             .filter(|l| todo.contains(&l.ts))
             .collect();
+            time_core::timeline::locate(&self.places, &mut labels, &events);
             store.write_labels(&labels, &loaded.version, now)?;
             labelled += labels.len();
         }

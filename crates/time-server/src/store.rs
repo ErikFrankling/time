@@ -56,6 +56,8 @@ const MIGRATIONS: &[&str] = &[
      );
      CREATE TABLE dirty (ts INTEGER PRIMARY KEY);
      CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+    // 3: where Erik was, per minute.
+    "ALTER TABLE minute ADD COLUMN location TEXT;",
 ];
 
 pub struct Store {
@@ -346,12 +348,13 @@ impl Store {
         let tx = conn.transaction()?;
         {
             let mut up = tx.prepare_cached(
-                "INSERT INTO minute (ts, place, device, activity, project, background, rule, decider, complete, rules_version, computed_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                "INSERT INTO minute (ts, place, device, activity, project, background, rule, decider, complete, rules_version, computed_ms, location)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                  ON CONFLICT(ts) DO UPDATE SET place = excluded.place, device = excluded.device,
                     activity = excluded.activity, project = excluded.project, background = excluded.background,
                     rule = excluded.rule, decider = excluded.decider, complete = excluded.complete,
-                    rules_version = excluded.rules_version, computed_ms = excluded.computed_ms",
+                    rules_version = excluded.rules_version, computed_ms = excluded.computed_ms,
+                    location = excluded.location",
             )?;
             let mut done = tx.prepare_cached("DELETE FROM dirty WHERE ts = ?1")?;
             for l in labels {
@@ -367,6 +370,7 @@ impl Store {
                     l.complete,
                     rules_version,
                     computed_ms,
+                    l.location,
                 ])?;
                 done.execute([l.ts])?;
             }
@@ -378,7 +382,7 @@ impl Store {
     pub fn labels_between(&self, from: Millis, to: Millis) -> Result<Vec<MinuteLabel>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT ts, place, device, activity, project, background, rule, decider, complete
+            "SELECT ts, place, device, activity, project, background, rule, decider, complete, location
              FROM minute WHERE ts >= ?1 AND ts < ?2 ORDER BY ts",
         )?;
         let rows = stmt.query_map([from, to], |r| {
@@ -392,11 +396,23 @@ impl Store {
                 r.get::<_, String>(6)?,
                 r.get::<_, String>(7)?,
                 r.get::<_, bool>(8)?,
+                r.get::<_, Option<String>>(9)?,
             ))
         })?;
         let mut out = Vec::new();
         for row in rows {
-            let (ts, place, device, activity, project, background, rule, decider, complete) = row?;
+            let (
+                ts,
+                place,
+                device,
+                activity,
+                project,
+                background,
+                rule,
+                decider,
+                complete,
+                location,
+            ) = row?;
             out.push(MinuteLabel {
                 ts,
                 place: parse_enum(&place)?,
@@ -413,6 +429,7 @@ impl Store {
                 rule,
                 decider: parse_enum(&decider)?,
                 complete,
+                location,
             });
         }
         Ok(out)

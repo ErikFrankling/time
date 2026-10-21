@@ -48,7 +48,8 @@ fn main() -> anyhow::Result<()> {
         Box::new(Mpris::default()),
         Box::new(tabs),
         Box::new(sender),
-    )?;
+    )?
+    .with_system(Box::new(time_agent::system::Linux));
     eprintln!(
         "time-agent {} for {}",
         env!("CARGO_PKG_VERSION"),
@@ -110,6 +111,11 @@ fn run_probe(config: &AgentConfig) -> anyhow::Result<()> {
         Some(p) => println!("audio:   ERROR {p}"),
         None => println!("audio:   playing={playing}"),
     }
+    let s = time_agent::system::System::sample(&mut time_agent::system::Linux);
+    println!(
+        "system:  locked={:?} lid_closed={:?} charging={:?} battery={:?}% wifi={:?} gateway={:?} domain={:?}",
+        s.locked, s.lid_closed, s.charging, s.battery_percent, s.network.ssid, s.network.gateway, s.network.domain
+    );
     let tabs = Watcher::start(&config.device);
     match tabs.problem() {
         Some(p) => println!("tabs:    ERROR {p}"),

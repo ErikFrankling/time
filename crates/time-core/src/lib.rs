@@ -9,5 +9,6 @@ pub mod event;
 pub mod label;
 pub mod nudge;
 pub mod otlp;
+pub mod places;
 pub mod rules;
 pub mod timeline;

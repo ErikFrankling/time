@@ -143,6 +143,7 @@ impl World {
             apk_path: None,
             import_v1_from: None,
             public_url: "http://time.test/".into(),
+            places: time_core::places::defaults(),
             nudge: Default::default(),
         };
         std::fs::create_dir_all(&config.data_dir)?;
