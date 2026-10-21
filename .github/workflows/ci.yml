@@ -24,6 +24,12 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      # The real server, for the emulator job to point the phone app at.
+      - run: cargo build -p time-server
+      - uses: actions/upload-artifact@v4
+        with:
+          name: time-server
+          path: target/debug/time-server
 
   android:
     runs-on: ubuntu-latest
@@ -49,7 +55,7 @@ jobs:
 
   # Install on a real emulator, open both screens, and fail on any crash.
   emulator:
-    needs: android
+    needs: [android, rust]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -57,6 +63,17 @@ jobs:
         with:
           name: time-debug-apk
           path: apk
+      - uses: actions/download-artifact@v4
+        with:
+          name: time-server
+          path: server
+      - name: Start the Time server
+        run: |
+          chmod +x server/time-server
+          mkdir -p /tmp/time-data
+          printf 'data_dir = "/tmp/time-data"\nlisten = "0.0.0.0:7373"\n[devices.phone]\nkind = "phone"\n' > /tmp/time.toml
+          nohup server/time-server serve /tmp/time.toml > /tmp/time-server.log 2>&1 &
+          sleep 2; curl -sf http://127.0.0.1:7373/healthz
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
