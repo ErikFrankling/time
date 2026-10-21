@@ -661,6 +661,9 @@ fn places_and_signals_show_on_the_day() {
     assert!(html.contains("Places and signals"), "{html}");
     assert!(html.contains("KTH 10:00–10:30"), "eduroam names the place");
     assert!(html.contains("charging 10:00–10:20"));
-    assert!(html.contains("unlocked 3 times"), "locked at minutes 0, 10 and 20, unlocked after each");
+    assert!(
+        html.contains("unlocked 3 times"),
+        "locked at minutes 0, 10 and 20, unlocked after each"
+    );
     assert!(html.contains("framework lid closed 10:00–10:20"));
 }
