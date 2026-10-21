@@ -260,6 +260,45 @@ pub fn status_page(s: &Status, tz: chrono_tz::Tz) -> String {
         esc(&c.rules_version),
     );
 
+    // Focus nudges.
+    let nd = &s.nudges;
+    let sinks = if nd.sinks.is_empty() {
+        r#"<span class="t-warn">nowhere: no ntfy token or agent webhook configured</span>"#
+            .to_owned()
+    } else {
+        nd.sinks.join(" and ")
+    };
+    let focus = match &nd.focus {
+        Some(f) => format!(
+            "until {}: {}",
+            clock_time(tz, Some(f.until_ms)),
+            esc(&f.reason)
+        ),
+        None => "none".into(),
+    };
+    let _ = write!(
+        body,
+        r#"<section><h2>Focus nudges</h2><dl>
+<dt>State</dt><dd>{}</dd>
+<dt>Goes to</dt><dd>{sinks}</dd>
+<dt>Rule</dt><dd>{}</dd>
+<dt>Focus day</dt><dd>{focus}</dd>
+<dt>Sent today</dt><dd>{}</dd>
+<dt>Last check</dt><dd>{} · {}</dd>
+</dl></section>"#,
+        if nd.enabled {
+            "on"
+        } else {
+            "switched off in the config"
+        },
+        esc(&nd.rule),
+        nd.sent_today,
+        nd.last_check_ms
+            .map(|t| ago(now, Some(t)))
+            .unwrap_or_else(|| "not yet".into()),
+        esc(&nd.last_result),
+    );
+
     // System.
     let _ = write!(
         body,

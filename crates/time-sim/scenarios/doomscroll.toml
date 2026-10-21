@@ -1,0 +1,30 @@
+# A weekday morning lost to YouTube and X, then back to work.
+name = "doomscroll"
+start = "2026-10-21T10:00:00+02:00"
+end = "11:30"
+desktops = ["pc"]
+phone_enabled = true
+
+[[desktop]]
+device = "pc"
+from = "10:00"
+to = "10:40"
+class = "firefox"
+title = "Some video - YouTube — Mozilla Firefox"
+tabs = [{ host = "youtube.com", title = "Some video - YouTube" }]
+mouse = 1
+audio = true
+
+[[phone]]
+from = "10:40"
+to = "11:05"
+package = "com.twitter.android"
+label = "X"
+
+[[desktop]]
+device = "pc"
+from = "11:05"
+to = "11:30"
+class = "com.t3tools.T3Code"
+title = "T3 Code (Alpha)"
+keys = 90

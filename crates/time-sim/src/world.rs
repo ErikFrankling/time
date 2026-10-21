@@ -141,6 +141,8 @@ impl World {
             timezone: "Europe/Stockholm".into(),
             apk_repo: "ErikFrankling/time".into(),
             apk_path: None,
+            public_url: "http://time.test/".into(),
+            nudge: Default::default(),
         };
         std::fs::create_dir_all(&config.data_dir)?;
         let store = Store::open(&config.data_dir.join("time.db"))?;
@@ -309,5 +311,39 @@ impl World {
     /// Every event the server stored, oldest first.
     pub fn events(&self) -> Result<Vec<Envelope>> {
         self.state.store.events_between(i64::MIN / 2, i64::MAX / 2)
+    }
+}
+
+/// A nudge sink that records what it was sent, standing in for ntfy and the
+/// personal agent's webhook.
+#[derive(Clone, Default)]
+pub struct Captured(pub Arc<Mutex<Vec<(String, String, serde_json::Value)>>>);
+
+impl time_server::nudge::Sink for Captured {
+    fn name(&self) -> &'static str {
+        "phone"
+    }
+
+    fn send(&self, title: &str, body: &str, facts: &serde_json::Value) -> anyhow::Result<()> {
+        self.0
+            .lock()
+            .unwrap()
+            .push((title.to_owned(), body.to_owned(), facts.clone()));
+        Ok(())
+    }
+}
+
+impl World {
+    /// Attach a capturing sink and return it.
+    pub fn capture_nudges(&self) -> Captured {
+        let c = Captured::default();
+        self.state.nudger.add_sink(Arc::new(c.clone()));
+        c
+    }
+
+    /// Classify, then run one nudge check at the current simulated time.
+    pub fn nudge_check(&self) -> Result<Option<Envelope>> {
+        self.classify()?;
+        time_server::nudge::check(&self.state, self.clock.now_ms())
     }
 }

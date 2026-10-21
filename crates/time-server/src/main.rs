@@ -120,5 +120,6 @@ async fn serve(path: &Path) -> anyhow::Result<()> {
     );
     tokio::spawn(classify::run_forever(state.clone()));
     time_server::apk::spawn_poller(state.apk.clone());
+    tokio::spawn(time_server::nudge::run_forever(state.clone()));
     time_server::serve(listener, state).await
 }

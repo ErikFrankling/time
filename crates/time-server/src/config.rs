@@ -29,6 +29,12 @@ pub struct Config {
     /// Serve this APK file as is instead of fetching releases.
     #[serde(default)]
     pub apk_path: Option<PathBuf>,
+    /// Where the website is reached; nudges link to it.
+    #[serde(default = "default_public_url")]
+    pub public_url: String,
+    /// Focus nudges. On by default with the values in `time_core::nudge`.
+    #[serde(default)]
+    pub nudge: time_core::nudge::NudgeConfig,
     /// IANA zone for days and clock times on the website.
     #[serde(default = "default_timezone")]
     pub timezone: String,
@@ -53,6 +59,10 @@ pub struct DeviceConfig {
 
 fn default_apk_repo() -> String {
     "ErikFrankling/time".into()
+}
+
+fn default_public_url() -> String {
+    "https://time.erikfrankling.duckdns.org/".into()
 }
 
 fn default_timezone() -> String {

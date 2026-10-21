@@ -99,6 +99,10 @@ pub enum Event {
     TokensUsed(TokensUsed),
     #[serde(rename = "github.commit")]
     Commit(Commit),
+    #[serde(rename = "time.nudge.sent")]
+    NudgeSent(NudgeSent),
+    #[serde(rename = "time.nudge.outcome")]
+    NudgeOutcome(NudgeOutcome),
 }
 
 impl Event {
@@ -116,6 +120,8 @@ impl Event {
             Event::DictationFinished(_) => "stt.dictation.finished",
             Event::TokensUsed(_) => "llm.tokens.used",
             Event::Commit(_) => "github.commit",
+            Event::NudgeSent(_) => "time.nudge.sent",
+            Event::NudgeOutcome(_) => "time.nudge.outcome",
         }
     }
 }
@@ -311,4 +317,38 @@ pub struct Commit {
     pub lines_removed: u32,
     #[serde(default)]
     pub files: u32,
+}
+
+/// A focus nudge went out (or was attempted).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NudgeSent {
+    #[serde(rename = "window.minutes")]
+    pub window_minutes: u32,
+    #[serde(rename = "unproductive.minutes")]
+    pub unproductive_minutes: u32,
+    #[serde(rename = "productive.minutes")]
+    pub productive_minutes: u32,
+    #[serde(default)]
+    pub top_sources: Vec<String>,
+    #[serde(
+        rename = "focus.reason",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub focus_reason: Option<String>,
+    #[serde(rename = "nudges.today")]
+    pub nudges_today: u32,
+    /// Where it was delivered: `phone`, `agent`, both, or neither.
+    #[serde(default)]
+    pub delivered: Vec<String>,
+}
+
+/// Did the nudge change anything? Recorded ten minutes after it went out.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NudgeOutcome {
+    #[serde(rename = "nudge.id")]
+    pub nudge_id: String,
+    pub switched: bool,
+    #[serde(rename = "unproductive.minutes.after")]
+    pub unproductive_minutes_after: u32,
 }

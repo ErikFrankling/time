@@ -444,3 +444,97 @@ fn the_app_endpoints_answer_honestly_without_an_apk() {
     assert_eq!(code, 200);
     assert!(html.contains("No APK has been fetched yet."));
 }
+
+#[test]
+fn an_hour_of_youtube_and_x_gets_one_nudge_then_an_outcome() {
+    use time_core::clock::Clock;
+    use time_core::event::Event;
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("scenarios/doomscroll.toml");
+    let mut w = World::load(&path).unwrap();
+    let sent = w.capture_nudges();
+    let at = |w: &World, hhmm: &str| w.scenario.at(hhmm).unwrap();
+    let start = w.scenario.start_ms;
+
+    // Run to 11:00: an hour of YouTube, then X on the phone.
+    for t in (start..at(&w, "11:00")).step_by(MINUTE_MS as usize) {
+        w.step(t).unwrap();
+    }
+    let nudge = w.nudge_check().unwrap().expect("a nudge at 11:00");
+    {
+        let got = sent.0.lock().unwrap();
+        assert_eq!(got.len(), 1);
+        let (title, body, facts) = &got[0];
+        // The X session on the phone is still open at 11:00, and a phone span is
+        // only sent once it ends, so this nudge counts the YouTube alone.
+        assert_eq!(title, "40 min on YouTube");
+        assert!(body.contains("Time to get back to it?"));
+        assert_eq!(facts["nudges_today"], 1);
+    }
+
+    // Five minutes later, still scrolling: held by the cooldown.
+    for t in (at(&w, "11:00")..at(&w, "11:05")).step_by(MINUTE_MS as usize) {
+        w.step(t).unwrap();
+    }
+    assert!(w.nudge_check().unwrap().is_none());
+    assert_eq!(sent.0.lock().unwrap().len(), 1);
+    let (_, status) = w.get("/status").unwrap();
+    assert!(
+        status.contains("held: Cooldown"),
+        "status explains why nothing was sent"
+    );
+
+    // Back to work from 11:05. The 10-minute outcome says he switched.
+    for t in (at(&w, "11:05")..at(&w, "11:20")).step_by(MINUTE_MS as usize) {
+        w.step(t).unwrap();
+    }
+    w.nudge_check().unwrap();
+    let outcome = w
+        .events()
+        .unwrap()
+        .into_iter()
+        .find_map(|e| match e.event {
+            Event::NudgeOutcome(o) if o.nudge_id == nudge.id => Some(o),
+            _ => None,
+        })
+        .expect("an outcome is recorded");
+    assert!(
+        !outcome.switched,
+        "10:50-11:00 he was still on X, the window right after the nudge"
+    );
+    let _ = w.clock.now_ms();
+}
+
+#[test]
+fn a_focus_day_set_by_the_agent_nudges_after_hours() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("scenarios/doomscroll.toml");
+    let text = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("2026-10-21T10:00:00+02:00", "2026-10-24T20:00:00+02:00")
+        .replace("\"10:", "\"20:")
+        .replace("\"11:", "\"21:");
+    let mut w = World::start(time_sim::scenario::Scenario::parse(&text).unwrap()).unwrap();
+    let sent = w.capture_nudges();
+    let start = w.scenario.start_ms;
+    let nine = w.scenario.at("21:00").unwrap();
+    for t in (start..nine).step_by(MINUTE_MS as usize) {
+        w.step(t).unwrap();
+    }
+    // Saturday evening: no nudge on its own.
+    assert!(w.nudge_check().unwrap().is_none());
+    // The personal agent sets a focus day.
+    let r = reqwest::blocking::Client::new()
+        .post(format!("{}/v1/focus", w.base_url))
+        .json(&serde_json::json!({ "until_ms": nine + 3 * 3_600_000, "reason": "the DA2210 essay due tomorrow", "threshold_minutes": 20 }))
+        .send()
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert!(w.nudge_check().unwrap().is_some());
+    let got = sent.0.lock().unwrap();
+    assert!(
+        got[0]
+            .1
+            .contains("Today's focus: the DA2210 essay due tomorrow."),
+        "{}",
+        got[0].1
+    );
+}

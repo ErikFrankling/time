@@ -11,6 +11,7 @@ pub mod day;
 pub mod http;
 pub mod import_v1;
 pub mod inbox;
+pub mod nudge;
 pub mod status;
 pub mod store;
 pub mod web;
@@ -36,6 +37,7 @@ pub struct AppState {
     pub tz: chrono_tz::Tz,
     /// The Android APK served at `/app`.
     pub apk: apk::Shared,
+    pub nudger: nudge::Nudger,
     pub started_ms: Millis,
     pub counters: Counters,
 }
@@ -72,11 +74,13 @@ impl AppState {
         let ingest_token = std::env::var("TIME_INGEST_TOKEN")
             .ok()
             .filter(|t| !t.is_empty());
+        let nudger = nudge::Nudger::from_env(config.nudge.clone(), &config.public_url);
         let started_ms = clock.now_ms();
         Ok(Arc::new(Self {
             ingest_token,
             tz,
             apk,
+            nudger,
             config,
             store,
             clock,

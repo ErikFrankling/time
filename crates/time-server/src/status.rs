@@ -121,6 +121,7 @@ pub struct Status {
     pub devices: Vec<DeviceStatus>,
     pub channels: Vec<ChannelStatus>,
     pub pipeline: Pipeline,
+    pub nudges: NudgeStatus,
     pub system: System,
 }
 
@@ -145,6 +146,18 @@ pub struct ChannelStatus {
     pub state: ChannelState,
     pub last_ms: Option<Millis>,
     pub last_hour: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NudgeStatus {
+    pub enabled: bool,
+    /// Where a nudge goes: `phone` (ntfy), `agent` (webhook).
+    pub sinks: Vec<&'static str>,
+    pub focus: Option<time_core::nudge::Focus>,
+    pub last_check_ms: Option<Millis>,
+    pub last_result: String,
+    pub sent_today: u32,
+    pub rule: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -246,10 +259,12 @@ pub fn collect(state: &AppState) -> anyhow::Result<Status> {
         })
         .collect();
 
+    let nudges = nudge_status(state, now)?;
     Ok(Status {
         now_ms: now,
         devices,
         channels,
+        nudges,
         pipeline: Pipeline {
             events_total: state.store.event_count()?,
             accepted: state.counters.records_accepted.load(Relaxed),
@@ -263,6 +278,47 @@ pub fn collect(state: &AppState) -> anyhow::Result<Status> {
             db_bytes: state.store.size_bytes()?,
             started_ms: state.started_ms,
         },
+    })
+}
+
+fn nudge_status(state: &AppState, now: Millis) -> anyhow::Result<NudgeStatus> {
+    use chrono::TimeZone;
+    use std::sync::atomic::Ordering::Relaxed;
+    let n = &state.nudger;
+    let c = &n.config;
+    let today = state
+        .tz
+        .timestamp_millis_opt(now)
+        .single()
+        .map(|t| t.date_naive())
+        .unwrap_or_default();
+    let (day_start, _) = crate::day::bounds(state.tz, today)?;
+    let sent_today = state
+        .store
+        .events_between(day_start, now + 1)?
+        .iter()
+        .filter(|e| matches!(e.event, time_core::event::Event::NudgeSent(_)))
+        .count() as u32;
+    let last = n.last_check_ms.load(Relaxed);
+    Ok(NudgeStatus {
+        enabled: c.enabled,
+        sinks: n.sink_names(),
+        focus: crate::nudge::focus(&state.store, now)?,
+        last_check_ms: (last > 0).then_some(last),
+        last_result: n.last_result.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+        sent_today,
+        rule: format!(
+            "{} min of {} in the last {} min with under {} min productive; {:02}:00–{:02}:00{}; at most every {} min, {} a day",
+            c.threshold_minutes,
+            crate::nudge::unproductive_names(c),
+            c.window_minutes,
+            c.productive_floor_minutes,
+            c.start_hour,
+            c.end_hour,
+            if c.weekdays_only { " on weekdays" } else { "" },
+            c.cooldown_minutes,
+            c.max_per_day,
+        ),
     })
 }
 

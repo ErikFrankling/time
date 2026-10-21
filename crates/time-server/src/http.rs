@@ -24,6 +24,10 @@ pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/v1/logs", post(ingest))
         .route("/healthz", get(healthz))
+        .route(
+            "/v1/focus",
+            get(focus_get).post(focus_set).delete(focus_clear),
+        )
         .route("/metrics", get(metrics))
         .route("/api/status", get(api_status))
         .route("/status", get(status_html))
@@ -414,4 +418,55 @@ async fn app_page(State(state): State<Arc<AppState>>) -> Response {
         state.tz,
     ))
     .into_response()
+}
+
+/// The personal agent marks a focus day: nudges at any hour, optionally a
+/// lower threshold, and the reason in the nudge text. Guarded by the ingest
+/// token when one is set.
+fn agent_authorised(state: &AppState, headers: &HeaderMap) -> bool {
+    match &state.ingest_token {
+        None => true,
+        Some(token) => headers
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .is_some_and(|t| t == token),
+    }
+}
+
+async fn focus_get(State(state): State<Arc<AppState>>) -> Response {
+    match crate::nudge::focus(&state.store, state.clock.now_ms()) {
+        Ok(f) => Json(json!({ "focus": f })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")).into_response(),
+    }
+}
+
+async fn focus_set(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(f): Json<time_core::nudge::Focus>,
+) -> Response {
+    if !agent_authorised(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, "missing or wrong bearer token").into_response();
+    }
+    if f.until_ms <= state.clock.now_ms() {
+        return (StatusCode::BAD_REQUEST, "until_ms is in the past").into_response();
+    }
+    match serde_json::to_string(&f)
+        .map_err(anyhow::Error::from)
+        .and_then(|s| state.store.set_meta("focus", &s))
+    {
+        Ok(()) => Json(json!({ "focus": f })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")).into_response(),
+    }
+}
+
+async fn focus_clear(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if !agent_authorised(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, "missing or wrong bearer token").into_response();
+    }
+    match state.store.set_meta("focus", "null") {
+        Ok(()) => Json(json!({ "focus": null })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")).into_response(),
+    }
 }
