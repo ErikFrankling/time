@@ -657,8 +657,10 @@ Erik's word), completeness frontier, dHash, the Compose UI.
 Nothing below has been run. Order matters; each step can be undone.
 
 1. **Backups.** The homelab backup plan (homelab `docs/backups.md`) covers
-   the Time PVC and the Loki volume, and a restore of the Time database has
-   been tested.
+   the Time PVC and PVC `loki-data` (the 5-year raw copy of Time's events;
+   `alloy-data`, the export queue, is nice to have), and a restore of the
+   Time database has been tested. The k3s VM disk was at 87% on 2026-10-21:
+   budget the backup staging space.
 2. **Image.** Build `Dockerfile.v2` in CI and publish it as
    `ghcr.io/erikfrankling/time:v2` (a new tag, so v1's `:latest` is
    untouched).
@@ -668,8 +670,16 @@ Nothing below has been run. Order matters; each step can be undone.
 4. **Run side by side.** A second Deployment `time-v2` on the same node,
    mounting the same PVC with `data_dir = /data/v2`, service port 7373.
    v1 keeps serving `time.erikfrankling.duckdns.org` meanwhile.
-5. **Point the pipes.** The gateway Alloy forwards `service.namespace=time`
-   to `time-v2:7373/v1/logs`. Desktop agents switch to `time-agent` via a v2
+5. **Point the pipes.** Already done on the homelab side (homelab c34853e): the
+   gateway Alloy forwards `service.namespace=time` to `time-v2:7373/v1/logs`
+   (JSON, on-disk queue that waits until the Service exists) and Prometheus
+   scrapes `time-v2:7373/metrics` as job `time`; the alerts exist. Keep the
+   Service named `time-v2`, or change one line each in the homelab's
+   `config/alloy/config.alloy` and `config/prometheus/prometheus.yml`. Ask the
+   observability session to add the Gatus `/healthz` check once it runs. The
+   desktops send to their local Alloy (`127.0.0.1:4318`, live on the pc); the
+   phone needs the gateway token (homelab `secrets/otlp-ingest.enc.yaml`)
+   entered once in its settings screen. Desktop agents switch to `time-agent` via a v2
    home-manager module in the dotfiles (pc, then the laptop). The phone app is
    released from `main` once v2 is merged, keeping its signing key.
 6. **Compare for a day,** on the status screen and the day view.
