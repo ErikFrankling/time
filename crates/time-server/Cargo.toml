@@ -10,6 +10,7 @@ name = "time-server"
 path = "src/main.rs"
 
 [dependencies]
+regex.workspace = true
 anyhow.workspace = true
 axum.workspace = true
 chrono.workspace = true

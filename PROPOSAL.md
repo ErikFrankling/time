@@ -598,6 +598,22 @@ without Erik's devices.
 Each milestone is merged and pushed with its tests green. The live server
 switches to v2 only at M4, after backups exist.
 
+Progress (branch `v2`, 2026-10-21):
+
+- **M0 done.** Workspace, OTLP codec, virtual clock, scripted days, fake
+  Hyprland, simulated phone; end-to-end tests run the real server and agent.
+- **M1 done.** 36 rules, cross-device timeline, v1 backfill: 116,034 minutes
+  labelled in about 6 s on CPU; 88% agreement with v1's LLM labels; 0.6% of
+  present minutes left unknown.
+- **M2 mostly done.** OTLP ingest, `/healthz`, `/metrics`, the status screen,
+  real desktop probes (evdev, MPRIS, browser tabs matched by title). Not yet:
+  protobuf OTLP (Alloy can send JSON), the unknown inbox.
+- **M3 in progress.** Day view done (hour-by-hour, totals, projects, steps;
+  checked on real data at phone width). Android rewritten as a WebView of the
+  website plus collectors (usage spans, media, Health Connect, heartbeat), with
+  a contract test against the server and an emulator smoke test in CI. Not yet:
+  week view, inbox.
+
 | | milestone | contents | depends on Erik? |
 |---|---|---|---|
 | M0 | Skeleton and harness | Cargo workspace (`time-core`, `time-server`, `time-agent`, `time-sim`); virtual clock; scenario format; fake Hyprland socket, fake phone, fake notify; first end-to-end scenario green | no |

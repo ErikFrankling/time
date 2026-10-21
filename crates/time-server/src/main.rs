@@ -115,8 +115,8 @@ async fn serve(path: &Path) -> anyhow::Result<()> {
         "time-server {} listening on {}, rules {} ({} rules)",
         env!("CARGO_PKG_VERSION"),
         listener.local_addr()?,
-        state.classifier.version,
-        state.classifier.rules.rules.len()
+        state.classifier.version(),
+        state.classifier.current().rules.rules.len()
     );
     tokio::spawn(classify::run_forever(state.clone()));
     time_server::serve(listener, state).await

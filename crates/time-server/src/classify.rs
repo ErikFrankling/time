@@ -7,8 +7,9 @@
 //! was how classification stopped for two months without anyone noticing.
 
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering::Relaxed};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use anyhow::Result;
 use time_core::clock::{Millis, MINUTE_MS};
@@ -30,10 +31,21 @@ pub const PASS_LIMIT: usize = 5_000;
 /// A prompt names the project of the minutes up to this long after it.
 const LOOKBACK_MS: Millis = 10 * MINUTE_MS;
 
-pub struct Classifier {
+/// Rules Erik adds from the inbox, kept in the data directory beside the
+/// database. They come first, so they win over the shipped rules.
+pub const LOCAL_RULES_FILE: &str = "rules.local.toml";
+
+/// The rules in force, swapped whole when Erik adds one.
+pub struct Loaded {
     pub rules: RuleSet,
-    /// Rules file version plus the labelling logic version.
+    /// Rules version plus the labelling logic version.
     pub version: String,
+}
+
+pub struct Classifier {
+    loaded: RwLock<Arc<Loaded>>,
+    base_rules: String,
+    local_path: PathBuf,
     pub devices: Vec<DeviceSpec>,
     pub every_ms: Millis,
     pub last_run_ms: AtomicI64,
@@ -44,12 +56,12 @@ pub struct Classifier {
 
 impl Classifier {
     pub fn from_config(config: &Config) -> Result<Self> {
-        let text = match &config.rules {
+        let base_rules = match &config.rules {
             Some(path) => std::fs::read_to_string(path)
                 .map_err(|e| anyhow::anyhow!("reading rules {}: {e}", path.display()))?,
             None => DEFAULT_RULES.to_owned(),
         };
-        let rules = RuleSet::parse(&text).map_err(|e| anyhow::anyhow!("rules: {e:#}"))?;
+        let local_path = config.data_dir.join(LOCAL_RULES_FILE);
         let devices = config
             .devices
             .iter()
@@ -61,9 +73,11 @@ impl Classifier {
                 },
             })
             .collect();
+        let loaded = Self::load(&base_rules, &local_path)?;
         Ok(Self {
-            version: format!("{}.{LOGIC_VERSION}", rules.version),
-            rules,
+            loaded: RwLock::new(Arc::new(loaded)),
+            base_rules,
+            local_path,
             devices,
             every_ms: (config.classify_every_secs.max(1) * 1000) as Millis,
             last_run_ms: AtomicI64::new(0),
@@ -73,20 +87,66 @@ impl Classifier {
         })
     }
 
+    fn load(base: &str, local_path: &std::path::Path) -> Result<Loaded> {
+        let local = match std::fs::read_to_string(local_path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => anyhow::bail!("reading {}: {e}", local_path.display()),
+        };
+        Self::load_text(base, &local)
+    }
+
+    /// The rules in force now.
+    pub fn current(&self) -> Arc<Loaded> {
+        self.loaded
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub fn version(&self) -> String {
+        self.current().version.clone()
+    }
+
+    /// Add one rule to the local file, prove the result parses, and switch
+    /// to it. History is relabelled by [`Self::requeue_if_rules_changed`].
+    pub fn add_local_rule(&self, rule_toml: &str) -> Result<()> {
+        let mut local = std::fs::read_to_string(&self.local_path).unwrap_or_default();
+        local.push_str(rule_toml);
+        let candidate = Self::load_text(&self.base_rules, &local)?;
+        let tmp = self.local_path.with_extension("toml.tmp");
+        std::fs::write(&tmp, &local)?;
+        std::fs::rename(&tmp, &self.local_path)?;
+        *self.loaded.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(candidate);
+        Ok(())
+    }
+
+    fn load_text(base: &str, local: &str) -> Result<Loaded> {
+        // TOML arrays of tables concatenate, so local rules simply come first.
+        let rules = RuleSet::parse(&format!("{local}\n{base}"))
+            .map_err(|e| anyhow::anyhow!("rules: {e:#}"))?;
+        Ok(Loaded {
+            version: format!("{}.{LOGIC_VERSION}", rules.version),
+            rules,
+        })
+    }
+
     /// When the rules differ from the ones the stored labels came from,
     /// queue all of history: labels always reflect the current rules.
     pub fn requeue_if_rules_changed(&self, store: &Store) -> Result<Option<u64>> {
-        if store.meta("rules_version")?.as_deref() == Some(self.version.as_str()) {
+        let version = self.version();
+        if store.meta("rules_version")?.as_deref() == Some(version.as_str()) {
             return Ok(None);
         }
         let n = store.mark_all_dirty()?;
-        store.set_meta("rules_version", &self.version)?;
+        store.set_meta("rules_version", &version)?;
         Ok(Some(n))
     }
 
     /// One pass. Returns how many minutes were labelled.
     pub fn run_once(&self, store: &Store, now: Millis) -> Result<usize> {
         self.last_run_ms.store(now, Relaxed);
+        let loaded = self.current();
         let mut todo: BTreeSet<Millis> = store.dirty_batch(PASS_LIMIT)?.into_iter().collect();
         todo.extend(store.incomplete_since(now - RECHECK_INCOMPLETE_MS, PASS_LIMIT)?);
         if todo.is_empty() {
@@ -97,7 +157,7 @@ impl Classifier {
         for (a, b) in runs(&todo) {
             let events = store.events_between(a - LOOKBACK_MS, b + MINUTE_MS)?;
             let labels: Vec<_> = label_minutes(
-                &self.rules,
+                &loaded.rules,
                 &self.devices,
                 &events,
                 &covered,
@@ -107,7 +167,7 @@ impl Classifier {
             .into_iter()
             .filter(|l| todo.contains(&l.ts))
             .collect();
-            store.write_labels(&labels, &self.version, now)?;
+            store.write_labels(&labels, &loaded.version, now)?;
             labelled += labels.len();
         }
         Ok(labelled)

@@ -359,3 +359,67 @@ fn the_day_page_and_api_show_the_morning() {
     }
     assert_eq!(w.get("/day/yesterday").unwrap().0, 400);
 }
+
+#[test]
+fn answering_the_inbox_writes_a_rule_and_relabels_history() {
+    use time_core::label::Activity;
+    let scenario = time_sim::scenario::Scenario::parse(
+        r#"
+        name = "inbox"
+        start = "2026-10-21T09:00:00+02:00"
+        end = "09:30"
+        desktops = ["pc"]
+        [[desktop]]
+        device = "pc"
+        from = "09:00"
+        to = "09:30"
+        class = "org.weird.App"
+        title = "Weird — \"quoted\" title"
+        keys = 20
+        "#,
+    )
+    .unwrap();
+    let mut w = World::start(scenario).unwrap();
+    w.run().unwrap();
+    let all = |w: &World| w.labels(w.scenario.start_ms, w.scenario.end_ms).unwrap();
+    assert!(all(&w)
+        .iter()
+        .all(|l| l.activity == Some(Activity::Unknown)));
+
+    let (code, html) = w.get("/inbox").unwrap();
+    assert_eq!(code, 200);
+    assert!(html.contains("30 min across 1 windows"), "{html}");
+    assert!(html.contains("All of org.weird.App"));
+
+    // Answer it the way the form does.
+    let client = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let url = format!("{}/inbox/rule", w.base_url);
+    let r = client
+        .post(&url)
+        .form(&[
+            ("on", "class"),
+            ("value", "org.weird.App"),
+            ("activity", "work"),
+        ])
+        .send()
+        .unwrap();
+    assert_eq!(r.status(), 303, "{}", r.text().unwrap_or_default());
+    w.classify().unwrap();
+    assert!(all(&w)
+        .iter()
+        .all(|l| l.activity == Some(Activity::Work) && l.rule.starts_with("local.")));
+    let (_, html) = w.get("/inbox").unwrap();
+    assert!(html.contains("Nothing unknown"));
+
+    // Another site cannot post rules.
+    let r = client
+        .post(&url)
+        .header("origin", "https://evil.example")
+        .form(&[("on", "class"), ("value", "x"), ("activity", "work")])
+        .send()
+        .unwrap();
+    assert_eq!(r.status(), 403);
+}

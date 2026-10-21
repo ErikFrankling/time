@@ -1,5 +1,6 @@
 //! HTTP routes: OTLP ingest, health, metrics, status.
 
+use std::collections::HashMap;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
 
@@ -26,6 +27,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/metrics", get(metrics))
         .route("/api/status", get(api_status))
         .route("/status", get(status_html))
+        .route("/inbox", get(inbox_html))
+        .route("/inbox/rule", post(inbox_rule))
         .route("/", get(today_html))
         .route("/day/{date}", get(day_html))
         .route("/api/day/{date}", get(day_json))
@@ -232,5 +235,74 @@ async fn day_json(
     match load_day(state, Some(date)).await {
         Ok((day, _)) => Json(day).into_response(),
         Err(e) => e.into_response(),
+    }
+}
+
+async fn inbox_html(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>,
+) -> Response {
+    let st = state.clone();
+    let now = state.clock.now_ms();
+    let items = tokio::task::spawn_blocking(move || {
+        crate::inbox::items(&st.store, now - crate::inbox::WINDOW_MS, now)
+    })
+    .await;
+    match items {
+        Ok(Ok(items)) => axum::response::Html(crate::web::inbox_page(
+            &items,
+            state.tz,
+            q.get("added").map(String::as_str),
+        ))
+        .into_response(),
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct NewRule {
+    on: crate::inbox::MatchOn,
+    value: String,
+    #[serde(default)]
+    class: String,
+    activity: time_core::label::Activity,
+}
+
+/// Turn an inbox answer into a rule, then relabel history with it.
+async fn inbox_rule(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::Form(f): axum::Form<NewRule>,
+) -> Response {
+    // A page on another site must not be able to post rules here: if the
+    // browser says where the form came from, it has to be this host.
+    let host = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok());
+    if let Some(o) = origin {
+        if o.split("://").nth(1) != Some(host) {
+            return (StatusCode::FORBIDDEN, "cross-site form post refused").into_response();
+        }
+    }
+    let id = format!("local.{}", state.clock.now_ms());
+    let toml = match crate::inbox::rule_toml(f.on, f.value.trim(), f.class.trim(), f.activity, &id)
+    {
+        Ok(t) => t,
+        Err(e) => return (StatusCode::BAD_REQUEST, format!("{e:#}")).into_response(),
+    };
+    let st = state.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        st.classifier.add_local_rule(&toml)?;
+        st.classifier.requeue_if_rules_changed(&st.store)?;
+        st.classifier.run_once(&st.store, st.clock.now_ms())
+    })
+    .await;
+    match result {
+        Ok(Ok(_)) => axum::response::Redirect::to(&format!("/inbox?added={id}")).into_response(),
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST, format!("{e:#}")).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }

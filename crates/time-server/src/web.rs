@@ -94,7 +94,7 @@ pub fn page_with(
     let refresh = refresh_secs
         .map(|s| format!(r#"<meta http-equiv="refresh" content="{s}">"#))
         .unwrap_or_default();
-    let nav = [("/", "Today"), ("/status", "Status")]
+    let nav = [("/", "Today"), ("/inbox", "Inbox"), ("/status", "Status")]
         .iter()
         .map(|(href, label)| {
             let class = if *href == here {
@@ -536,6 +536,106 @@ fn group_thousands(n: u32) -> String {
     }
     out
 }
+
+/// The unknown inbox: one row per window or phone app no rule matched, each
+/// with a form that turns the answer into a rule.
+pub fn inbox_page(items: &[crate::inbox::Item], tz: chrono_tz::Tz, added: Option<&str>) -> String {
+    use crate::inbox::Subject;
+    use time_core::label::Activity;
+
+    let options: String = Activity::ALL
+        .iter()
+        .filter(|a| **a != Activity::Unknown)
+        .map(|a| format!(r#"<option value="{a}">{a}</option>"#))
+        .collect();
+    let mut body = String::new();
+    if let Some(id) = added {
+        let _ = write!(
+            body,
+            r#"<section><div class="banner t-ok">Rule {} added. History has been relabelled with it.</div></section>"#,
+            esc(id)
+        );
+    }
+    let total: u32 = items.iter().map(|i| i.minutes).sum();
+    let _ = write!(
+        body,
+        r#"<section><h2>Unknown, last 14 days</h2><div class="sub">{} across {} windows and apps. Answer once and every minute like it, past and future, is labelled.</div></section>"#,
+        duration(total),
+        items.len()
+    );
+    for item in items.iter().take(100) {
+        let (name, detail) = match &item.subject {
+            Subject::Window { class, title } => (
+                if title.is_empty() {
+                    class.clone()
+                } else {
+                    title.clone()
+                },
+                format!(
+                    "window · {}",
+                    if class.is_empty() {
+                        "no window class"
+                    } else {
+                        class
+                    }
+                ),
+            ),
+            Subject::PhoneApp { package, label } => (
+                if label.is_empty() {
+                    package.clone()
+                } else {
+                    label.clone()
+                },
+                format!("phone app · {package}"),
+            ),
+        };
+        // One form per answer, so each button means exactly one thing.
+        let forms = match &item.subject {
+            Subject::Window { class, title } => {
+                let mut f = String::new();
+                if !title.is_empty() {
+                    let _ = write!(
+                        f,
+                        r#"<form method="post" action="/inbox/rule"><input type="hidden" name="on" value="title"><input type="hidden" name="value" value="{}"><input type="hidden" name="class" value="{}"><select name="activity">{options}</select> <button>Just this title</button></form>"#,
+                        esc(title),
+                        esc(class)
+                    );
+                }
+                if !class.is_empty() {
+                    let _ = write!(
+                        f,
+                        r#"<form method="post" action="/inbox/rule"><input type="hidden" name="on" value="class"><input type="hidden" name="value" value="{}"><select name="activity">{options}</select> <button>All of {}</button></form>"#,
+                        esc(class),
+                        esc(class)
+                    );
+                }
+                f
+            }
+            Subject::PhoneApp { package, .. } => format!(
+                r#"<form method="post" action="/inbox/rule"><input type="hidden" name="on" value="package"><input type="hidden" name="value" value="{}"><select name="activity">{options}</select> <button>This app</button></form>"#,
+                esc(package)
+            ),
+        };
+        let _ = write!(
+            body,
+            r#"<section class="inbox"><div class="name">{}</div><div class="sub">{} · {} · last {}</div>{forms}</section>"#,
+            esc(&name),
+            esc(&detail),
+            duration(item.minutes),
+            clock_time(tz, Some(item.last_ms)),
+        );
+    }
+    if items.is_empty() {
+        body.push_str(r#"<section><div class="banner t-ok">Nothing unknown. Every minute in the last 14 days matched a rule.</div></section>"#);
+    }
+    page_with("Time · Inbox", "/inbox", None, INBOX_STYLE, &body)
+}
+
+const INBOX_STYLE: &str = r#"
+.inbox form { display:flex; flex-wrap:wrap; gap:.4rem; align-items:center; margin-top:.5rem; }
+.inbox select, .inbox button { font:inherit; padding:.35rem .6rem; border-radius:8px; border:1px solid var(--line); background:var(--bg); color:var(--fg); }
+.inbox button { cursor:pointer; font-weight:600; }
+"#;
 
 #[cfg(test)]
 mod tests {

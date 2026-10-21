@@ -82,6 +82,10 @@ dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     // Steps and distance. Aggregation per hour happens inside Health Connect.
     implementation("androidx.health.connect:connect-client:1.1.0")
+    // Health Connect's dependencies resolve Guava's listenablefuture to the
+    // empty placeholder artifact, which hides ListenableFuture from the
+    // WorkManager calls in Sync.kt. The real class comes from Guava.
+    implementation("com.google.guava:guava:33.3.1-android")
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")
     // android.jar's org.json is a stub that throws on every call, so the spool

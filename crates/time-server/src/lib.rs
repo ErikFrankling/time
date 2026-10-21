@@ -9,6 +9,7 @@ pub mod config;
 pub mod day;
 pub mod http;
 pub mod import_v1;
+pub mod inbox;
 pub mod status;
 pub mod store;
 pub mod web;
@@ -53,7 +54,7 @@ impl AppState {
         if let Some(n) = classifier.requeue_if_rules_changed(&store)? {
             eprintln!(
                 "classifier: rules are new ({}), {n} minute(s) queued",
-                classifier.version
+                classifier.version()
             );
         }
         let tz = config.tz()?;
