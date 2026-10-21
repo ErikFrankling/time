@@ -608,11 +608,15 @@ Progress (branch `v2`, 2026-10-21):
 - **M2 mostly done.** OTLP ingest, `/healthz`, `/metrics`, the status screen,
   real desktop probes (evdev, MPRIS, browser tabs matched by title). Not yet:
   protobuf OTLP (Alloy can send JSON), the unknown inbox.
-- **M3 in progress.** Day view done (hour-by-hour, totals, projects, steps;
-  checked on real data at phone width). Android rewritten as a WebView of the
-  website plus collectors (usage spans, media, Health Connect, heartbeat), with
-  a contract test against the server and an emulator smoke test in CI. Not yet:
-  week view, inbox.
+- **M3 done.** Day and week views, the unknown inbox (answers become rules
+  and relabel history), status screen; the phone app is the website plus
+  native collectors, and CI proves on an emulator that the real app reaches
+  the real server.
+- **M6 done** (with default thresholds): nudge rule, focus days via
+  `/v1/focus`, delivery to ntfy (`time-ntfy` secret) and the personal agent's
+  webhook, nudge and outcome events, status section. Live once deployed.
+- **Code channel done:** `time-collect` turns local commits and GitHub PRs
+  and reviews into events; shown on the day view.
 
 | | milestone | contents | depends on Erik? |
 |---|---|---|---|
