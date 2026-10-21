@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/time-core", "crates/time-server", "crates/time-agent", "crates/time-sim"]
+members = ["crates/time-core", "crates/time-server", "crates/time-agent", "crates/time-sim", "crates/time-collect"]
 # v1 stays buildable on its own until v2 replaces it in production (M4).
 exclude = ["legacy"]
 
@@ -28,6 +28,7 @@ uuid = { version = "1", features = ["v4", "v5"] }
 time-core = { path = "crates/time-core" }
 time-server = { path = "crates/time-server" }
 time-agent = { path = "crates/time-agent" }
+time-collect = { path = "crates/time-collect" }
 
 [profile.release]
 opt-level = 2

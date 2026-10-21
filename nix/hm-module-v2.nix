@@ -12,6 +12,10 @@
 let
   cfg = config.services.time-agent-v2;
   toml = pkgs.formats.toml { };
+  collectConfig = toml.generate "time-collect.toml" {
+    inherit (cfg) device endpoint;
+    inherit (cfg.collect) roots authors github;
+  };
   agentConfig = toml.generate "time-agent.toml" {
     inherit (cfg)
       device
@@ -96,6 +100,25 @@ in
       description = "Window classes whose front tab is looked up via aw-watcher-web.";
     };
 
+    collect = {
+      enable = lib.mkEnableOption "commit and pull-request collection (time-collect), every 15 minutes";
+      roots = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ "~/projects" ];
+        description = "Directories walked for git repositories.";
+      };
+      authors = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ ];
+        description = "Substrings of author name or email that are you. Empty: each repository's user.email.";
+      };
+      github = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = "Also fetch pull requests and reviews (token from the gh CLI login).";
+      };
+    };
+
     heartbeatMinutes = lib.mkOption {
       type = lib.types.ints.positive;
       default = 5;
@@ -104,6 +127,24 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    systemd.user.services.time-collect = lib.mkIf cfg.collect.enable {
+      Unit.Description = "Time: commits and pull requests";
+      Service = {
+        Type = "oneshot";
+        ExecStart = "${lib.getExe' cfg.package "time-collect"} ${collectConfig}";
+        Nice = 10;
+      }
+      // lib.optionalAttrs (cfg.tokenFile != null) { EnvironmentFile = cfg.tokenFile; };
+    };
+    systemd.user.timers.time-collect = lib.mkIf cfg.collect.enable {
+      Unit.Description = "Time: commits and pull requests, every 15 minutes";
+      Timer = {
+        OnBootSec = "5min";
+        OnUnitActiveSec = "15min";
+      };
+      Install.WantedBy = [ "timers.target" ];
+    };
+
     systemd.user.services.time-agent-v2 = {
       Unit = {
         Description = "Time v2 desktop agent";

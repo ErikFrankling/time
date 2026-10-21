@@ -99,6 +99,10 @@ pub enum Event {
     TokensUsed(TokensUsed),
     #[serde(rename = "github.commit")]
     Commit(Commit),
+    #[serde(rename = "github.pr")]
+    PullRequest(PullRequest),
+    #[serde(rename = "github.review")]
+    Review(Review),
     #[serde(rename = "time.nudge.sent")]
     NudgeSent(NudgeSent),
     #[serde(rename = "time.nudge.outcome")]
@@ -120,6 +124,8 @@ impl Event {
             Event::DictationFinished(_) => "stt.dictation.finished",
             Event::TokensUsed(_) => "llm.tokens.used",
             Event::Commit(_) => "github.commit",
+            Event::PullRequest(_) => "github.pr",
+            Event::Review(_) => "github.review",
             Event::NudgeSent(_) => "time.nudge.sent",
             Event::NudgeOutcome(_) => "time.nudge.outcome",
         }
@@ -311,6 +317,12 @@ pub struct TokensUsed {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Commit {
     pub repo: String,
+    /// Full hash; the event id is derived from it, so rescans dedupe.
+    #[serde(default)]
+    pub sha: String,
+    /// The local checkout, so the server can map it to a project.
+    #[serde(rename = "repo.path", default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     #[serde(rename = "lines.added", default)]
     pub lines_added: u32,
     #[serde(rename = "lines.removed", default)]
@@ -351,4 +363,20 @@ pub struct NudgeOutcome {
     pub switched: bool,
     #[serde(rename = "unproductive.minutes.after")]
     pub unproductive_minutes_after: u32,
+}
+
+/// A pull request Erik opened or that was merged.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PullRequest {
+    pub repo: String,
+    pub number: u32,
+    /// `opened` or `merged`.
+    pub action: String,
+}
+
+/// A review Erik gave.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Review {
+    pub repo: String,
+    pub number: u32,
 }

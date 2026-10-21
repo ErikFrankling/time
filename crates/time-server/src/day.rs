@@ -29,6 +29,52 @@ pub struct Day {
     pub distance_m: f64,
     /// Steps per local hour, 0..24 (23 or 25 on daylight-saving days).
     pub steps_by_hour: Vec<u32>,
+    pub code: CodeTotals,
+}
+
+/// What was shipped that day, from git and GitHub.
+#[derive(Debug, Default, Serialize)]
+pub struct CodeTotals {
+    pub commits: u32,
+    pub lines_added: u32,
+    pub lines_removed: u32,
+    pub prs_opened: u32,
+    pub prs_merged: u32,
+    pub reviews: u32,
+    pub repos: Vec<String>,
+}
+
+impl CodeTotals {
+    fn add(&mut self, e: &Event) {
+        let repo = match e {
+            Event::Commit(c) => {
+                self.commits += 1;
+                self.lines_added += c.lines_added;
+                self.lines_removed += c.lines_removed;
+                &c.repo
+            }
+            Event::PullRequest(p) if p.action == "opened" => {
+                self.prs_opened += 1;
+                &p.repo
+            }
+            Event::PullRequest(p) if p.action == "merged" => {
+                self.prs_merged += 1;
+                &p.repo
+            }
+            Event::Review(r) => {
+                self.reviews += 1;
+                &r.repo
+            }
+            _ => return,
+        };
+        if !self.repos.contains(repo) {
+            self.repos.push(repo.clone());
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.commits + self.prs_opened + self.prs_merged + self.reviews == 0
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -112,7 +158,11 @@ pub fn summarise(store: &Store, tz: chrono_tz::Tz, date: NaiveDate) -> anyhow::R
     let hours = ((end_ms - start_ms) / (60 * MINUTE_MS)) as usize;
     let mut steps_by_hour = vec![0; hours];
     let (mut steps, mut distance_m) = (0, 0.0);
+    let mut code = CodeTotals::default();
     for e in store.events_between(start_ms, end_ms)? {
+        if e.start_ms >= start_ms && e.start_ms < end_ms {
+            code.add(&e.event);
+        }
         if let Event::HealthSteps(h) = &e.event {
             // Attribute a span to the hour it started in; Health Connect
             // records are read back per hour, so they rarely straddle one.
@@ -142,6 +192,7 @@ pub fn summarise(store: &Store, tz: chrono_tz::Tz, date: NaiveDate) -> anyhow::R
         steps,
         distance_m,
         steps_by_hour,
+        code,
     })
 }
 

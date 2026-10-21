@@ -533,6 +533,26 @@ pub fn day_page(day: &crate::day::Day, tz: chrono_tz::Tz, is_today: bool) -> Str
         body.push_str("</dl></section>");
     }
 
+    // Code.
+    let c = &day.code;
+    if !c.is_empty() {
+        let _ = write!(
+            body,
+            r#"<section><h2>Code</h2><dl>
+<dt>Commits</dt><dd>{} · +{} −{} lines</dd>
+<dt>Pull requests</dt><dd>{} opened · {} merged · {} reviews</dd>
+<dt>Repositories</dt><dd>{}</dd>
+</dl></section>"#,
+            c.commits,
+            group_thousands(c.lines_added),
+            group_thousands(c.lines_removed),
+            c.prs_opened,
+            c.prs_merged,
+            c.reviews,
+            esc(&c.repos.join(", ")),
+        );
+    }
+
     // Steps.
     if day.steps > 0 {
         let max = day.steps_by_hour.iter().copied().max().unwrap_or(1).max(1);

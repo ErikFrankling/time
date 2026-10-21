@@ -538,3 +538,47 @@ fn a_focus_day_set_by_the_agent_nudges_after_hours() {
         got[0].1
     );
 }
+
+#[test]
+fn commits_and_pull_requests_show_on_the_day() {
+    use time_core::event::{Commit, Envelope, Event, PullRequest};
+    let w = morning();
+    let t = w.scenario.at("10:30").unwrap();
+    let ev = |e| Envelope::new("pc", "github-collector", t, t, e);
+    let batch = time_core::otlp::encode(
+        &[
+            ev(Event::Commit(Commit {
+                repo: "time".into(),
+                sha: "abc".into(),
+                path: None,
+                lines_added: 1200,
+                lines_removed: 40,
+                files: 9,
+            })),
+            ev(Event::PullRequest(PullRequest {
+                repo: "time".into(),
+                number: 7,
+                action: "merged".into(),
+            })),
+        ],
+        "test",
+    );
+    let r = reqwest::blocking::Client::new()
+        .post(format!("{}/v1/logs", w.base_url))
+        .json(&batch)
+        .send()
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let (_, html) = w.get("/day/2026-10-21").unwrap();
+    assert!(html.contains("+1\u{2009}200 −40 lines"), "{html}");
+    assert!(html.contains("0 opened · 1 merged · 0 reviews"));
+    let s = w.status().unwrap();
+    let code = s["channels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == "code")
+        .unwrap()
+        .clone();
+    assert_eq!(code["state"], "live");
+}

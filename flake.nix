@@ -76,10 +76,13 @@
           };
           cargoLock.lockFile = ./Cargo.lock;
           nativeBuildInputs = [ pkgs.makeWrapper ];
-          # The agent asks MPRIS whether anything is playing via playerctl.
+          # The agent asks MPRIS whether anything is playing via playerctl;
+          # the collector falls back to the gh CLI for a GitHub token.
           postInstall = ''
             wrapProgram $out/bin/time-agent \
               --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.playerctl ]}
+            wrapProgram $out/bin/time-collect \
+              --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.gh ]}
           '';
           meta.mainProgram = "time-server";
         };

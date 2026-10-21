@@ -1,0 +1,27 @@
+[package]
+name = "time-collect"
+description = "Commits from local git and pull requests and reviews from GitHub, as Time events."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "time-collect"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+# Repositories are read off the local disk; no network transports, so no
+# C TLS stack (as in v1).
+git2 = { version = "0.21", default-features = false }
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+time-agent.workspace = true
+time-core.workspace = true
+toml.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
