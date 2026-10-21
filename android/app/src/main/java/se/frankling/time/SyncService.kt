@@ -60,6 +60,7 @@ class SyncService : Service() {
                     val now = System.currentTimeMillis()
                     try {
                         MediaSamples.of(this@SyncService).record(now / 60_000 * 60_000, MediaSamples.playingNow(this@SyncService))
+                        StateSamples.of(this@SyncService).add(PhoneStateSampler.sample(this@SyncService, now / 60_000 * 60_000))
                     } catch (_: Throwable) {
                     }
                     if (now - lastSync < PERIOD_MS) {

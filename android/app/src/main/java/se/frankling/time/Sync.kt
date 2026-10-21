@@ -40,7 +40,9 @@ object Prefs {
 
     /** Where events go: the homelab OTLP gateway, LAN and tailnet only. */
     var Context.otlpEndpoint: String
-        get() = get(this).getString("otlp", "https://otlp.erikfrankling.duckdns.org/v1/logs")!!
+        // The Time server itself by default: it accepts OTLP on the same
+        // LAN/VPN-only route as the website, so a fresh install needs no token.
+        get() = get(this).getString("otlp", null) ?: (server.trimEnd('/') + "/v1/logs")
         set(v) = get(this).edit().putString("otlp", v).apply()
 
     /** The gateway's bearer token. Device-local; never in the repo. */
@@ -225,8 +227,13 @@ object Sync {
                 // rest of the sync.
             }
 
+            // Phone state sampled each minute by the service.
+            val states = StateSamples.of(ctx)
+            fresh += StateSamples.toEvents(ctx.device, states.read())
+
             // Everything read goes to disk before the network is touched.
             val pending = spool.merge(fresh, now)
+            states.clear()
             val heartbeat = Envelope.heartbeat(
                 nowMs = now,
                 // Everything pending rides in this request; what is left
@@ -258,6 +265,9 @@ object Sync {
     /** What the status screen should say is wrong with this phone. */
     fun missing(ctx: Context): List<String> = buildList {
         if (!Usage.hasAccess(ctx)) add("usage access not granted: no phone app data")
+        if (!PhoneStateSampler.ssidPermitted(ctx)) {
+            add("wifi name: location permission not granted (places still work by router address)")
+        }
         addAll(Health.missing(ctx))
         val pm = ctx.getSystemService(android.os.PowerManager::class.java)
         if (pm?.isIgnoringBatteryOptimizations(ctx.packageName) == false) {

@@ -50,6 +50,10 @@ class SettingsActivity : ComponentActivity() {
     private val askNotifications =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
+    // Optional: Wi-Fi names (Android only reveals them with this grant).
+    private val askLocation =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
     // Health Connect has its own grant flow; the result is re-read on resume.
     private val askHealth =
         registerForActivityResult(PermissionController.createRequestPermissionResultContract()) { }
@@ -206,6 +210,27 @@ class SettingsActivity : ComponentActivity() {
                         "Allow restricted settings, then come back. Android hides that " +
                         "menu item until it has blocked the permission at least once. " +
                         "Installing through Obtainium avoids this entirely.",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+
+            HorizontalDivider()
+
+            // Places: the router address works without any grant; the Wi-Fi
+            // name needs Android's location permission (no GPS is used).
+            val ssidOk = remember(key) { PhoneStateSampler.ssidPermitted(this@SettingsActivity) }
+            Text(
+                if (ssidOk) "Wi-Fi names: shown" else "Wi-Fi names: hidden (places still work by router)",
+                style = MaterialTheme.typography.titleMedium
+            )
+            if (!ssidOk) {
+                OutlinedButton(
+                    onClick = { askLocation.launch(android.Manifest.permission.ACCESS_FINE_LOCATION) },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Show Wi-Fi names (eduroam, home)") }
+                Text(
+                    "Android only reveals the network name to apps with the location permission. " +
+                        "This app never turns location on or reads a position.",
                     style = MaterialTheme.typography.bodySmall
                 )
             }

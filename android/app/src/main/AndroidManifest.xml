@@ -34,6 +34,14 @@
          already runs (Fit, the pedometer, a watch); this app never asks for
          location and never uses GPS. Background read lets the 15-minute sync
          pick up steps without the app being open. -->
+    <!-- Which network the phone is on (router address, DNS domain): no
+         permission beyond these. The Wi-Fi *name* is readable only with the
+         location permission; the app never turns location on or reads a
+         position, and works without it. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+
     <uses-permission android:name="android.permission.health.READ_STEPS" />
     <uses-permission android:name="android.permission.health.READ_DISTANCE" />
     <uses-permission android:name="android.permission.health.READ_HEALTH_DATA_IN_BACKGROUND" />
