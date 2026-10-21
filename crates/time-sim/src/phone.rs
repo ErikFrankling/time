@@ -128,7 +128,8 @@ impl PhoneSim {
             now,
             now,
             Event::Heartbeat(Heartbeat {
-                spool_pending: self.pending.len() as u32,
+                // Everything pending rides in this batch: nothing is left behind.
+                spool_pending: 0,
                 app_version: "sim".into(),
                 covered_until_ms: Some(covered),
                 missing: self.missing.clone(),

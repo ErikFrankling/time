@@ -7,8 +7,11 @@
 //! Hyprland, the input devices, the audio stack and the browser.
 
 pub mod agent;
+pub mod audio;
+pub mod browser;
 pub mod config;
 pub mod hyprland;
+pub mod input;
 pub mod probe;
 pub mod sender;
 pub mod spool;

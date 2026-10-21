@@ -83,6 +83,7 @@ impl Classifier {
 
     /// One pass. Returns how many minutes were labelled.
     pub fn run_once(&self, store: &Store, now: Millis) -> Result<usize> {
+        self.last_run_ms.store(now, Relaxed);
         let mut todo: BTreeSet<Millis> = store.dirty_batch(PASS_LIMIT)?.into_iter().collect();
         todo.extend(store.incomplete_since(now - RECHECK_INCOMPLETE_MS, PASS_LIMIT)?);
         if todo.is_empty() {
@@ -128,7 +129,6 @@ pub async fn run_forever(state: Arc<AppState>) {
         let st = state.clone();
         let result = tokio::task::spawn_blocking(move || {
             let now = st.clock.now_ms();
-            st.classifier.last_run_ms.store(now, Relaxed);
             let mut total = 0;
             // Drain a backlog in one go; each pass is bounded.
             loop {

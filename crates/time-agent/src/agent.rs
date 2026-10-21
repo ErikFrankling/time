@@ -101,6 +101,9 @@ impl Agent {
                 .desktop_error
                 .iter()
                 .map(|e| format!("compositor: {e}"))
+                .chain(self.input.problem())
+                .chain(self.audio.problem())
+                .chain(self.tabs.problem())
                 .collect();
             let hb = Heartbeat {
                 spool_pending: pending,

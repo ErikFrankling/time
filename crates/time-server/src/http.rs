@@ -25,6 +25,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/healthz", get(healthz))
         .route("/metrics", get(metrics))
         .route("/api/status", get(api_status))
+        .route("/status", get(status_html))
+        .route(
+            "/",
+            get(|| async { axum::response::Redirect::temporary("/status") }),
+        )
         .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY))
         .with_state(state)
 }
@@ -36,6 +41,16 @@ pub fn router(state: Arc<AppState>) -> Router {
 /// in a batch are never held hostage by a bad one.
 async fn ingest(State(state): State<Arc<AppState>>, headers: HeaderMap, body: Bytes) -> Response {
     state.counters.ingest_requests.fetch_add(1, Relaxed);
+    if let Some(token) = &state.ingest_token {
+        let ok = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .is_some_and(|t| t == token);
+        if !ok {
+            return (StatusCode::UNAUTHORIZED, "missing or wrong bearer token").into_response();
+        }
+    }
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -156,4 +171,12 @@ async fn collect(state: Arc<AppState>) -> Result<status::Status, (StatusCode, St
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))
+}
+
+async fn status_html(State(state): State<Arc<AppState>>) -> Response {
+    let tz = state.tz;
+    match collect(state).await {
+        Ok(s) => axum::response::Html(crate::web::status_page(&s, tz)).into_response(),
+        Err(e) => e.into_response(),
+    }
 }

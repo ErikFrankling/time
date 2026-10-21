@@ -23,6 +23,9 @@ pub struct Config {
     /// A rules file; the rules shipped with Time when absent.
     #[serde(default)]
     pub rules: Option<PathBuf>,
+    /// IANA zone for days and clock times on the website.
+    #[serde(default = "default_timezone")]
+    pub timezone: String,
     /// Seconds between classifier passes.
     #[serde(default = "default_classify_every")]
     pub classify_every_secs: u64,
@@ -42,6 +45,10 @@ pub struct DeviceConfig {
     pub kind: DeviceKind,
 }
 
+fn default_timezone() -> String {
+    "Europe/Stockholm".into()
+}
+
 fn default_classify_every() -> u64 {
     10
 }
@@ -52,7 +59,15 @@ fn default_listen() -> String {
 
 impl Config {
     pub fn parse(text: &str) -> anyhow::Result<Self> {
-        Ok(toml::from_str(text)?)
+        let c: Self = toml::from_str(text)?;
+        c.tz()?;
+        Ok(c)
+    }
+
+    pub fn tz(&self) -> anyhow::Result<chrono_tz::Tz> {
+        self.timezone
+            .parse()
+            .map_err(|e| anyhow::anyhow!("timezone {:?}: {e}", self.timezone))
     }
 
     pub fn load(path: &std::path::Path) -> anyhow::Result<Self> {

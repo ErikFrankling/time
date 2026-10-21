@@ -10,6 +10,7 @@ pub mod http;
 pub mod import_v1;
 pub mod status;
 pub mod store;
+pub mod web;
 
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
@@ -26,6 +27,10 @@ pub struct AppState {
     pub store: Store,
     pub clock: Arc<dyn Clock>,
     pub classifier: Classifier,
+    /// Required on `/v1/logs` when set (`TIME_INGEST_TOKEN`). The homelab
+    /// gateway authenticates devices; this guards the server itself.
+    pub ingest_token: Option<String>,
+    pub tz: chrono_tz::Tz,
     pub started_ms: Millis,
     pub counters: Counters,
 }
@@ -50,8 +55,14 @@ impl AppState {
                 classifier.rules.version
             );
         }
+        let tz = config.tz()?;
+        let ingest_token = std::env::var("TIME_INGEST_TOKEN")
+            .ok()
+            .filter(|t| !t.is_empty());
         let started_ms = clock.now_ms();
         Ok(Arc::new(Self {
+            ingest_token,
+            tz,
             config,
             store,
             clock,

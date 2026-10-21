@@ -30,10 +30,17 @@ pub struct InputSnapshot {
 /// Input counts since the previous call.
 pub trait Input: Send {
     fn take(&mut self) -> InputSnapshot;
+    /// Why this channel is not working, if it is not.
+    fn problem(&self) -> Option<String> {
+        None
+    }
 }
 
 pub trait Audio: Send {
     fn playing(&mut self) -> bool;
+    fn problem(&self) -> Option<String> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +59,9 @@ pub trait Tabs: Send {
     /// title. Matching by browser name instead is how v1 billed a Firefox
     /// window showing dn.se to play.hbomax.com open in Zen.
     fn front_tab(&mut self, focused: &Window) -> Option<Tab>;
+    fn problem(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Nothing to observe. For channels not available on a machine.

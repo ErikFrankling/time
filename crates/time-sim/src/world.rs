@@ -138,6 +138,7 @@ impl World {
             channels_off: vec![],
             rules: None,
             classify_every_secs: 10,
+            timezone: "Europe/Stockholm".into(),
         };
         std::fs::create_dir_all(&config.data_dir)?;
         let store = Store::open(&config.data_dir.join("time.db"))?;

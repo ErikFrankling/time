@@ -3,8 +3,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
+use time_agent::audio::Mpris;
+use time_agent::browser::Watcher;
 use time_agent::hyprland::Hyprland;
-use time_agent::probe::Nothing;
+use time_agent::input::Evdev;
 use time_agent::sender::HttpSender;
 use time_agent::{Agent, AgentConfig};
 use time_core::clock::{Clock, SystemClock, MINUTE_MS};
@@ -21,17 +23,15 @@ fn main() -> anyhow::Result<()> {
     let token = std::env::var("TIME_OTLP_TOKEN").ok();
     let sender = HttpSender::new(&config.endpoint, token)?;
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+    let tabs = Watcher::start(&config.device);
 
-    // Input, audio and browser tabs get their real implementations in M2
-    // (ported from v1); until then those channels report nothing rather than
-    // something invented.
     let mut agent = Agent::new(
         config,
         clock.clone(),
         Box::new(Hyprland::from_env()?),
-        Box::new(Nothing),
-        Box::new(Nothing),
-        Box::new(Nothing),
+        Box::new(Evdev::start()),
+        Box::new(Mpris::default()),
+        Box::new(tabs),
         Box::new(sender),
     )?;
     eprintln!(
@@ -44,11 +44,13 @@ fn main() -> anyhow::Result<()> {
         let next = (now / MINUTE_MS + 1) * MINUTE_MS + 500;
         std::thread::sleep(Duration::from_millis((next - now) as u64));
         match agent.tick() {
-            Ok(r) if r.retry.is_some() => eprintln!(
-                "agent: {} pending, will retry: {}",
-                r.pending,
-                r.retry.unwrap_or_default()
-            ),
+            Ok(r) if r.retry.is_some() => {
+                eprintln!(
+                    "agent: {} pending, will retry: {}",
+                    r.pending,
+                    r.retry.unwrap_or_default()
+                )
+            }
             Ok(_) => {}
             Err(e) => eprintln!("agent: tick failed: {e:#}"),
         }

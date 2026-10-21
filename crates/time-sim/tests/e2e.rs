@@ -156,7 +156,7 @@ fn status_reports_devices_channels_and_health() {
     assert_eq!(channel("health"), "live");
     assert_eq!(
         channel("dictation"),
-        "missing",
+        "not_set_up",
         "nothing in the scenario dictates"
     );
 
@@ -284,4 +284,41 @@ fn a_late_phone_sync_relabels_minutes_already_labelled() {
         (after.place, after.background),
         (Place::Computer, Some(Activity::Video))
     );
+}
+
+#[test]
+fn the_status_page_answers_is_it_working() {
+    let w = morning();
+    let (code, html) = w.get("/status").unwrap();
+    assert_eq!(code, 200);
+    for needle in [
+        "Everything is working.",
+        "pc",
+        "phone",
+        "Connected",
+        "Phone apps",
+        "Recording",
+        "Not set up",
+        "Labelled",
+        "rules on the CPU",
+    ] {
+        assert!(html.contains(needle), "status page lacks {needle:?}");
+    }
+    let (code, _) = w.get("/").unwrap();
+    assert_eq!(code, 200, "/ redirects to a page that loads");
+}
+
+#[test]
+fn a_silent_device_is_named_on_the_status_page() {
+    use time_core::clock::Clock;
+    let w = morning();
+    // Three hours later with nobody sending anything.
+    w.clock.set(w.clock.now_ms() + 3 * 60 * MINUTE_MS);
+    let (_, html) = w.get("/status").unwrap();
+    assert!(
+        html.contains("Not hearing from pc, phone."),
+        "{}",
+        &html[..html.len().min(2000)]
+    );
+    assert!(html.contains("Offline"));
 }

@@ -107,8 +107,10 @@ pub enum ChannelState {
     Live,
     /// Heard from in the last day, not recently.
     Quiet,
-    /// Not heard from in a day, or never.
+    /// Heard from before, but not in a day: something broke.
     Missing,
+    /// Never heard from: no source sends this yet.
+    NotSetUp,
     /// Switched off in config, on purpose.
     Off,
 }
@@ -201,7 +203,8 @@ pub fn channel_state(
     match last {
         Some(t) if now - t <= live_within => ChannelState::Live,
         Some(t) if now - t <= 24 * HOUR_MS => ChannelState::Quiet,
-        _ => ChannelState::Missing,
+        Some(_) => ChannelState::Missing,
+        None => ChannelState::NotSetUp,
     }
 }
 
@@ -429,6 +432,10 @@ mod tests {
     #[test]
     fn off_beats_everything() {
         assert_eq!(channel_state(0, Some(0), 1, true), ChannelState::Off);
-        assert_eq!(channel_state(0, None, 1, false), ChannelState::Missing);
+        assert_eq!(channel_state(0, None, 1, false), ChannelState::NotSetUp);
+        assert_eq!(
+            channel_state(100 * HOUR_MS, Some(0), 1, false),
+            ChannelState::Missing
+        );
     }
 }
