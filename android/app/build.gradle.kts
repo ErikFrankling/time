@@ -6,7 +6,8 @@ plugins {
 
 android {
     namespace = "se.frankling.time"
-    compileSdk = 35
+    // 36 because Health Connect 1.1 requires it; targetSdk (runtime behaviour) stays 35.
+    compileSdk = 36
 
     // Pinned because AGP otherwise asks for a build-tools it happens to prefer
     // and tries to install it into the read-only Nix store SDK.

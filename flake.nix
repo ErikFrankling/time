@@ -28,7 +28,7 @@
         # Enough SDK to build the APK and run it in an emulator, so the Android
         # client can be tested here rather than only on a real phone.
         android = pkgs.androidenv.composeAndroidPackages {
-          platformVersions = [ "35" ];
+          platformVersions = [ "35" "36" ];
           buildToolsVersions = [ "35.0.0" ];
           includeEmulator = true;
           includeSystemImages = true;
@@ -55,9 +55,35 @@
               --prefix PATH : ${pkgs.lib.makeBinPath runtimeDeps}
           '';
         };
+        # v2: one workspace, built once. Only the files the Rust build reads,
+        # so editing the Android app or the docs does not rebuild it.
+        v2 = pkgs.rustPlatform.buildRustPackage {
+          pname = "time-v2";
+          version = "2.0.0-dev";
+          src = pkgs.lib.fileset.toSource {
+            root = ./.;
+            fileset = pkgs.lib.fileset.unions [
+              ./Cargo.toml
+              ./Cargo.lock
+              ./crates
+              ./config
+              ./fixtures
+            ];
+          };
+          cargoLock.lockFile = ./Cargo.lock;
+          nativeBuildInputs = [ pkgs.makeWrapper ];
+          # The agent asks MPRIS whether anything is playing via playerctl.
+          postInstall = ''
+            wrapProgram $out/bin/time-agent \
+              --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.playerctl ]}
+          '';
+          meta.mainProgram = "time-server";
+        };
       in
       {
+        # v1 stays the default until v2 goes live (M4); the dotfiles use it.
         packages.default = timePkg;
+        packages.time-v2 = v2;
 
         devShells.default = pkgs.mkShell {
           packages = [
