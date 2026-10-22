@@ -266,7 +266,7 @@ pub fn status_page(s: &Status, tz: chrono_tz::Tz) -> String {
     // Focus nudges.
     let nd = &s.nudges;
     let sinks = if nd.sinks.is_empty() {
-        r#"<span class="t-warn">nowhere: no ntfy token or agent webhook configured</span>"#
+        r#"<span class="t-warn">nowhere: no notify-gateway token or agent webhook configured</span>"#
             .to_owned()
     } else {
         nd.sinks.join(" and ")

@@ -1,7 +1,7 @@
 //! Focus nudges, delivered: the rule from `time_core::nudge` applied to the
-//! stored timeline every few minutes, sent to Erik's phone (ntfy) and to his
-//! personal agent (a webhook), and recorded as events so their effect can be
-//! measured.
+//! stored timeline every few minutes, sent to Erik's phone (the homelab
+//! notify-gateway) and to his personal agent (a webhook), and recorded as
+//! events so their effect can be measured.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicI64, Ordering::Relaxed};
@@ -27,39 +27,51 @@ pub trait Sink: Send + Sync {
     fn send(&self, title: &str, body: &str, facts: &serde_json::Value) -> Result<()>;
 }
 
-/// Erik's phone, through the homelab ntfy server (k8s secret `time-ntfy`).
-pub struct Ntfy {
+/// Erik's phone, through the homelab notify-gateway (k8s secret
+/// `time-notify`): a native push in the T3 Code app plus a silent copy in his
+/// private Discord. Spec: homelab `docs/notifications.md`.
+pub struct NotifyGateway {
     pub url: String,
-    pub topic: String,
     pub token: String,
     /// What a tap opens: the day view.
     pub click: String,
 }
 
-impl Sink for Ntfy {
+impl NotifyGateway {
+    pub fn payload(&self, title: &str, body: &str) -> serde_json::Value {
+        serde_json::json!({
+            "title": title,
+            "message": body,
+            // Normal: a sound, no alarm. The gateway refuses anything louder,
+            // so a nudge can never look like an alert.
+            "priority": "normal",
+            "url": self.click,
+            // A follow-up replaces the earlier nudge instead of stacking.
+            "tag": "focus-nudge",
+        })
+    }
+}
+
+impl Sink for NotifyGateway {
     fn name(&self) -> &'static str {
         "phone"
     }
 
     fn send(&self, title: &str, body: &str, _facts: &serde_json::Value) -> Result<()> {
-        let payload = serde_json::json!({
-            "topic": self.topic,
-            "title": title,
-            "message": body,
-            // Normal: a sound, no pop-over. Nudges must never look like alerts.
-            "priority": 3,
-            "tags": ["time"],
-            "click": self.click,
-            // A follow-up replaces the earlier nudge instead of stacking.
-            "sequence_id": "time-focus-nudge",
-        });
         let resp = client()?
-            .post(format!("{}/", self.url.trim_end_matches('/')))
+            .post(&self.url)
             .bearer_auth(&self.token)
-            .json(&payload)
+            .json(&self.payload(title, body))
             .send()
-            .context("ntfy")?;
-        anyhow::ensure!(resp.status().is_success(), "ntfy: HTTP {}", resp.status());
+            .context("notify-gateway")?;
+        let status = resp.status();
+        // Not retried: a 429 is the gateway's own limit and a 502 left its
+        // budget untouched, so the next check simply decides again.
+        anyhow::ensure!(
+            status.is_success(),
+            "notify-gateway: HTTP {status}: {}",
+            resp.text().unwrap_or_default()
+        );
         Ok(())
     }
 }
@@ -106,17 +118,15 @@ pub struct Nudger {
 }
 
 impl Nudger {
-    /// Sinks from the environment: `NTFY_URL`, `NTFY_TOPIC`, `NTFY_TOKEN`
-    /// (the `time-ntfy` secret) and `TIME_AGENT_WEBHOOK`. None configured is
+    /// Sinks from the environment: `NOTIFY_URL` and `NOTIFY_TOKEN` (the
+    /// `time-notify` secret) and `TIME_AGENT_WEBHOOK`. None configured is
     /// allowed and shown on the status screen.
     pub fn from_env(config: NudgeConfig, public_url: &str) -> Self {
         let mut sinks: Vec<Arc<dyn Sink>> = Vec::new();
         let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
-        if let (Some(url), Some(token)) = (env("NTFY_URL"), env("NTFY_TOKEN")) {
-            let topic = env("NTFY_TOPIC").unwrap_or_else(|| "erik".into());
-            sinks.push(Arc::new(Ntfy {
+        if let (Some(url), Some(token)) = (env("NOTIFY_URL"), env("NOTIFY_TOKEN")) {
+            sinks.push(Arc::new(NotifyGateway {
                 url,
-                topic,
                 token,
                 click: public_url.to_owned(),
             }));
@@ -394,4 +404,93 @@ pub fn unproductive_names(cfg: &NudgeConfig) -> String {
         .map(|a| a.as_str())
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    /// One request to a local stand-in for the gateway: what it was sent, and
+    /// how a refusal comes back.
+    fn serve_once(status: &str, body: &str) -> (String, std::thread::JoinHandle<String>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1/notify", listener.local_addr().unwrap());
+        let reply = format!(
+            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let h = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut buf = vec![0u8; 16 * 1024];
+            let mut req = String::new();
+            loop {
+                let n = s.read(&mut buf).unwrap();
+                req.push_str(&String::from_utf8_lossy(&buf[..n]));
+                if let Some((head, rest)) = req.split_once("\r\n\r\n") {
+                    let len = head
+                        .lines()
+                        .find_map(|l| {
+                            l.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|v| v.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap_or(0);
+                    if rest.len() >= len {
+                        break;
+                    }
+                }
+            }
+            s.write_all(reply.as_bytes()).unwrap();
+            req
+        });
+        (url, h)
+    }
+
+    fn gateway(url: String) -> NotifyGateway {
+        NotifyGateway {
+            url,
+            token: "tok".into(),
+            click: "https://time.erikfrankling.duckdns.org/".into(),
+        }
+    }
+
+    #[test]
+    fn sends_the_gateway_contract() {
+        let (url, h) = serve_once("200 OK", r#"{"sent":true,"app":true}"#);
+        gateway(url)
+            .send("45 min on YouTube", "Back to work?", &serde_json::json!({}))
+            .unwrap();
+        let req = h.join().unwrap();
+        assert!(req.starts_with("POST /v1/notify "));
+        assert!(req
+            .to_ascii_lowercase()
+            .contains("authorization: bearer tok"));
+        let body: serde_json::Value =
+            serde_json::from_str(req.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "title": "45 min on YouTube",
+                "message": "Back to work?",
+                "priority": "normal",
+                "url": "https://time.erikfrankling.duckdns.org/",
+                "tag": "focus-nudge",
+            })
+        );
+    }
+
+    #[test]
+    fn a_refusal_is_not_a_delivery() {
+        let (url, h) = serve_once(
+            "429 Too Many Requests",
+            r#"{"sent":false,"reason":"hourly limit"}"#,
+        );
+        let err = gateway(url)
+            .send("t", "m", &serde_json::json!({}))
+            .unwrap_err();
+        h.join().unwrap();
+        assert!(format!("{err:#}").contains("429"), "{err:#}");
+        assert!(format!("{err:#}").contains("hourly limit"), "{err:#}");
+    }
 }

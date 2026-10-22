@@ -157,7 +157,7 @@ pub struct ChannelStatus {
 #[derive(Debug, Serialize)]
 pub struct NudgeStatus {
     pub enabled: bool,
-    /// Where a nudge goes: `phone` (ntfy), `agent` (webhook).
+    /// Where a nudge goes: `phone` (notify-gateway), `agent` (webhook).
     pub sinks: Vec<&'static str>,
     pub focus: Option<time_core::nudge::Focus>,
     pub last_check_ms: Option<Millis>,

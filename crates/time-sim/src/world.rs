@@ -316,8 +316,8 @@ impl World {
     }
 }
 
-/// A nudge sink that records what it was sent, standing in for ntfy and the
-/// personal agent's webhook.
+/// A nudge sink that records what it was sent, standing in for the
+/// notify-gateway and the personal agent's webhook.
 #[derive(Clone, Default)]
 pub struct Captured(pub Arc<Mutex<Vec<(String, String, serde_json::Value)>>>);
 

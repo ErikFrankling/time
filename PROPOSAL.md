@@ -613,7 +613,7 @@ Progress (branch `v2`, 2026-10-21):
   native collectors, and CI proves on an emulator that the real app reaches
   the real server.
 - **M6 done** (with default thresholds): nudge rule, focus days via
-  `/v1/focus`, delivery to ntfy (`time-ntfy` secret) and the personal agent's
+  `/v1/focus`, delivery through the homelab notify-gateway (`time-notify` secret) and the personal agent's
   webhook, nudge and outcome events, status section. Live once deployed.
 - **Code channel done:** `time-collect` turns local commits and GitHub PRs
   and reviews into events; shown on the day view.

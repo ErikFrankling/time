@@ -55,7 +55,7 @@ runs the agent and the collector on a desktop.
 
 Secrets only from the environment: `TIME_OTLP_TOKEN` (devices to the
 gateway), `TIME_INGEST_TOKEN` (optional, guards `/v1/logs` and `/v1/focus`),
-`NTFY_URL`/`NTFY_TOPIC`/`NTFY_TOKEN` (nudges to the phone),
+`NOTIFY_URL`/`NOTIFY_TOKEN` (nudges to the phone through the homelab notify-gateway, secret `time-notify`),
 `TIME_AGENT_WEBHOOK` (nudges to the personal agent), `TIME_GITHUB_TOKEN`
 (else the `gh` login).
 
