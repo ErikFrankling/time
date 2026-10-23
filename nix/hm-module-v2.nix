@@ -210,8 +210,8 @@ in
         Nice = 10;
         # A background tally: never a reason for the desktop to stutter.
         CPUQuota = "50%";
-        MemoryHigh = "512M";
-        MemoryMax = "1G";
+        MemoryHigh = "1G";
+        MemoryMax = "2G";
         IOSchedulingClass = "idle";
       }
       // lib.optionalAttrs (cfg.tokenFile != null) { EnvironmentFile = cfg.tokenFile; };
