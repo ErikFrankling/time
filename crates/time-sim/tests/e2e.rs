@@ -348,12 +348,13 @@ fn the_day_page_and_api_show_the_morning() {
     let (code, html) = w.get("/day/2026-10-21").unwrap();
     assert_eq!(code, 200);
     for needle in [
-        "Wednesday 21 October",
+        "Wed 21 Oct",
         "Hour by hour",
-        "Where the time went",
+        "By activity",
+        r#"class="on" aria-current="page">Day</a>"#,
         "3\u{2009}000",
-        "steps · 2.1 km",
-        "09:00–09:40 · video on the computer · video.sites",
+        "2.1 km",
+        "09:00–09:40 · video on the computer",
     ] {
         assert!(html.contains(needle), "day page lacks {needle:?}");
     }
@@ -430,9 +431,24 @@ fn the_week_page_sums_the_days() {
     let (code, html) = w.get("/week/2026-10-23").unwrap();
     assert_eq!(code, 200);
     // 2026-10-23 is a Friday; its week starts Monday 19 October.
-    assert!(html.contains("Week of 19 October"), "{html}");
+    assert!(html.contains("Week 43, 19–25 Oct"), "{html}");
     assert!(html.contains(r#"href="/day/2026-10-21""#));
     assert!(html.contains("3\u{2009}000"), "steps from Wednesday");
+    assert!(html.contains("Day by day"));
+}
+
+#[test]
+fn the_month_page_has_a_calendar_and_compares() {
+    let w = morning();
+    for path in ["/month/2026-10", "/month/2026-10-21"] {
+        let (code, html) = w.get(path).unwrap();
+        assert_eq!(code, 200, "{path}");
+        assert!(html.contains("October 2026"), "{html}");
+        assert!(html.contains("Calendar"));
+        assert!(html.contains(r#"href="/day/2026-10-21""#));
+        assert!(html.contains(r#"href="/month/2026-09""#), "previous month");
+    }
+    assert_eq!(w.get("/month/soon").unwrap().0, 400);
 }
 
 #[test]

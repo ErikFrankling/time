@@ -964,6 +964,7 @@ mod tests {
                 .filter(|a| *a == Activity::Work)
                 .map(|_| "time".to_owned()),
             background: None,
+            background_device: None,
             rule: "test".into(),
             decider: Decider::Rule,
             complete: true,

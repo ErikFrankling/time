@@ -138,6 +138,7 @@ impl World {
             channels_off: vec![],
             rules: None,
             classify_every_secs: 10,
+            step_goal: 10_000,
             timezone: "Europe/Stockholm".into(),
             apk_repo: "ErikFrankling/time".into(),
             apk_path: None,

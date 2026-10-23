@@ -17,6 +17,7 @@ pub mod mcp;
 pub mod nudge;
 pub mod status;
 pub mod store;
+pub mod views;
 pub mod web;
 
 use std::sync::atomic::AtomicU64;

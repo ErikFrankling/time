@@ -42,6 +42,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/day/{date}", get(day_html))
         .route("/week", get(this_week_html))
         .route("/week/{date}", get(week_html))
+        .route("/month", get(this_month_html))
+        .route("/month/{date}", get(month_html))
         .route("/api/day/{date}", get(day_json))
         .route("/api/now", get(api_now))
         .route("/api/summary", get(api_summary))
@@ -226,27 +228,85 @@ async fn load_day(
     Ok((day, date == today))
 }
 
-async fn today_html(State(state): State<Arc<AppState>>) -> Response {
+/// `/`, `/day/<date>`, `/week[/<date>]`, `/month[/<YYYY-MM>]`: one period,
+/// with the one before it for comparison.
+async fn period_html(
+    state: Arc<AppState>,
+    kind: crate::views::Kind,
+    date: Option<String>,
+) -> Response {
+    use crate::views::{Kind, Period};
     let tz = state.tz;
-    match load_day(state, None).await {
-        Ok((day, is_today)) => {
-            axum::response::Html(crate::web::day_page(&day, tz, is_today)).into_response()
-        }
-        Err(e) => e.into_response(),
+    let today = crate::day::today(tz, state.clock.now_ms());
+    let date = match date.as_deref() {
+        None => today,
+        Some(d) => match d
+            .parse::<chrono::NaiveDate>()
+            .or_else(|_| format!("{d}-01").parse::<chrono::NaiveDate>())
+        {
+            Ok(d) => d,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("not a date: {d:?} (use YYYY-MM-DD, or YYYY-MM for a month)"),
+                )
+                    .into_response()
+            }
+        },
+    };
+    let period = Period::containing(kind, date);
+    let phones = phones(&state);
+    let goal = state.config.step_goal;
+    let r = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+        let cur = crate::views::summarise(&state.store, tz, period, &phones, today)?;
+        let prev = crate::views::summarise(&state.store, tz, period.prev(), &phones, today)?;
+        Ok(match kind {
+            Kind::Day => {
+                let day = crate::day::summarise(&state.store, tz, date)?;
+                crate::web::day_page(&day, tz, today, &cur, &prev, &phones, goal)
+            }
+            _ => crate::views::period_page(&cur, &prev, goal, today),
+        })
+    })
+    .await;
+    match r {
+        Ok(Ok(html)) => axum::response::Html(html).into_response(),
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
+}
+
+async fn today_html(State(state): State<Arc<AppState>>) -> Response {
+    period_html(state, crate::views::Kind::Day, None).await
 }
 
 async fn day_html(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(date): axum::extract::Path<String>,
 ) -> Response {
-    let tz = state.tz;
-    match load_day(state, Some(date)).await {
-        Ok((day, is_today)) => {
-            axum::response::Html(crate::web::day_page(&day, tz, is_today)).into_response()
-        }
-        Err(e) => e.into_response(),
-    }
+    period_html(state, crate::views::Kind::Day, Some(date)).await
+}
+
+async fn this_week_html(State(state): State<Arc<AppState>>) -> Response {
+    period_html(state, crate::views::Kind::Week, None).await
+}
+
+async fn week_html(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(date): axum::extract::Path<String>,
+) -> Response {
+    period_html(state, crate::views::Kind::Week, Some(date)).await
+}
+
+async fn this_month_html(State(state): State<Arc<AppState>>) -> Response {
+    period_html(state, crate::views::Kind::Month, None).await
+}
+
+async fn month_html(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(date): axum::extract::Path<String>,
+) -> Response {
+    period_html(state, crate::views::Kind::Month, Some(date)).await
 }
 
 async fn day_json(
@@ -325,56 +385,6 @@ async fn inbox_rule(
         Ok(Ok(_)) => axum::response::Redirect::to(&format!("/inbox?added={id}")).into_response(),
         Ok(Err(e)) => (StatusCode::BAD_REQUEST, format!("{e:#}")).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
-}
-
-async fn load_week(
-    state: Arc<AppState>,
-    date: Option<String>,
-) -> Result<(Vec<crate::day::Day>, bool), (StatusCode, String)> {
-    use chrono::Datelike;
-    let today = crate::day::today(state.tz, state.clock.now_ms());
-    let date: chrono::NaiveDate = match date {
-        None => today,
-        Some(d) => d.parse().map_err(|_| {
-            (
-                StatusCode::BAD_REQUEST,
-                format!("not a date: {d:?} (use YYYY-MM-DD)"),
-            )
-        })?,
-    };
-    let monday = date - chrono::Days::new(u64::from(date.weekday().num_days_from_monday()));
-    let this_week = today >= monday && today < monday + chrono::Days::new(7);
-    let tz = state.tz;
-    let days = tokio::task::spawn_blocking(move || {
-        (0..7)
-            .map(|i| crate::day::summarise(&state.store, tz, monday + chrono::Days::new(i)))
-            .collect::<anyhow::Result<Vec<_>>>()
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
-    Ok((days, this_week))
-}
-
-async fn this_week_html(State(state): State<Arc<AppState>>) -> Response {
-    match load_week(state, None).await {
-        Ok((days, this_week)) => {
-            axum::response::Html(crate::web::week_page(&days, this_week)).into_response()
-        }
-        Err(e) => e.into_response(),
-    }
-}
-
-async fn week_html(
-    State(state): State<Arc<AppState>>,
-    axum::extract::Path(date): axum::extract::Path<String>,
-) -> Response {
-    match load_week(state, Some(date)).await {
-        Ok((days, this_week)) => {
-            axum::response::Html(crate::web::week_page(&days, this_week)).into_response()
-        }
-        Err(e) => e.into_response(),
     }
 }
 

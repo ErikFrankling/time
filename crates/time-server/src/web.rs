@@ -53,17 +53,21 @@ pub fn clock_time(tz: chrono_tz::Tz, t: Option<Millis>) -> String {
 }
 
 const STYLE: &str = r#"
-/* Dark, always: Erik never wants a white screen, whatever the system says. */
+/* Dark by default, whatever the system says: Erik never wants a white
+   screen he did not ask for. Light is a choice (the ☀ button), remembered. */
 :root { color-scheme: dark; --bg:#141413; --fg:#ecebe6; --muted:#9d9c95; --card:#1d1d1b; --line:#2e2e2b;
   --ok:#5cc28d; --warn:#e3a33b; --bad:#f2847b; --off:#9d9c95; }
-html, body { background:#141413; }
+:root[data-theme="light"] { color-scheme: light; --bg:#f4f3ef; --fg:#1d1d1b; --muted:#65645e; --card:#ffffff; --line:#dddbd3;
+  --ok:#1f8a55; --warn:#a86a00; --bad:#c4382c; --off:#65645e; }
+html, body { background:var(--bg); }
+.theme { margin-left:.2rem; background:none; border:1px solid var(--line); color:var(--fg); border-radius:99px; width:2rem; height:2rem; font-size:1rem; line-height:1; cursor:pointer; }
 /* Clear of notches, the status bar and the gesture bar on phones (zero
    inside the app, which pads natively). */
 * { box-sizing: border-box; }
 body { margin:0; font:15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; background:var(--bg); color:var(--fg); }
 header { display:flex; gap:1rem; align-items:baseline; padding:calc(.9rem + env(safe-area-inset-top)) calc(1rem + env(safe-area-inset-right)) .9rem calc(1rem + env(safe-area-inset-left)); border-bottom:1px solid var(--line); }
 header a { color:var(--muted); text-decoration:none; } header a.here { color:var(--fg); font-weight:600; }
-h1 { font-size:1.05rem; margin:0 auto 0 0; }
+h1 { font-size:1.05rem; margin:0 auto 0 0; } h1 a { color:var(--fg); text-decoration:none; }
 main { max-width:56rem; margin:0 auto; padding:1rem 1rem calc(1rem + env(safe-area-inset-bottom)); display:grid; grid-template-columns:minmax(0,1fr); gap:1rem; }
 section { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:.9rem 1rem; }
 h2 { font-size:.8rem; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:0 0 .6rem; }
@@ -82,6 +86,11 @@ dd, .sub { overflow-wrap:anywhere; }
 footer { color:var(--muted); font-size:.8rem; text-align:center; padding:0 1rem 1.5rem; }
 "#;
 
+/// Before the first paint: the remembered theme (dark unless light was
+/// chosen), and `?theme=light|dark` to choose one by link.
+const THEME_JS: &str = r#"(function(){var q=new URLSearchParams(location.search).get('theme');try{if(q==='light'||q==='dark')localStorage.setItem('theme',q);var t=localStorage.getItem('theme');}catch(e){var t=q;}if(t==='light'){document.documentElement.dataset.theme='light';}})();
+function timeTheme(){var l=document.documentElement.dataset.theme!=='light';if(l){document.documentElement.dataset.theme='light';}else{delete document.documentElement.dataset.theme;}try{localStorage.setItem('theme',l?'light':'dark');}catch(e){}var m=document.querySelector('meta[name=theme-color]');if(m)m.content=l?'#f4f3ef':'#141413';}"#;
+
 pub fn page(title: &str, here: &str, refresh_secs: Option<u32>, body: &str) -> String {
     page_with(title, here, refresh_secs, "", body)
 }
@@ -96,24 +105,16 @@ pub fn page_with(
     let refresh = refresh_secs
         .map(|s| format!(r#"<meta http-equiv="refresh" content="{s}">"#))
         .unwrap_or_default();
-    let nav = [
-        ("/", "Today"),
-        ("/week", "Week"),
-        ("/inbox", "Inbox"),
-        ("/status", "Status"),
-    ]
-    .iter()
-    .map(|(href, label)| {
-        let class = if *href == here {
-            r#" class="here""#
-        } else {
-            ""
-        };
-        format!(r#"<a href="{href}"{class}>{label}</a>"#)
-    })
-    .collect::<String>();
+    let nav = [("/inbox", "Inbox"), ("/status", "Status")]
+        .iter()
+        .map(|(href, label)| {
+            let on = *href == here;
+            let class = if on { r#" class="here""# } else { "" };
+            format!(r#"<a href="{href}"{class}>{label}</a>"#)
+        })
+        .collect::<String>();
     format!(
-        r##"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="dark"><meta name="theme-color" content="#141413">{refresh}<title>{t}</title><style>{STYLE}{extra_style}</style></head><body><header><h1>Time</h1>{nav}</header><main>{body}</main></body></html>"##,
+        r##"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="dark"><meta name="theme-color" content="#141413">{refresh}<title>{t}</title><script>{THEME_JS}</script><style>{STYLE}{extra_style}</style></head><body><header><h1><a href="/">Time</a></h1>{nav}<button class="theme" type="button" onclick="timeTheme()" aria-label="Light or dark">☀</button></header><main>{body}</main></body></html>"##,
         t = esc(title),
     )
 }
@@ -326,7 +327,7 @@ pub fn status_page(s: &Status, tz: chrono_tz::Tz) -> String {
 /// Activity colours: the validated categorical palette in a fixed order,
 /// one hue per activity forever. `other` and `unknown` are neutral greys;
 /// away is the empty surface.
-const ACTIVITY_STYLE: &str = r#"
+pub const ACTIVITY_STYLE: &str = r#"
 .a-work{--c:#3987e5} .a-social{--c:#d95926} .a-study{--c:#199e70} .a-video{--c:#c98500}
  .a-comms{--c:#d55181} .a-browsing{--c:#008300} .a-music{--c:#9085e9} .a-games{--c:#e66767}
  .a-other{--c:#7d7c76} .a-unknown{--c:#4a4a46}
@@ -364,53 +365,38 @@ pub fn duration(minutes: u32) -> String {
     }
 }
 
-/// The day view.
-pub fn day_page(day: &crate::day::Day, tz: chrono_tz::Tz, is_today: bool) -> String {
-    use std::collections::HashMap;
-    use time_core::label::{Activity, Place};
-
-    let mut body = String::new();
-    let prev = day
-        .date
-        .pred_opt()
-        .map(|d| format!(r#"<a href="/day/{d}">‹ {}</a>"#, d.format("%a %d")))
-        .unwrap_or_default();
-    let next = if is_today {
-        String::new()
-    } else {
-        day.date
-            .succ_opt()
-            .map(|d| format!(r#"<a href="/day/{d}">{} ›</a>"#, d.format("%a %d")))
-            .unwrap_or_default()
-    };
-    let _ = write!(
-        body,
-        r#"<section><div class="daynav">{prev}<strong>{}{}</strong><span>{next}</span></div></section>"#,
-        if is_today { "Today, " } else { "" },
-        day.date.format("%A %d %B"),
-    );
-
-    // Headline numbers.
-    let work = day
-        .activities
-        .iter()
-        .filter(|a| a.activity.is_productive())
-        .map(|a| a.total())
-        .sum::<u32>();
-    let _ = write!(
-        body,
-        r#"<section class="stats">
-<div class="stat"><div class="v">{}</div><div class="k">at the computer</div></div>
-<div class="stat"><div class="v">{}</div><div class="k">on the phone</div></div>
-<div class="stat"><div class="v">{}</div><div class="k">work and study</div></div>
-<div class="stat"><div class="v">{}</div><div class="k">steps · {:.1} km</div></div>
-</section>"#,
-        duration(day.computer_minutes),
-        duration(day.phone_minutes),
-        duration(work),
-        group_thousands(day.steps),
-        day.distance_m / 1000.0,
-    );
+/// The day view: the period header and donut shared with week and month,
+/// then the day's own detail.
+pub fn day_page(
+    day: &crate::day::Day,
+    tz: chrono_tz::Tz,
+    today: chrono::NaiveDate,
+    cur: &crate::views::Summary,
+    prev: &crate::views::Summary,
+    phones: &[String],
+    step_goal: u32,
+) -> String {
+    use crate::views;
+    let is_today = day.date == today;
+    let mut body = views::nav(cur.period, today);
+    body.push_str(&views::hero(cur, prev));
+    body.push_str(&views::parallel_list(cur));
+    body.push_str(&views::steps_card(cur, prev, step_goal, &day.steps_by_hour));
+    body.push_str(&views::lanes(
+        &day.minutes,
+        day.start_ms,
+        day.end_ms,
+        tz,
+        phones,
+    ));
+    body.push_str(&views::activity_table(cur, prev));
+    if day.unknown_minutes > 0 {
+        let _ = write!(
+            body,
+            r#"<section><div class="sub">{} unknown: no rule matched. <a href="/inbox">Label them in the inbox</a>.</div></section>"#,
+            duration(day.unknown_minutes)
+        );
+    }
 
     // Places and signals: where he was and what the devices were doing.
     let sg = &day.signals;
@@ -530,116 +516,6 @@ pub fn day_page(day: &crate::day::Day, tz: chrono_tz::Tz, is_today: bool) -> Str
         body.push_str("</dl></section>");
     }
 
-    // Hour strips.
-    let by_ts: HashMap<Millis, &time_core::label::MinuteLabel> =
-        day.minutes.iter().map(|m| (m.ts, m)).collect();
-    let hours = ((day.end_ms - day.start_ms) / 3_600_000) as usize;
-    let _ = write!(body, r#"<section><h2>Hour by hour</h2><div class="hours">"#);
-    for h in 0..hours {
-        let hour_start = day.start_ms + h as i64 * 3_600_000;
-        let local_hour = tz
-            .timestamp_millis_opt(hour_start)
-            .single()
-            .map(|t| t.format("%H").to_string())
-            .unwrap_or_default();
-        // Runs of identical (activity, place) minutes.
-        // (activity, place, length, first minute, rule)
-        type Run<'a> = (Option<Activity>, Place, usize, Millis, Option<&'a str>);
-        let mut runs: Vec<Run> = Vec::new();
-        for i in 0..60 {
-            let ts = hour_start + i * 60_000;
-            let (a, p, rule) = match by_ts.get(&ts) {
-                Some(m) if m.place != Place::Away => (m.activity, m.place, Some(m.rule.as_str())),
-                _ => (None, Place::Away, None),
-            };
-            match runs.last_mut() {
-                Some(r) if r.0 == a && r.1 == p => r.2 += 1,
-                _ => runs.push((a, p, 1, ts, rule)),
-            }
-        }
-        let strip: String = runs
-            .iter()
-            .map(|(a, p, n, ts, rule)| match a {
-                None => format!(r#"<span class="empty" style="flex:{n}"></span>"#),
-                Some(a) => {
-                    let ph = if *p == Place::Phone { " ph" } else { "" };
-                    let from = clock_hm(tz, *ts);
-                    let to = clock_hm(tz, ts + *n as i64 * 60_000);
-                    let place = if *p == Place::Phone { "phone" } else { "computer" };
-                    format!(
-                        r#"<span class="a-{a}{ph}" style="flex:{n}" title="{from}–{to} · {a} on the {place} · {}"></span>"#,
-                        esc(rule.unwrap_or(""))
-                    )
-                }
-            })
-            .collect();
-        let _ = write!(
-            body,
-            r#"<div class="hour"><span class="h">{local_hour}</span><div class="strip">{strip}</div></div>"#
-        );
-    }
-    body.push_str(r#"</div><div class="legend">"#);
-    for a in Activity::ALL {
-        let _ = write!(body, r#"<span><span class="sw a-{a}"></span> {a}</span>"#);
-    }
-    body.push_str(r#"<span><span class="sw a-other ph"></span> striped = on the phone</span></div></section>"#);
-
-    // Totals by activity.
-    let max = day
-        .activities
-        .iter()
-        .map(|a| a.total())
-        .max()
-        .unwrap_or(1)
-        .max(1);
-    let _ = write!(body, r#"<section><h2>Where the time went</h2>"#);
-    for t in &day.activities {
-        let w = |n: u32| 100.0 * f64::from(n) / f64::from(max);
-        let mut bar = String::new();
-        if t.computer > 0 {
-            let _ = write!(
-                bar,
-                r#"<span class="a-{}" style="width:{:.1}%" title="{} at the computer"></span>"#,
-                t.activity,
-                w(t.computer),
-                duration(t.computer)
-            );
-        }
-        if t.phone > 0 {
-            let _ = write!(
-                bar,
-                r#"<span class="a-{} ph" style="width:{:.1}%" title="{} on the phone"></span>"#,
-                t.activity,
-                w(t.phone),
-                duration(t.phone)
-            );
-        }
-        let _ = write!(
-            body,
-            r#"<div class="tot"><span><span class="sw a-{a}"></span> {a}</span><div class="bar">{bar}</div><span class="n">{}</span></div>"#,
-            duration(t.total()),
-            a = t.activity,
-        );
-    }
-    if day.activities.is_empty() {
-        body.push_str(r#"<div class="sub">Nothing recorded for this day.</div>"#);
-    }
-    if day.background_minutes > 0 {
-        let _ = write!(
-            body,
-            r#"<div class="sub">Plus {} with something playing on another device.</div>"#,
-            duration(day.background_minutes)
-        );
-    }
-    if day.unknown_minutes > 0 {
-        let _ = write!(
-            body,
-            r#"<div class="sub">{} unknown: no rule matched.</div>"#,
-            duration(day.unknown_minutes)
-        );
-    }
-    body.push_str("</section>");
-
     // Projects.
     if !day.projects.is_empty() {
         let _ = write!(body, r#"<section><h2>Projects</h2><dl>"#);
@@ -669,33 +545,13 @@ pub fn day_page(day: &crate::day::Day, tz: chrono_tz::Tz, is_today: bool) -> Str
         );
     }
 
-    // Steps.
-    if day.steps > 0 {
-        let max = day.steps_by_hour.iter().copied().max().unwrap_or(1).max(1);
-        let bars: String = day
-            .steps_by_hour
-            .iter()
-            .enumerate()
-            .map(|(h, s)| {
-                format!(
-                    r#"<span style="height:{:.0}%" title="{h:02}:00 · {} steps"></span>"#,
-                    100.0 * f64::from(*s) / f64::from(max),
-                    group_thousands(*s)
-                )
-            })
-            .collect();
-        let _ = write!(
-            body,
-            r#"<section><h2>Steps by hour</h2><div class="steps">{bars}</div><div class="axis"><span>00</span><span>06</span><span>12</span><span>18</span><span>24</span></div></section>"#
-        );
-    }
-
     let title = format!("Time · {}", day.date);
+    let style = format!("{ACTIVITY_STYLE}{}", crate::views::STYLE);
     page_with(
         &title,
         "/",
         if is_today { Some(60) } else { None },
-        ACTIVITY_STYLE,
+        &style,
         &body,
     )
 }
@@ -717,7 +573,7 @@ fn tokens_text(n: u64) -> String {
     }
 }
 
-fn group_thousands(n: u32) -> String {
+pub fn group_thousands(n: u32) -> String {
     let s = n.to_string();
     let mut out = String::new();
     for (i, c) in s.chars().enumerate() {
@@ -828,120 +684,6 @@ const INBOX_STYLE: &str = r#"
 .inbox select, .inbox button { font:inherit; padding:.35rem .6rem; border-radius:8px; border:1px solid var(--line); background:var(--bg); color:var(--fg); }
 .inbox button { cursor:pointer; font-weight:600; }
 "#;
-
-/// The week view: one stacked bar per day, then totals.
-pub fn week_page(days: &[crate::day::Day], this_week: bool) -> String {
-    use std::collections::BTreeMap;
-    use time_core::label::Activity;
-
-    let Some(first) = days.first() else {
-        return page("Time · Week", "/week", None, "");
-    };
-    let monday = first.date;
-    let mut body = String::new();
-    let prev = monday - chrono::Days::new(7);
-    let next = monday + chrono::Days::new(7);
-    let _ = write!(
-        body,
-        r#"<section><div class="daynav"><a href="/week/{prev}">‹ {}</a><strong>Week of {}</strong><span>{}</span></div></section>"#,
-        prev.format("%d %b"),
-        monday.format("%d %B"),
-        if this_week {
-            String::new()
-        } else {
-            format!(r#"<a href="/week/{next}">{} ›</a>"#, next.format("%d %b"))
-        },
-    );
-
-    let mut totals: BTreeMap<Activity, u32> = BTreeMap::new();
-    let (mut computer, mut phone, mut steps, mut meters) = (0, 0, 0, 0.0);
-    for d in days {
-        for a in &d.activities {
-            *totals.entry(a.activity).or_default() += a.total();
-        }
-        computer += d.computer_minutes;
-        phone += d.phone_minutes;
-        steps += d.steps;
-        meters += d.distance_m;
-    }
-    let work: u32 = totals
-        .iter()
-        .filter(|(a, _)| a.is_productive())
-        .map(|(_, n)| n)
-        .sum();
-    let _ = write!(
-        body,
-        r#"<section class="stats">
-<div class="stat"><div class="v">{}</div><div class="k">at the computer</div></div>
-<div class="stat"><div class="v">{}</div><div class="k">on the phone</div></div>
-<div class="stat"><div class="v">{}</div><div class="k">work and study</div></div>
-<div class="stat"><div class="v">{}</div><div class="k">steps · {:.1} km</div></div>
-</section>"#,
-        duration(computer),
-        duration(phone),
-        duration(work),
-        group_thousands(steps),
-        meters / 1000.0,
-    );
-
-    // One bar per day; width is minutes out of the longest day.
-    let longest = days
-        .iter()
-        .map(|d| d.computer_minutes + d.phone_minutes)
-        .max()
-        .unwrap_or(1)
-        .max(1);
-    let _ = write!(body, r#"<section><h2>Day by day</h2>"#);
-    for d in days {
-        let total = d.computer_minutes + d.phone_minutes;
-        let segs: String = d
-            .activities
-            .iter()
-            .map(|a| {
-                format!(
-                    r#"<span class="a-{}" style="width:{:.2}%" title="{} · {}"></span>"#,
-                    a.activity,
-                    100.0 * f64::from(a.total()) / f64::from(longest),
-                    a.activity,
-                    duration(a.total())
-                )
-            })
-            .collect();
-        let _ = write!(
-            body,
-            r#"<div class="tot"><a href="/day/{}">{}</a><div class="bar">{segs}</div><span class="n">{}</span></div>"#,
-            d.date,
-            d.date.format("%a %d"),
-            duration(total)
-        );
-    }
-    body.push_str(r#"<div class="legend">"#);
-    for a in Activity::ALL {
-        let _ = write!(body, r#"<span><span class="sw a-{a}"></span> {a}</span>"#);
-    }
-    body.push_str("</div></section>");
-
-    let mut sorted: Vec<_> = totals.into_iter().collect();
-    sorted.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
-    let _ = write!(body, r#"<section><h2>The week's totals</h2><dl>"#);
-    for (a, n) in sorted {
-        let _ = write!(
-            body,
-            r#"<dt><span class="sw a-{a}"></span> {a}</dt><dd>{} · {:.1} h a day</dd>"#,
-            duration(n),
-            f64::from(n) / 60.0 / days.len() as f64
-        );
-    }
-    body.push_str("</dl></section>");
-
-    page_with(
-        &format!("Time · Week of {monday}"),
-        "/week",
-        None,
-        ACTIVITY_STYLE,
-        &body,
-    )
-}
 
 /// `/app/`: what the server is handing out to the phone, and how to install it.
 pub fn app_page(s: &crate::apk::State, repo: &str, tz: chrono_tz::Tz) -> String {

@@ -53,6 +53,9 @@ pub struct Config {
     /// Seconds between classifier passes.
     #[serde(default = "default_classify_every")]
     pub classify_every_secs: u64,
+    /// Daily step goal for the steps ring and bars.
+    #[serde(default = "default_step_goal")]
+    pub step_goal: u32,
 }
 
 /// How the agent-facing summaries judge a minute. Erik's call (2026-10-23):
@@ -104,6 +107,10 @@ fn default_public_url() -> String {
 
 fn default_timezone() -> String {
     "Europe/Stockholm".into()
+}
+
+fn default_step_goal() -> u32 {
+    10_000
 }
 
 fn default_classify_every() -> u64 {

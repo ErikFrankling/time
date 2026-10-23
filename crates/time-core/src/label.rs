@@ -115,8 +115,12 @@ pub struct MinuteLabel {
     /// `None` only when away.
     pub activity: Option<Activity>,
     pub project: Option<String>,
-    /// Something playing on another device at the same time.
+    /// What another device was doing at the same time: something playing,
+    /// or another device in use.
     pub background: Option<Activity>,
+    /// The device `background` was on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_device: Option<String>,
     /// The rule (or model, or "manual") that decided `activity`, so every
     /// label can be explained and fixed.
     pub rule: String,

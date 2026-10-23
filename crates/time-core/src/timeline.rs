@@ -13,8 +13,10 @@
 //! 4. a computer playing video or audio nobody is touching (watching),
 //! 5. otherwise away.
 //!
-//! Something playing on a device that is not the one in use becomes the
-//! minute's `background`.
+//! What another device was doing in the same minute becomes the minute's
+//! `background` and `background_device`: video or music playing elsewhere
+//! first, otherwise another device in use. That is Erik's parallel time,
+//! like YouTube on the phone while typing on the pc.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -26,7 +28,7 @@ use crate::rules::{Facts, RuleSet, Source};
 /// Bump whenever a change here can change a label. Stored labels carry it,
 /// and the server relabels all history when it differs, exactly as it does
 /// when the rules file changes.
-pub const LOGIC_VERSION: u32 = 3;
+pub const LOGIC_VERSION: u32 = 4;
 
 /// Input this recent at the end of a minute means someone was there.
 const RECENT_INPUT_SECS: u32 = 90;
@@ -145,6 +147,7 @@ pub fn label_minutes(
                 activity: None,
                 project: None,
                 background: None,
+                background_device: None,
                 rule: if obs.is_empty() {
                     "presence.no-data".into()
                 } else {
@@ -172,11 +175,20 @@ pub fn label_minutes(
                                 .map(|(_, p)| (*p).to_owned())
                         });
                 }
-                let background = obs
-                    .iter()
-                    .filter(|o| o.device != p.device && o.passive)
-                    .map(|o| o.activity)
-                    .find(|a| matches!(a, Activity::Video | Activity::Music));
+                // Parallel time: something playing elsewhere first, otherwise
+                // another device in use (the phone in hand while the pc types).
+                let others = || obs.iter().filter(|o| o.device != p.device);
+                let parallel = others()
+                    .find(|o| o.passive && matches!(o.activity, Activity::Video | Activity::Music))
+                    .or_else(|| {
+                        others()
+                            .filter(|o| {
+                                o.active && (o.source == Source::Phone || !o.class.is_empty())
+                            })
+                            .max_by_key(|o| o.typing)
+                    });
+                let background = parallel.map(|o| o.activity);
+                let background_device = parallel.map(|o| o.device.to_owned());
                 MinuteLabel {
                     ts,
                     place: if p.source == Source::Phone {
@@ -188,6 +200,7 @@ pub fn label_minutes(
                     activity: Some(p.activity),
                     project,
                     background,
+                    background_device,
                     rule: p.rule.clone(),
                     decider: Decider::Rule,
                     complete,
@@ -416,6 +429,11 @@ mod tests {
         assert_eq!(
             (l.place, l.activity),
             (Place::Computer, Some(Activity::Work))
+        );
+        // ...and the phone in hand is the minute's parallel activity.
+        assert_eq!(
+            (l.background, l.background_device.as_deref()),
+            (Some(Activity::Social), Some("phone"))
         );
     }
 

@@ -58,6 +58,8 @@ const MIGRATIONS: &[&str] = &[
      CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
     // 3: where Erik was, per minute.
     "ALTER TABLE minute ADD COLUMN location TEXT;",
+    // 4: which device the parallel activity was on.
+    "ALTER TABLE minute ADD COLUMN background_device TEXT;",
 ];
 
 pub struct Store {
@@ -348,13 +350,13 @@ impl Store {
         let tx = conn.transaction()?;
         {
             let mut up = tx.prepare_cached(
-                "INSERT INTO minute (ts, place, device, activity, project, background, rule, decider, complete, rules_version, computed_ms, location)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                "INSERT INTO minute (ts, place, device, activity, project, background, rule, decider, complete, rules_version, computed_ms, location, background_device)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
                  ON CONFLICT(ts) DO UPDATE SET place = excluded.place, device = excluded.device,
                     activity = excluded.activity, project = excluded.project, background = excluded.background,
                     rule = excluded.rule, decider = excluded.decider, complete = excluded.complete,
                     rules_version = excluded.rules_version, computed_ms = excluded.computed_ms,
-                    location = excluded.location",
+                    location = excluded.location, background_device = excluded.background_device",
             )?;
             let mut done = tx.prepare_cached("DELETE FROM dirty WHERE ts = ?1")?;
             for l in labels {
@@ -371,6 +373,7 @@ impl Store {
                     rules_version,
                     computed_ms,
                     l.location,
+                    l.background_device,
                 ])?;
                 done.execute([l.ts])?;
             }
@@ -379,39 +382,58 @@ impl Store {
         Ok(())
     }
 
+    /// Steps and metres from Health Connect records starting in `[from, to)`.
+    pub fn steps_between(&self, from: Millis, to: Millis) -> Result<(u32, f64)> {
+        let conn = self.conn();
+        let (steps, meters): (i64, f64) = conn.query_row(
+            "SELECT COALESCE(SUM(json_extract(body, '$.steps')), 0),
+                    COALESCE(SUM(json_extract(body, '$.\"distance.meters\"')), 0.0)
+             FROM event WHERE name = 'time.health.steps' AND start_ms >= ?1 AND start_ms < ?2",
+            [from, to],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Ok((steps.max(0) as u32, meters))
+    }
+
     pub fn labels_between(&self, from: Millis, to: Millis) -> Result<Vec<MinuteLabel>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT ts, place, device, activity, project, background, rule, decider, complete, location
+            "SELECT ts, place, device, activity, project, background, rule, decider, complete, location, background_device
              FROM minute WHERE ts >= ?1 AND ts < ?2 ORDER BY ts",
         )?;
         let rows = stmt.query_map([from, to], |r| {
             Ok((
-                r.get::<_, Millis>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, Option<String>>(2)?,
-                r.get::<_, Option<String>>(3)?,
-                r.get::<_, Option<String>>(4)?,
-                r.get::<_, Option<String>>(5)?,
-                r.get::<_, String>(6)?,
-                r.get::<_, String>(7)?,
-                r.get::<_, bool>(8)?,
-                r.get::<_, Option<String>>(9)?,
+                (
+                    r.get::<_, Millis>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                    r.get::<_, Option<String>>(5)?,
+                    r.get::<_, String>(6)?,
+                    r.get::<_, String>(7)?,
+                    r.get::<_, bool>(8)?,
+                    r.get::<_, Option<String>>(9)?,
+                ),
+                r.get::<_, Option<String>>(10)?,
             ))
         })?;
         let mut out = Vec::new();
         for row in rows {
             let (
-                ts,
-                place,
-                device,
-                activity,
-                project,
-                background,
-                rule,
-                decider,
-                complete,
-                location,
+                (
+                    ts,
+                    place,
+                    device,
+                    activity,
+                    project,
+                    background,
+                    rule,
+                    decider,
+                    complete,
+                    location,
+                ),
+                background_device,
             ) = row?;
             out.push(MinuteLabel {
                 ts,
@@ -426,6 +448,7 @@ impl Store {
                     .map(|a| a.parse())
                     .transpose()
                     .map_err(anyhow::Error::msg)?,
+                background_device,
                 rule,
                 decider: parse_enum(&decider)?,
                 complete,

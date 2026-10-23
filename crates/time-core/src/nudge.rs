@@ -181,6 +181,7 @@ mod tests {
             activity: Some(a),
             project: None,
             background: None,
+            background_device: None,
             rule: "r".into(),
             decider: Decider::Rule,
             complete: true,
