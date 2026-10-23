@@ -8,6 +8,7 @@
 
 pub mod git;
 pub mod github;
+pub mod t3;
 
 use serde::Deserialize;
 
@@ -34,6 +35,10 @@ pub struct CollectConfig {
     /// or the `gh` CLI).
     #[serde(default = "default_true")]
     pub github: bool,
+    /// T3 Code's state directory: prompts, tokens and dictations are read
+    /// from it when it exists.
+    #[serde(default = "default_t3")]
+    pub t3: String,
 }
 
 fn default_endpoint() -> String {
@@ -42,6 +47,10 @@ fn default_endpoint() -> String {
 
 fn default_roots() -> Vec<String> {
     vec!["~/projects".into()]
+}
+
+fn default_t3() -> String {
+    "~/.t3/userdata".into()
 }
 
 fn default_days() -> i64 {

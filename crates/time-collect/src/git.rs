@@ -165,7 +165,11 @@ pub fn scan(
         }
         let diff = commit.tree().and_then(|tree| {
             let parent = commit.parent(0).ok().and_then(|p| p.tree().ok());
-            repo.diff_tree_to_tree(parent.as_ref(), Some(&tree), None)
+            // Blobs past 1 MB count as binary: never loaded, never lines.
+            // A data dump in one repository used to take gigabytes here.
+            let mut opts = git2::DiffOptions::new();
+            opts.max_size(1 << 20);
+            repo.diff_tree_to_tree(parent.as_ref(), Some(&tree), Some(&mut opts))
         });
         let (added, removed, files) = diff.map(|d| commit_lines(&d)).unwrap_or_default();
         let at = commit.time().seconds() * 1000;

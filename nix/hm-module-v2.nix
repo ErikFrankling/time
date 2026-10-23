@@ -208,6 +208,11 @@ in
         Type = "oneshot";
         ExecStart = "${lib.getExe' cfg.package "time-collect"} ${collectConfig}";
         Nice = 10;
+        # A background tally: never a reason for the desktop to stutter.
+        CPUQuota = "50%";
+        MemoryHigh = "512M";
+        MemoryMax = "1G";
+        IOSchedulingClass = "idle";
       }
       // lib.optionalAttrs (cfg.tokenFile != null) { EnvironmentFile = cfg.tokenFile; };
     };

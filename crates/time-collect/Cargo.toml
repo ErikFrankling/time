@@ -1,6 +1,6 @@
 [package]
 name = "time-collect"
-description = "Commits from local git and pull requests and reviews from GitHub, as Time events."
+description = "Commits from local git, pull requests and reviews from GitHub, and T3 Code prompts, tokens and dictations, as Time events."
 edition.workspace = true
 version.workspace = true
 license.workspace = true
@@ -19,6 +19,7 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 time-agent.workspace = true
+rusqlite.workspace = true
 time-core.workspace = true
 toml.workspace = true
 uuid.workspace = true

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use time_agent::sender::{Delivery, HttpSender, Sender};
-use time_collect::{git, github, CollectConfig};
+use time_collect::{git, github, t3, CollectConfig};
 
 /// One run: scan, send, exit. A systemd timer runs it every few minutes;
 /// stable event ids make every rerun harmless.
@@ -35,6 +35,16 @@ fn main() -> anyhow::Result<()> {
         match github::fetch(&cfg.device, since, now) {
             Ok(mut e) => events.append(&mut e),
             Err(e) => eprintln!("collect: github: {e:#}"),
+        }
+    }
+    let t3_dir = expand(&cfg.t3);
+    if t3_dir.join("statev2.sqlite").exists() {
+        match t3::collect(&t3_dir, &cfg.device, since) {
+            Ok(mut e) => {
+                eprintln!("collect: {} event(s) from T3 Code", e.len());
+                events.append(&mut e);
+            }
+            Err(e) => eprintln!("collect: t3: {e:#}"),
         }
     }
     eprintln!(
