@@ -74,8 +74,8 @@
           type: 'pie', radius: ['74%', '83%'], center: ['50%', '45%'], startAngle: 90,
           label: { show: false }, labelLine: { show: false }, itemStyle: { borderColor: card, borderWidth: 1 },
           data: d.outer.map(function (x) {
-            // Slivers under a minute and a half per 4 hours read as noise: grey.
-            var tiny = !x.gap && x.value < d.total / 160;
+            // Slivers under 0.2% of the period read as noise: grey.
+            var tiny = !x.gap && x.value < d.total / 500;
             return Object.assign({}, x, x.gap || tiny
               ? { itemStyle: { color: line, opacity: 0.35 }, emphasis: { disabled: true } }
               : { itemStyle: { color: C[x.name] } });
