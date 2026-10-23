@@ -315,9 +315,11 @@ pub fn signals(
         .windows(2)
         .filter(|w| w[0].1 && !w[1].1)
         .count() as u32;
+    // A closed laptop wakes for a minute now and then; bridge those gaps so
+    // a night on the charger is one span, not forty.
     for ((device, what), mins) in per_device {
         sig.computers
-            .extend(spans(mins, &format!("{device} {what}"), 5, 2));
+            .extend(spans(mins, &format!("{device} {what}"), 5, 15));
     }
     sig.computers.sort_by_key(|s| s.from_ms);
     sig
