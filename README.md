@@ -87,7 +87,7 @@ lan-only on top of that. Live at `https://time.erikfrankling.duckdns.org/mcp`.
 
 The same data as plain HTTP for scripts (open, like `/api/day`):
 `/api/now`, `/api/summary?window=3h`, `/api/timeline?window=3h`, and
-`/api/summary/line`, the last hour in one text line, for the hourly review.
+`/api/summary/line`, the last hour in one text line with what he is doing now, for the hourly review.
 
 Which activities count as unproductive is `[mcp]` in `config.toml`; everything
 not listed is neutral:

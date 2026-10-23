@@ -909,6 +909,27 @@ pub fn line(
     if let Some((app, ..)) = top.first() {
         out.push_str(&format!(" Mostly {app}."));
     }
+    let n = now(cfg, tz, now_ms, labels, events).json;
+    let current = &n["current"];
+    out.push_str(
+        &match (n["stale"].as_bool(), current["activity"].as_str()) {
+            (Some(true), _) => " Now: no device has reported lately.".to_owned(),
+            (_, Some(a)) => {
+                let place = current["site"]
+                    .as_str()
+                    .or(current["app"].as_str())
+                    .map_or(String::new(), |p| format!(" on {p}"));
+                let device = current["device"]
+                    .as_str()
+                    .map_or(String::new(), |d| format!(" ({d})"));
+                format!(
+                    " Now: {a}{place}{device}, {}.",
+                    dur(current["for_minutes"].as_u64().unwrap_or(0) as u32)
+                )
+            }
+            _ => " Now: away.".to_owned(),
+        },
+    );
     out
 }
 
