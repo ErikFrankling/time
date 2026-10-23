@@ -391,27 +391,30 @@ pub fn headline(cur: &Summary, prev: &Summary) -> String {
             f(&s.total)
         }
     };
-    let fig = |label: &str, f: &dyn Fn(&DayTotals) -> u32| {
+    // One big number; the two others small under it.
+    let small = |label: &str, f: &dyn Fn(&DayTotals) -> u32| {
         let c = v(cur, f);
         format!(
-            r#"<div class="fig"><div class="fv">{}</div><div class="fk">{label}{} {}</div></div>"#,
+            r#"<span class="sf"><b>{}</b> {label} {}</span>"#,
             short(c),
-            if per_day { " a day" } else { "" },
-            chip(c, v(prev, f)),
+            chip(c, v(prev, f))
         )
     };
+    let t = v(cur, &|t| t.tracked());
     format!(
-        r#"<section class="figs">{}{}{}</section>"#,
-        fig("tracked", &|t| t.tracked()),
-        fig("work & study", &|t| t.work()),
-        fig("on the phone", &|t| t.phone()),
+        r#"<section class="figs"><div class="fv">{}</div><div class="fk">tracked{} {}</div><div class="fs">{}{}</div></section>"#,
+        short(t),
+        if per_day { " a day" } else { "" },
+        chip(t, v(prev, &|t| t.tracked())),
+        small("work &amp; study", &|t| t.work()),
+        small("phone", &|t| t.phone()),
     )
 }
 
 /// A chart slot; `time.js` draws into it from the page's data.
 fn slot(id: &str, title: &str, height: &str, note: &str) -> String {
     format!(
-        r#"<section class="chartcard"><h2>{title}</h2><div class="chart" id="{id}" style="height:{height}"></div>{note}</section>"#
+        r#"<section class="chartcard"><h2>{title}</h2>{note}<div class="chart" id="{id}" style="height:{height}"></div></section>"#
     )
 }
 
@@ -621,18 +624,57 @@ pub fn chart_data(
 pub fn charts(cur: &Summary, prev: &Summary, goal: u32, day: Option<&crate::day::Day>) -> String {
     let data = chart_data(cur, prev, goal, day);
     let mut out = headline(cur, prev);
-    out.push_str(&slot("c-donut", "Where the time went", "19rem", ""));
+    out.push_str(&slot(
+        "c-donut",
+        "Where the time went",
+        "19rem",
+        r#"<div class="cap"><span class="k-in"></span>inside: what had your attention <span class="k-out"></span>outer ring: a second device busy at the same time, grey when nothing else was</div>"#,
+    ));
     if cur.total.parallel() > 0 {
-        out.push_str(&slot("c-pairs", "In parallel", "13rem", ""));
+        out.push_str(&slot(
+            "c-pairs",
+            "Two devices at once",
+            "13rem",
+            r#"<div class="cap">Each bar: left colour what you were focused on, right colour what the other device (📱 phone, 💻 computer) was doing.</div>"#,
+        ));
     }
     let over = match cur.period.kind {
         Kind::Day => "Over the day",
         Kind::Week => "Over the week",
         Kind::Month => "Over the month",
     };
-    out.push_str(&slot("c-time", over, "15rem", ""));
+    let avg = cur.avg(DayTotals::tracked);
+    let pavg = prev.avg(DayTotals::tracked);
+    let lines = if cur.period.kind == Kind::Day || avg == 0 {
+        String::new()
+    } else {
+        format!(
+            r#"<div class="cap"><span class="k-avg"></span>average {} a day{}{}</div>"#,
+            short(avg),
+            if pavg > 0 {
+                format!(
+                    r#" <span class="k-prev"></span>{} {} a day"#,
+                    cur.period.prev_name(),
+                    short(pavg)
+                )
+            } else {
+                String::new()
+            },
+            if cur.days.iter().any(|t| t.future) {
+                " · shaded: still to come"
+            } else {
+                ""
+            },
+        )
+    };
+    out.push_str(&slot("c-time", over, "15rem", &lines));
     if cur.period.kind == Kind::Month {
-        out.push_str(&slot("c-cal", "Work and study by day", "15rem", ""));
+        out.push_str(&slot(
+            "c-cal",
+            "Work and study by day",
+            "17rem",
+            r#"<div class="cap">Darker blue: more hours of work and study. Tap a day to open it.</div>"#,
+        ));
     }
     if data["steps"]["any"].as_bool() == Some(true) {
         out.push_str(
@@ -811,9 +853,18 @@ pub fn period_page(cur: &Summary, prev: &Summary, goal: u32, today: NaiveDate) -
 
 /// Styles for the period views; colours come from the page's theme.
 pub const STYLE: &str = r#"
-.figs { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:.4rem; background:none; border:0; padding:0 .2rem; }
-.fig .fv { font-size:1.55rem; font-weight:750; font-variant-numeric:tabular-nums; letter-spacing:-.02em; white-space:nowrap; }
-.fig .fk { color:var(--muted); font-size:.75rem; line-height:1.3; }
+.cap { color:var(--muted); font-size:.78rem; line-height:1.35; margin:-.2rem .3rem .2rem; }
+.cap span { display:inline-block; vertical-align:middle; margin:0 .3rem 0 .5rem; }
+.cap span:first-child { margin-left:0; }
+.k-in { width:.8rem; height:.8rem; border-radius:50%; border:3px solid var(--muted); }
+.k-out { width:.8rem; height:.8rem; border-radius:50%; border:1.5px dashed var(--muted); }
+.k-avg { width:1.1rem; border-top:2px dashed var(--fg); }
+.k-prev { width:1.1rem; border-top:2px dotted var(--muted); }
+.figs { background:none; border:0; padding:0 .3rem; text-align:center; }
+.figs .fs { display:flex; justify-content:center; flex-wrap:wrap; gap:.2rem 1rem; margin-top:.35rem; font-size:.85rem; color:var(--muted); }
+.figs .fs b { color:var(--fg); font-variant-numeric:tabular-nums; }
+.figs .fv { font-size:2.6rem; line-height:1.1; font-weight:750; font-variant-numeric:tabular-nums; letter-spacing:-.02em; white-space:nowrap; }
+.figs .fk { color:var(--muted); font-size:.75rem; line-height:1.3; }
 .chip { display:inline-block; font-size:.7rem; font-weight:700; padding:0 .3rem; border-radius:99px; background:var(--line); color:var(--fg); white-space:nowrap; }
 .chartcard { padding:.8rem .7rem .6rem; }
 .chartcard h2 { margin-left:.3rem; }

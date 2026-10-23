@@ -74,7 +74,9 @@
           type: 'pie', radius: ['74%', '83%'], center: ['50%', '45%'], startAngle: 90,
           label: { show: false }, labelLine: { show: false }, itemStyle: { borderColor: card, borderWidth: 1 },
           data: d.outer.map(function (x) {
-            return Object.assign({}, x, x.gap
+            // Slivers under a minute and a half per 4 hours read as noise: grey.
+            var tiny = !x.gap && x.value < d.total / 160;
+            return Object.assign({}, x, x.gap || tiny
               ? { itemStyle: { color: line, opacity: 0.35 }, emphasis: { disabled: true } }
               : { itemStyle: { color: C[x.name] } });
           })
@@ -117,9 +119,14 @@
     var t = D.time;
     var lines = [];
     if (D.kind !== 'day') {
-      if (t.avg) lines.push({ yAxis: t.avg, name: 'average', lineStyle: { color: fg, type: 'dashed' }, label: { formatter: 'avg ' + hours(t.avg), color: fg, fontSize: 10, position: 'insideEndTop' } });
-      if (t.prevAvg) lines.push({ yAxis: t.prevAvg, name: 'before', lineStyle: { color: mu, type: 'dotted' }, label: { formatter: 'before ' + hours(t.prevAvg), color: mu, fontSize: 10, position: 'insideStartTop' } });
+      // The caption above the chart names the lines; no labels in the plot.
+      if (t.avg) lines.push({ yAxis: t.avg, name: 'average', lineStyle: { color: fg, type: 'dashed', width: 1.5 }, label: { show: false } });
+      if (t.prevAvg) lines.push({ yAxis: t.prevAvg, name: 'before', lineStyle: { color: mu, type: 'dotted', width: 1.5 }, label: { show: false } });
     }
+    // Days still to come are shaded, not mistaken for empty days.
+    var first = t.future.indexOf(true);
+    var futureArea = first < 0 ? undefined : { silent: true, itemStyle: { color: line, opacity: 0.35 },
+      data: [[{ xAxis: t.labels[first] }, { xAxis: t.labels[t.labels.length - 1] }]] };
     var time = make('c-time', {
       animation: false,
       grid: { left: 4, right: 4, top: 14, bottom: 4, containLabel: true },
@@ -138,7 +145,8 @@
         return {
           type: 'bar', name: s.name, stack: 'a', barCategoryGap: D.kind === 'month' ? '20%' : '30%',
           itemStyle: { color: C[s.name] }, data: s.data,
-          markLine: i === 0 && lines.length ? { symbol: 'none', silent: true, data: lines } : undefined
+          markLine: i === 0 && lines.length ? { symbol: 'none', silent: true, data: lines } : undefined,
+          markArea: i === 0 ? futureArea : undefined
         };
       })
     });
@@ -153,9 +161,12 @@
           var x = p.data;
           return '<b>' + x[0] + '</b><br>work and study ' + dur(x[1]) + '<br>tracked ' + dur(x[2]) + (x[3] ? '<br>' + thou(x[3]) + ' steps' : '');
         } }, tip),
-        visualMap: { show: false, min: 0, max: maxw, dimension: 1, inRange: { color: [card, '#3987e5'] } },
+        visualMap: { show: true, type: 'continuous', orient: 'horizontal', left: 'center', bottom: 0,
+          itemWidth: 8, itemHeight: 120, calculable: false, min: 0, max: maxw, dimension: 1,
+          text: [hours(maxw), '0h'], textStyle: { color: mu, fontSize: 10 },
+          inRange: { color: [card, '#3987e5'] } },
         calendar: {
-          orient: 'vertical', range: D.month, top: 22, left: 8, right: 8, bottom: 4, cellSize: ['auto', 'auto'],
+          orient: 'vertical', range: D.month, top: 22, left: 8, right: 8, bottom: 34, cellSize: ['auto', 'auto'],
           splitLine: { show: false }, itemStyle: { color: card, borderColor: line, borderWidth: 2 },
           dayLabel: { firstDay: 1, nameMap: ['S', 'M', 'T', 'W', 'T', 'F', 'S'], color: mu, fontSize: 10, margin: 6 },
           monthLabel: { show: false }, yearLabel: { show: false }
@@ -194,7 +205,8 @@
           return '<b>' + ps[0].axisValue + (D.kind === 'day' ? ':00' : '') + '</b><br>' + thou(ps[0].value) + ' steps';
         } }, tip),
         xAxis: { type: 'category', data: s.labels, axisTick: { show: false }, axisLine: { lineStyle: { color: line } },
-          axisLabel: Object.assign({}, axisText, { interval: D.kind === 'day' ? 5 : (D.kind === 'month' ? 6 : 0) }) },
+          axisLabel: Object.assign({}, axisText, { interval: D.kind === 'day' ? 5 : (D.kind === 'month' ? 6 : 0),
+            formatter: function (v) { return D.kind === 'week' ? v.charAt(0) : v; } }) },
         yAxis: { type: 'value', show: false, max: function (v) { return Math.max(v.max, D.kind === 'day' ? 0 : s.goal); } },
         series: [{
           type: 'bar', barCategoryGap: '25%',
