@@ -681,7 +681,7 @@ pub fn charts(cur: &Summary, prev: &Summary, goal: u32, day: Option<&crate::day:
             r#"<section class="chartcard"><h2>Steps</h2><div class="steps2"><div class="chart" id="c-ring" style="height:9rem"></div><div class="chart" id="c-steps" style="height:9rem"></div></div></section>"#,
         );
     } else {
-        out.push_str(r#"<section class="chartcard"><h2>Steps</h2><div class="sub">No steps yet. In the phone app: Phone settings → Grant Health Connect access → Steps and Distance.</div></section>"#);
+        out.push_str(r#"<section class="chartcard"><h2>Steps</h2><div class="sub">No steps recorded in this period. <a href="/status">Status</a> shows whether the phone is sending them.</div></section>"#);
     }
     out.push_str(&slot(
         "c-compare",
