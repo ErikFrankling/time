@@ -448,6 +448,73 @@ pub fn day_page(day: &crate::day::Day, tz: chrono_tz::Tz, is_today: bool) -> Str
         body.push_str("</dl></section>");
     }
 
+    // How: typing, voice, listening, screen; then what the AI did.
+    let md = &day.modalities;
+    if !md.is_empty() || day.computer_minutes + day.phone_minutes > 0 {
+        let _ = write!(body, r#"<section><h2>Typing, voice, listening</h2><dl>"#);
+        let _ = write!(
+            body,
+            "<dt>Typing</dt><dd>{} with keys pressed · {} key presses{}</dd>",
+            duration(md.typing_minutes),
+            group_thousands(md.key_presses),
+            if md.prompts_typed > 0 {
+                format!(
+                    " · {} typed prompts, {} words",
+                    md.prompts_typed,
+                    group_thousands(md.words_typed)
+                )
+            } else {
+                String::new()
+            }
+        );
+        let _ = write!(
+            body,
+            "<dt>Voice</dt><dd>{} dictations · {} dictated prompts, {} words</dd>",
+            md.dictations,
+            md.prompts_dictated,
+            group_thousands(md.words_dictated)
+        );
+        let _ = write!(
+            body,
+            "<dt>Listening</dt><dd>{} with sound playing{}</dd>",
+            duration(md.listening_minutes),
+            if md.read_aloud_minutes > 0 {
+                format!(" · read-aloud {}", duration(md.read_aloud_minutes))
+            } else {
+                String::new()
+            }
+        );
+        let _ = write!(
+            body,
+            "<dt>Screen</dt><dd>{} at a computer · {} on the phone</dd>",
+            duration(day.computer_minutes),
+            duration(day.phone_minutes)
+        );
+        body.push_str("</dl></section>");
+    }
+    if !md.tokens.is_empty() || md.prompts_by_agents > 0 {
+        let _ = write!(
+            body,
+            r#"<section><h2>AI</h2><div class="sub">{} prompts from Erik · {} from agents and schedules · {} tokens</div><dl>"#,
+            md.prompts_typed + md.prompts_dictated,
+            md.prompts_by_agents,
+            tokens_text(md.tokens_total())
+        );
+        for t in &md.tokens {
+            let _ = write!(
+                body,
+                "<dt>{}</dt><dd>{} in ({} cached) · {} out · {} turns, {} from Erik's prompts</dd>",
+                esc(&t.account),
+                tokens_text(t.input),
+                tokens_text(t.cached_input),
+                tokens_text(t.output),
+                t.turns,
+                t.turns_by_erik
+            );
+        }
+        body.push_str("</dl></section>");
+    }
+
     // Hour strips.
     let by_ts: HashMap<Millis, &time_core::label::MinuteLabel> =
         day.minutes.iter().map(|m| (m.ts, m)).collect();
@@ -623,6 +690,16 @@ fn clock_hm(tz: chrono_tz::Tz, t: Millis) -> String {
         .single()
         .map(|d| d.format("%H:%M").to_string())
         .unwrap_or_default()
+}
+
+/// 1234 → "1.2k", 5_600_000 → "5.6M".
+fn tokens_text(n: u64) -> String {
+    match n {
+        0..=999 => n.to_string(),
+        1_000..=999_999 => format!("{:.1}k", n as f64 / 1e3),
+        1_000_000..=999_999_999 => format!("{:.1}M", n as f64 / 1e6),
+        _ => format!("{:.2}B", n as f64 / 1e9),
+    }
 }
 
 fn group_thousands(n: u32) -> String {
@@ -910,3 +987,4 @@ mod tests {
         assert_eq!(ago(3 * 86_400_000, Some(0)), "3 days ago");
     }
 }
+

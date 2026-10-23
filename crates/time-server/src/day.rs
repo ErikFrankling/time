@@ -31,6 +31,7 @@ pub struct Day {
     pub steps_by_hour: Vec<u32>,
     pub code: CodeTotals,
     pub signals: Signals,
+    pub modalities: Modalities,
 }
 
 /// What was shipped that day, from git and GitHub.
@@ -162,6 +163,7 @@ pub fn summarise(store: &Store, tz: chrono_tz::Tz, date: NaiveDate) -> anyhow::R
     let mut code = CodeTotals::default();
     let day_events = store.events_between(start_ms, end_ms)?;
     let signals = signals(&minutes, &day_events, start_ms, end_ms);
+    let modalities = modalities(&day_events, start_ms, end_ms);
     for e in day_events {
         if e.start_ms >= start_ms && e.start_ms < end_ms {
             code.add(&e.event);
@@ -197,6 +199,7 @@ pub fn summarise(store: &Store, tz: chrono_tz::Tz, date: NaiveDate) -> anyhow::R
         steps_by_hour,
         code,
         signals,
+        modalities,
     })
 }
 
@@ -320,6 +323,133 @@ pub fn signals(
     sig
 }
 
+/// The four ways Erik works with a machine, and what the AI did with it:
+/// typing, voice, listening, screen; prompts and tokens.
+#[derive(Debug, Default, Serialize)]
+pub struct Modalities {
+    /// Minutes with at least one key press on a computer.
+    pub typing_minutes: u32,
+    pub key_presses: u32,
+    /// Words in Erik's own prompts to T3 Code, typed and dictated.
+    pub words_typed: u32,
+    pub words_dictated: u32,
+    pub prompts_typed: u32,
+    pub prompts_dictated: u32,
+    pub dictations: u32,
+    /// Prompts sent by agents and scheduled tasks, not by Erik.
+    pub prompts_by_agents: u32,
+    /// Minutes with sound playing: computers, phone media, read-aloud.
+    pub listening_minutes: u32,
+    pub read_aloud_minutes: u32,
+    pub tokens: Vec<TokenTotal>,
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct TokenTotal {
+    /// The provider account (T3's provider instance), e.g. `claudeAgent_claude_2`.
+    pub account: String,
+    pub turns: u32,
+    pub input: u64,
+    pub cached_input: u64,
+    pub output: u64,
+    /// Turns started by one of Erik's own prompts.
+    pub turns_by_erik: u32,
+}
+
+impl Modalities {
+    pub fn is_empty(&self) -> bool {
+        self.typing_minutes
+            + self.prompts_typed
+            + self.prompts_dictated
+            + self.dictations
+            + self.prompts_by_agents
+            + self.listening_minutes
+            == 0
+            && self.tokens.is_empty()
+    }
+
+    pub fn tokens_total(&self) -> u64 {
+        self.tokens.iter().map(|t| t.input + t.output).sum()
+    }
+}
+
+pub fn modalities(events: &[time_core::event::Envelope], start: Millis, end: Millis) -> Modalities {
+    use std::collections::BTreeSet;
+    use time_core::event::{InputMode, Origin};
+    let mut m = Modalities::default();
+    let mut typing: BTreeSet<Millis> = BTreeSet::new();
+    let mut listening: BTreeSet<Millis> = BTreeSet::new();
+    let mut tokens: BTreeMap<String, TokenTotal> = BTreeMap::new();
+    let floor = |t: Millis| t - t.rem_euclid(MINUTE_MS);
+    for e in events {
+        // Spans (phone apps, read-aloud) may start before the day.
+        if e.end_ms < start || e.start_ms >= end {
+            continue;
+        }
+        let in_day = e.start_ms >= start;
+        match &e.event {
+            Event::ScreenMinute(s) if in_day && !s.blocked => {
+                if s.keys > 0 {
+                    typing.insert(floor(e.start_ms));
+                    m.key_presses += s.keys;
+                }
+                if s.audio_playing {
+                    listening.insert(floor(e.start_ms));
+                }
+            }
+            Event::PhoneApp(a) if a.media_playing => {
+                let mut t = floor(e.start_ms.max(start));
+                while t < e.end_ms.min(end) {
+                    listening.insert(t);
+                    t += MINUTE_MS;
+                }
+            }
+            Event::ReadAloudPlayed(r) if in_day => {
+                let mins = (r.seconds_played / 60.0).ceil() as i64;
+                m.read_aloud_minutes += mins as u32;
+                for i in 0..mins.max(1) {
+                    listening.insert(floor(e.start_ms) + i * MINUTE_MS);
+                }
+            }
+            Event::PromptSent(p) if in_day => match p.origin {
+                Origin::Human => {
+                    m.words_typed += p.words_typed;
+                    m.words_dictated += p.words_dictated;
+                    match p.input_mode {
+                        InputMode::Typed => m.prompts_typed += 1,
+                        InputMode::Dictated | InputMode::Mixed => m.prompts_dictated += 1,
+                    }
+                }
+                Origin::Agent | Origin::Scheduled => m.prompts_by_agents += 1,
+            },
+            Event::DictationFinished(_) if in_day => m.dictations += 1,
+            Event::TokensUsed(t) if in_day => {
+                let key = if t.account.is_empty() {
+                    t.provider.clone()
+                } else {
+                    t.account.clone()
+                };
+                let s = tokens.entry(key.clone()).or_default();
+                s.account = key;
+                s.turns += 1;
+                s.input += t.input_tokens;
+                s.cached_input += t.cached_input_tokens;
+                s.output += t.output_tokens;
+                if t.origin == Origin::Human {
+                    s.turns_by_erik += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    m.typing_minutes = typing.len() as u32;
+    m.listening_minutes = listening.len() as u32;
+    m.tokens = tokens.into_values().collect();
+    m.tokens
+        .sort_by_key(|t| std::cmp::Reverse(t.input + t.output));
+    m
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -334,5 +464,112 @@ mod tests {
         assert_eq!(hours("2026-10-21"), 24);
         assert_eq!(hours("2026-10-25"), 25, "clocks go back");
         assert_eq!(hours("2026-03-29"), 23, "clocks go forward");
+    }
+
+    #[test]
+    fn modalities_count_typing_voice_listening_and_tokens() {
+        use time_core::event::*;
+        let m = MINUTE_MS;
+        let screen = |t: Millis, keys: u32, audio: bool| {
+            Envelope::new(
+                "pc",
+                "agent",
+                t,
+                t + m,
+                Event::ScreenMinute(ScreenMinute {
+                    keys,
+                    audio_playing: audio,
+                    ..Default::default()
+                }),
+            )
+        };
+        let prompt = |t: Millis, mode: InputMode, origin: Origin, typed: u32, said: u32| {
+            Envelope::new(
+                "pc",
+                "t3-code",
+                t,
+                t,
+                Event::PromptSent(PromptSent {
+                    thread_id: "t".into(),
+                    project: None,
+                    provider: String::new(),
+                    model: String::new(),
+                    client: "web".into(),
+                    words_typed: typed,
+                    words_dictated: said,
+                    input_mode: mode,
+                    origin,
+                }),
+            )
+        };
+        let tokens = |t: Millis, account: &str, origin: Origin| {
+            Envelope::new(
+                "pc",
+                "t3-code",
+                t,
+                t + m,
+                Event::TokensUsed(TokensUsed {
+                    provider: "claudeAgent".into(),
+                    model: "claude-opus-5-5".into(),
+                    account: account.into(),
+                    input_tokens: 1000,
+                    output_tokens: 10,
+                    cached_input_tokens: 900,
+                    reasoning_tokens: 0,
+                    thread_id: "t".into(),
+                    project: None,
+                    origin,
+                }),
+            )
+        };
+        let events = vec![
+            screen(0, 40, false),
+            screen(m, 0, true),
+            screen(2 * m, 12, true),
+            Envelope::new(
+                "phone",
+                "app",
+                5 * m,
+                8 * m,
+                Event::PhoneApp(PhoneApp {
+                    package: "p".into(),
+                    label: "Spotify".into(),
+                    media_playing: true,
+                }),
+            ),
+            prompt(3 * m, InputMode::Typed, Origin::Human, 12, 0),
+            prompt(4 * m, InputMode::Dictated, Origin::Human, 0, 30),
+            prompt(4 * m, InputMode::Typed, Origin::Agent, 0, 0),
+            Envelope::new(
+                "pc",
+                "t3-code",
+                4 * m,
+                4 * m,
+                Event::DictationFinished(DictationFinished {
+                    recording_id: "r".into(),
+                    client: "web".into(),
+                    audio_seconds: 0.0,
+                    words: 30,
+                    outcome: "sent".into(),
+                }),
+            ),
+            tokens(3 * m, "claudeAgent_claude_2", Origin::Human),
+            tokens(4 * m, "claudeAgent_claude_2", Origin::Agent),
+            tokens(5 * m, "codex", Origin::Agent),
+        ];
+        let md = modalities(&events, 0, 60 * m);
+        assert_eq!((md.typing_minutes, md.key_presses), (2, 52));
+        assert_eq!(md.listening_minutes, 5, "two computer minutes, three phone");
+        assert_eq!((md.prompts_typed, md.words_typed), (1, 12));
+        assert_eq!((md.prompts_dictated, md.words_dictated), (1, 30));
+        assert_eq!((md.dictations, md.prompts_by_agents), (1, 1));
+        assert_eq!(md.tokens.len(), 2);
+        let claude = &md.tokens[0];
+        assert_eq!(claude.account, "claudeAgent_claude_2");
+        assert_eq!(
+            (claude.turns, claude.turns_by_erik, claude.input),
+            (2, 1, 2000)
+        );
+        assert_eq!(md.tokens_total(), 3030);
     }
 }
