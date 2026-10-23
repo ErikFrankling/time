@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use chrono::{NaiveDate, TimeZone};
 use serde::Serialize;
-use time_core::clock::{MINUTE_MS, Millis};
+use time_core::clock::{Millis, MINUTE_MS};
 use time_core::event::Event;
 use time_core::label::{Activity, MinuteLabel, Place};
 
