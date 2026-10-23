@@ -84,9 +84,6 @@ impl Period {
             Kind::Day if self.start == today => {
                 format!("Today, {}", self.start.format("%a %-d %b"))
             }
-            Kind::Day if self.start + Days::new(1) == today => {
-                format!("Yesterday, {}", self.start.format("%a %-d %b"))
-            }
             Kind::Day => self.start.format("%A %-d %B").to_string(),
             Kind::Week => {
                 let last = self.end - Days::new(1);
@@ -149,6 +146,8 @@ pub struct DayTotals {
     pub projects: BTreeMap<String, u32>,
     pub steps: u32,
     pub distance_m: f64,
+    /// After today: nothing yet, not nothing.
+    pub future: bool,
 }
 
 impl DayTotals {
@@ -270,6 +269,7 @@ pub fn summarise(
         if date > today {
             days.push(DayTotals {
                 date: Some(date),
+                future: true,
                 ..Default::default()
             });
             continue;
@@ -420,8 +420,15 @@ pub fn hero(cur: &Summary, prev: &Summary) -> String {
         )
     };
     format!(
-        r#"<section class="hero"><div class="donut">{}</div><div class="stats">{}{}{}{}</div></section>"#,
-        donut(&cur.total),
+        r#"<section class="hero"><div class="donut">{}<div class="ringkey"><span class="in">inner ring: what had the attention</span><span class="out">outer ring: a second device at the same time</span></div></div><div class="stats">{}{}{}{}</div></section>"#,
+        donut(
+            &cur.total,
+            if per_day {
+                "tracked in total"
+            } else {
+                "tracked"
+            }
+        ),
         stat("Tracked", &|t| t.tracked()),
         stat("Work and study", &|t| t.work()),
         stat("On the phone", &|t| t.phone()),
@@ -444,7 +451,7 @@ fn arc(cx: f64, cy: f64, r0: f64, r1: f64, a0: f64, a1: f64) -> String {
 /// What had the attention, by activity (inner ring), and, around each slice,
 /// what another device was doing at the same time (outer ring). An empty
 /// stretch of the outer ring is time with only one thing going on.
-pub fn donut(t: &DayTotals) -> String {
+pub fn donut(t: &DayTotals, centre: &str) -> String {
     let total = t.tracked();
     let (cx, cy) = (100.0, 100.0);
     if total == 0 {
@@ -509,7 +516,7 @@ pub fn donut(t: &DayTotals) -> String {
         String::new()
     };
     format!(
-        r#"<svg viewBox="0 0 200 200" role="img" aria-label="Time by activity; the outer ring is what ran at the same time on another device"><circle cx="100" cy="100" r="94.5" class="track" fill="none" stroke-width="9"/>{inner}{outer}{labels}<text x="100" y="99" class="c1">{}</text><text x="100" y="113" class="c3">tracked</text>{sub}</svg>"#,
+        r#"<svg viewBox="0 0 200 200" role="img" aria-label="Time by activity; the outer ring is what ran at the same time on another device"><circle cx="100" cy="100" r="94.5" class="track" fill="none" stroke-width="9"/>{inner}{outer}{labels}<text x="100" y="99" class="c1">{}</text><text x="100" y="113" class="c3">{centre}</text>{sub}</svg>"#,
         duration(total)
     )
 }
@@ -645,7 +652,7 @@ pub fn steps_card(cur: &Summary, prev: &Summary, goal: u32, by_hour: &[u32]) -> 
     let d = delta_count(steps, prev_steps);
     let unit = if day { "" } else { " a day" };
     let mut out = format!(
-        r#"<section><h2>Steps</h2><div class="steprow">{}<div><div class="big">{}<small> steps{unit}</small></div><div class="k2">{km:.1} km{unit} · goal {}</div>{}{}</div></div>"#,
+        r#"<section><h2>Steps</h2><div class="steprow">{}<div><div class="big">{}<small> steps{unit}</small></div><div class="k2">{km:.1} km walked{unit} · goal {}</div>{}{}</div></div>"#,
         ring(steps, goal, "Steps against the daily goal"),
         group_thousands(steps),
         group_thousands(goal),
@@ -765,7 +772,8 @@ pub fn day_bars(cur: &Summary, prev: &Summary) -> String {
         }
         let _ = write!(
             bars,
-            r#"<a class="col" href="/day/{date}" title="{} · {} tracked, {} work and study"><span class="stack">{segs}</span></a>"#,
+            r#"<a class="col{}" href="/day/{date}" title="{} · {} tracked, {} work and study"><span class="stack">{segs}</span></a>"#,
+            if t.future { " future" } else { "" },
             date.format("%a %-d %b"),
             duration(t.tracked()),
             duration(t.work()),
@@ -781,7 +789,12 @@ pub fn day_bars(cur: &Summary, prev: &Summary) -> String {
         )
     };
     format!(
-        r#"<section><h2>Day by day</h2><div class="vbars"><div class="plot">{}{}{bars}</div>{}</div><div class="legend"><span><span class="avgkey"></span> average {} /day</span>{}</div>{}</section>"#,
+        r#"<section><h2>Day by day</h2>{}<div class="vbars"><div class="plot">{}{}{bars}</div>{}</div><div class="legend"><span><span class="avgkey"></span> average {} /day</span>{}</div>{}</section>"#,
+        if cur.days.iter().any(|t| t.future) {
+            r#"<div class="sub">In progress: striped days have not happened yet, and averages count only the days so far.</div>"#
+        } else {
+            ""
+        },
         line(avg, "avg", format!("average {}", duration(avg))),
         line(
             pavg,
@@ -825,14 +838,9 @@ pub fn calendar(cur: &Summary, today: NaiveDate) -> String {
         let w = t.work();
         let pct = (f64::from(w) * 85.0 / f64::from(max)).round();
         let class = if date == today { " today" } else { "" };
-        let steps = if t.steps > 0 {
-            format!(r#"<em>{}k</em>"#, (f64::from(t.steps) / 1000.0).round())
-        } else {
-            String::new()
-        };
         let _ = write!(
             cells,
-            r#"<a class="cell{class}" href="/day/{date}" style="--w:{pct}%" title="{} · {} work and study, {} tracked{}"><u>{}</u><small>{}</small>{steps}</a>"#,
+            r#"<a class="cell{class}" href="/day/{date}" style="--w:{pct}%" title="{} · {} work and study, {} tracked{}"><u>{}</u><small>{}</small></a>"#,
             date.format("%a %-d %b"),
             duration(w),
             duration(t.tracked()),
@@ -850,7 +858,7 @@ pub fn calendar(cur: &Summary, today: NaiveDate) -> String {
         );
     }
     format!(
-        r#"<section><h2>Calendar</h2><div class="cal">{cells}</div><div class="legend"><span>shade and hours = work and study · k = thousand steps</span></div></section>"#
+        r#"<section><h2>Calendar</h2><div class="cal">{cells}</div><div class="legend"><span>shade and hours: work and study that day</span></div></section>"#
     )
 }
 
@@ -908,30 +916,66 @@ pub fn lanes(
         }
     };
     let hours = ((end_ms - start_ms) / 3_600_000) as usize;
-    let mut out = String::from(r#"<section><h2>Hour by hour</h2><div class="hours">"#);
-    for h in 0..hours {
-        let hour_start = start_ms + h as i64 * 3_600_000;
-        let local_hour = tz
-            .timestamp_millis_opt(hour_start)
+    let local_hour = |t: Millis| {
+        tz.timestamp_millis_opt(t)
             .single()
             .map(|t| t.format("%H").to_string())
-            .unwrap_or_default();
+            .unwrap_or_default()
+    };
+    let mut out = String::from(
+        r#"<section><h2>Hour by hour</h2><div class="lanehead">Each hour: computers on top, the phone below, and a thin line between them where both were in use.</div><div class="hours">"#,
+    );
+    // Runs of empty hours fold into one line.
+    let mut empty_from: Option<Millis> = None;
+    let flush = |out: &mut String, from: Option<Millis>, to: Millis| {
+        if let Some(f) = from {
+            let _ = write!(
+                out,
+                r#"<div class="hour none"><span class="h">{}</span><span class="sub">{}–{} nothing recorded</span></div>"#,
+                local_hour(f),
+                hm(tz, f),
+                hm(tz, to)
+            );
+        }
+    };
+    for h in 0..hours {
+        let hour_start = start_ms + h as i64 * 3_600_000;
+        let lanes_of: Vec<[Option<Activity>; 2]> = (0..60)
+            .map(|i| {
+                let m = by_ts.get(&(hour_start + i * MINUTE_MS));
+                [lane(m, false), lane(m, true)]
+            })
+            .collect();
+        if lanes_of.iter().all(|l| l[0].is_none() && l[1].is_none()) {
+            empty_from.get_or_insert(hour_start);
+            continue;
+        }
+        flush(&mut out, empty_from.take(), hour_start);
         let mut strips = String::new();
-        for phone in [false, true] {
+        for (k, place) in [(0usize, "computer"), (2, "both"), (1, "phone")] {
             let mut runs: Vec<(Option<Activity>, usize, Millis)> = Vec::new();
-            for i in 0..60 {
-                let ts = hour_start + i * MINUTE_MS;
-                let a = lane(by_ts.get(&ts), phone);
+            for (i, l) in lanes_of.iter().enumerate() {
+                let ts = hour_start + i as i64 * MINUTE_MS;
+                // The middle line marks minutes with both lanes filled.
+                let a = if k == 2 {
+                    (l[0].is_some() && l[1].is_some()).then_some(Activity::Other)
+                } else {
+                    l[k]
+                };
                 match runs.last_mut() {
                     Some(r) if r.0 == a => r.1 += 1,
                     _ => runs.push((a, 1, ts)),
                 }
             }
-            let place = if phone { "phone" } else { "computer" };
             let spans: String = runs
                 .iter()
                 .map(|(a, n, ts)| match a {
                     None => format!(r#"<span style="flex:{n}"></span>"#),
+                    Some(_) if k == 2 => format!(
+                        r#"<span class="on" style="flex:{n}" title="{}–{} · two things at once"></span>"#,
+                        hm(tz, *ts),
+                        hm(tz, ts + *n as i64 * MINUTE_MS)
+                    ),
                     Some(a) => {
                         let from = hm(tz, *ts);
                         let to = hm(tz, ts + *n as i64 * MINUTE_MS);
@@ -945,10 +989,12 @@ pub fn lanes(
         }
         let _ = write!(
             out,
-            r#"<div class="hour"><span class="h">{local_hour}</span><div class="lanes">{strips}</div></div>"#
+            r#"<div class="hour"><span class="h">{}</span><div class="lanes">{strips}</div></div>"#,
+            local_hour(hour_start)
         );
     }
-    out.push_str(r#"</div><div class="legend"><span><span class="lanekey"></span> upper line: computers · lower line: phone · both filled: in parallel</span></div>"#);
+    flush(&mut out, empty_from.take(), end_ms);
+    out.push_str("</div>");
     out.push_str(&legend());
     out.push_str("</section>");
     out
@@ -1016,7 +1062,7 @@ svg text { text-anchor:middle; fill:var(--fg); font-family:inherit; }
 svg .pl { font-size:9px; font-weight:700; fill:#141413; } svg .c1 { font-size:16px; font-weight:700; } svg .c2 { font-size:9.5px; fill:var(--muted); } svg .c3 { font-size:8.5px; fill:var(--muted); }
 .hero .stats { grid-template-columns:repeat(2,minmax(0,1fr)); }
 .stat .k { color:var(--muted); font-size:.82rem; }
-.stat .v { font-size:1.3rem; font-weight:650; font-variant-numeric:tabular-nums; }
+.stat .v { font-size:1.2rem; font-weight:650; font-variant-numeric:tabular-nums; white-space:nowrap; }
 .stat .v small, .big small { font-size:.8rem; font-weight:500; color:var(--muted); }
 .stat .k2, .k2 { color:var(--muted); font-size:.8rem; }
 .d { font-size:.8rem; color:var(--muted); font-variant-numeric:tabular-nums; }
@@ -1054,13 +1100,24 @@ svg .pl { font-size:9px; font-weight:700; fill:#141413; } svg .c1 { font-size:16
 .cal .cell { aspect-ratio:1; border-radius:6px; padding:3px 4px; display:grid; grid-template-rows:auto 1fr auto; text-decoration:none; color:var(--fg);
   background:color-mix(in srgb, #3987e5 var(--w), var(--bg)); border:1px solid var(--line); font-size:.7rem; line-height:1.1; }
 .cal .cell.today { outline:2px solid var(--fg); }
-.cal .cell u { text-decoration:none; color:var(--muted); } .cal .cell small { font-weight:700; font-size:.78rem; align-self:center; } .cal .cell em { font-style:normal; color:var(--muted); }
+.cal .cell u { text-decoration:none; color:var(--muted); } .cal .cell small { font-weight:700; font-size:.85rem; align-self:end; } .cal .cell em { font-style:normal; color:var(--muted); }
 .hours { display:grid; gap:4px; }
 .hour { display:grid; grid-template-columns:1.6rem minmax(0,1fr); gap:.4rem; align-items:center; }
 .hour .h { color:var(--muted); font-size:.75rem; font-variant-numeric:tabular-nums; }
 .lanes { display:grid; gap:2px; }
 .lane { display:flex; height:8px; background:var(--bg); border-radius:3px; overflow:hidden; }
-.lane.phone { height:6px; }
+.lane.both { height:3px; background:transparent; } .lane.both > span.on { background:var(--fg); border-radius:2px; }
+.hour.none { grid-template-columns:1.6rem minmax(0,1fr); } .hour.none .sub { font-size:.75rem; }
+.lanehead { font-size:.8rem; color:var(--muted); margin:-.2rem 0 .6rem; }
+.hl::before { content:""; display:inline-block; width:1.1rem; height:8px; border-radius:2px; background:var(--muted); margin-right:.35rem; vertical-align:middle; }
+.hl.ov::before { height:3px; background:var(--fg); }
+.ringkey { display:flex; flex-wrap:wrap; justify-content:center; gap:.2rem .9rem; font-size:.78rem; color:var(--muted); margin-top:.3rem; }
+.ringkey span::before { content:""; display:inline-block; width:.9rem; height:.9rem; border-radius:50%; vertical-align:-.15rem; margin-right:.3rem; box-sizing:border-box; }
+.ringkey .in::before { border:4px solid var(--muted); } .ringkey .out::before { border:2px solid var(--muted); outline:2px solid var(--muted); outline-offset:2px; width:.6rem; height:.6rem; margin:0 .45rem 0 .15rem; }
+.vbars .col.future { background:repeating-linear-gradient(45deg, transparent 0 4px, var(--line) 4px 5px); border-radius:3px; opacity:.6; }
+details.card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:.9rem 1rem; }
+details.card > summary { cursor:pointer; font-size:.8rem; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); font-weight:700; list-style:none; }
+details.card > summary::after { content:" ›"; } details.card[open] > summary::after { content:" ⌄"; } details.card[open] > summary { margin-bottom:.6rem; }
 .lane > span { min-width:0; background:var(--c, transparent); }
 "#;
 
@@ -1142,7 +1199,7 @@ mod tests {
         };
         assert_eq!(t.pairs.get(&pair), Some(&2));
         assert_eq!(t.rows[&Activity::Work].with[&Activity::Video], 2);
-        let svg = donut(&t);
+        let svg = donut(&t, "tracked");
         assert!(
             svg.contains("video at the same time as work: 2 min"),
             "{svg}"

@@ -57,7 +57,7 @@ const STYLE: &str = r#"
    screen he did not ask for. Light is a choice (the ☀ button), remembered. */
 :root { color-scheme: dark; --bg:#141413; --fg:#ecebe6; --muted:#9d9c95; --card:#1d1d1b; --line:#2e2e2b;
   --ok:#5cc28d; --warn:#e3a33b; --bad:#f2847b; --off:#9d9c95; }
-:root[data-theme="light"] { color-scheme: light; --bg:#f4f3ef; --fg:#1d1d1b; --muted:#65645e; --card:#ffffff; --line:#dddbd3;
+:root[data-theme="light"] { color-scheme: light; --bg:#f4f3ef; --fg:#1d1d1b; --muted:#5c5b55; --card:#ffffff; --line:#cfcdc4;
   --ok:#1f8a55; --warn:#a86a00; --bad:#c4382c; --off:#65645e; }
 html, body { background:var(--bg); }
 .theme { margin-left:.2rem; background:none; border:1px solid var(--line); color:var(--fg); border-radius:99px; width:2rem; height:2rem; font-size:1rem; line-height:1; cursor:pointer; }
@@ -398,6 +398,9 @@ pub fn day_page(
         );
     }
 
+    // The detail below folds away: each card opens with a tap.
+    let detail_start = body.len();
+
     // Places and signals: where he was and what the devices were doing.
     let sg = &day.signals;
     if !sg.places.is_empty()
@@ -544,6 +547,14 @@ pub fn day_page(
             esc(&c.repos.join(", ")),
         );
     }
+
+    let detail = body.split_off(detail_start);
+    body.push_str(
+        &detail
+            .replace("<section><h2>", r#"<details class="card"><summary>"#)
+            .replace("</h2>", "</summary>")
+            .replace("</section>", "</details>"),
+    );
 
     let title = format!("Time · {}", day.date);
     let style = format!("{ACTIVITY_STYLE}{}", crate::views::STYLE);
