@@ -8,10 +8,12 @@ pub mod apk;
 pub mod classify;
 pub mod config;
 pub mod day;
+pub mod digest;
 pub mod http;
 pub mod import_v1;
 pub mod inbox;
 pub mod legacy;
+pub mod mcp;
 pub mod nudge;
 pub mod status;
 pub mod store;
@@ -35,6 +37,8 @@ pub struct AppState {
     /// Required on `/v1/logs` when set (`TIME_INGEST_TOKEN`). The homelab
     /// gateway authenticates devices; this guards the server itself.
     pub ingest_token: Option<String>,
+    /// Required on `/mcp` when set (`TIME_MCP_TOKEN`).
+    pub mcp_token: Option<String>,
     pub tz: chrono_tz::Tz,
     /// The Android APK served at `/app`.
     pub apk: apk::Shared,
@@ -75,10 +79,14 @@ impl AppState {
         let ingest_token = std::env::var("TIME_INGEST_TOKEN")
             .ok()
             .filter(|t| !t.is_empty());
+        let mcp_token = std::env::var("TIME_MCP_TOKEN")
+            .ok()
+            .filter(|t| !t.is_empty());
         let nudger = nudge::Nudger::from_env(config.nudge.clone(), &config.public_url);
         let started_ms = clock.now_ms();
         Ok(Arc::new(Self {
             ingest_token,
+            mcp_token,
             tz,
             apk,
             nudger,

@@ -987,4 +987,3 @@ mod tests {
         assert_eq!(ago(3 * 86_400_000, Some(0)), "3 days ago");
     }
 }
-

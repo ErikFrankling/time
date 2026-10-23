@@ -145,6 +145,7 @@ impl World {
             public_url: "http://time.test/".into(),
             places: time_core::places::defaults(),
             nudge: Default::default(),
+            mcp: Default::default(),
         };
         std::fs::create_dir_all(&config.data_dir)?;
         let store = Store::open(&config.data_dir.join("time.db"))?;

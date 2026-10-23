@@ -73,3 +73,27 @@ scripts/remote-cargo.sh test --workspace    # on the homelab builder, not the pc
 - CI (`.github/workflows/ci.yml`, every branch except `main`): fmt, clippy,
   tests; Android unit tests and build; an emulator that runs the real app
   against the real server and checks its heartbeat arrives.
+
+## For agents: MCP and the hourly line
+
+`POST /mcp` is an MCP server (Streamable HTTP, stateless, read-only) with three
+tools for Erik's personal agent: `time_now` (what he is doing right now and in
+the last 5 minutes), `time_summary` (a window like `today` or `3h`: minutes per
+category, top apps and sites, productive / unproductive / neutral totals) and
+`time_timeline` (the window as blocks). Each answers with one paragraph and the
+same facts as compact JSON. With `TIME_MCP_TOKEN` set in the server's
+environment, `/mcp` requires `Authorization: Bearer <token>`; the route is
+lan-only on top of that. Live at `https://time.erikfrankling.duckdns.org/mcp`.
+
+The same data as plain HTTP for scripts (open, like `/api/day`):
+`/api/now`, `/api/summary?window=3h`, `/api/timeline?window=3h`, and
+`/api/summary/line`, the last hour in one text line, for the hourly review.
+
+Which activities count as unproductive is `[mcp]` in `config.toml`; everything
+not listed is neutral:
+
+```toml
+[mcp]
+productive = ["work", "study"]
+unproductive = ["video", "social"]   # games are neutral, by Erik's choice
+```

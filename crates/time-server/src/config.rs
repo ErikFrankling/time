@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::Deserialize;
+use time_core::label::Activity;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -42,12 +43,41 @@ pub struct Config {
     /// Focus nudges. On by default with the values in `time_core::nudge`.
     #[serde(default)]
     pub nudge: time_core::nudge::NudgeConfig,
+    /// Which activities count as productive or unproductive in the MCP
+    /// tools and the hourly summary line. Everything else is neutral.
+    #[serde(default)]
+    pub mcp: McpConfig,
     /// IANA zone for days and clock times on the website.
     #[serde(default = "default_timezone")]
     pub timezone: String,
     /// Seconds between classifier passes.
     #[serde(default = "default_classify_every")]
     pub classify_every_secs: u64,
+}
+
+/// How the agent-facing summaries judge a minute. Erik's call (2026-10-23):
+/// video and social feeds are unproductive, gaming is fine (neutral), and
+/// this is meant to be tuned, so it lives in `config.toml`:
+///
+/// ```toml
+/// [mcp]
+/// productive = ["work", "study"]
+/// unproductive = ["video", "social"]
+/// ```
+#[derive(Debug, Clone, PartialEq, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct McpConfig {
+    pub productive: Vec<Activity>,
+    pub unproductive: Vec<Activity>,
+}
+
+impl Default for McpConfig {
+    fn default() -> Self {
+        Self {
+            productive: vec![Activity::Work, Activity::Study],
+            unproductive: vec![Activity::Video, Activity::Social],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, serde::Serialize)]
@@ -88,6 +118,14 @@ impl Config {
     pub fn parse(text: &str) -> anyhow::Result<Self> {
         let c: Self = toml::from_str(text)?;
         c.tz()?;
+        if let Some(a) = c
+            .mcp
+            .productive
+            .iter()
+            .find(|a| c.mcp.unproductive.contains(a))
+        {
+            anyhow::bail!("[mcp]: {a} is both productive and unproductive");
+        }
         Ok(c)
     }
 
@@ -113,6 +151,16 @@ mod tests {
         // The v1 config silently ignored keys it no longer read; a typo then
         // looked like a setting that did nothing.
         assert!(Config::parse("data_dir = '/x'\nclasify = false").is_err());
+    }
+
+    #[test]
+    fn mcp_groups_default_to_games_being_fine() {
+        let c = Config::parse("data_dir = '/x'").unwrap();
+        assert!(!c.mcp.unproductive.contains(&Activity::Games));
+        assert!(c.mcp.unproductive.contains(&Activity::Video));
+        let c = Config::parse("data_dir = '/x'\n[mcp]\nunproductive = ['games']").unwrap();
+        assert_eq!(c.mcp.unproductive, vec![Activity::Games]);
+        assert!(Config::parse("data_dir = '/x'\n[mcp]\nunproductive = ['work']").is_err());
     }
 
     #[test]

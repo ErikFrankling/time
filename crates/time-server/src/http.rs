@@ -10,7 +10,7 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde_json::json;
+use serde_json::{json, Value};
 use time_core::otlp::{self, ExportLogsRequest};
 
 use crate::{status, AppState};
@@ -43,6 +43,16 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/week", get(this_week_html))
         .route("/week/{date}", get(week_html))
         .route("/api/day/{date}", get(day_json))
+        .route("/api/now", get(api_now))
+        .route("/api/summary", get(api_summary))
+        .route("/api/summary/line", get(api_summary_line))
+        .route("/api/timeline", get(api_timeline))
+        .route(
+            "/mcp",
+            post(crate::mcp::post)
+                .get(crate::mcp::not_allowed)
+                .delete(crate::mcp::not_allowed),
+        )
         .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY))
         .with_state(state)
 }
@@ -531,5 +541,79 @@ async fn legacy_frames(
     match store_legacy(state, frames).await {
         Ok(acks) => Json(acks).into_response(),
         Err(e) => e.into_response(),
+    }
+}
+
+/// The MCP tools as plain JSON for scripts: `/api/now`, `/api/summary?window=3h`,
+/// `/api/timeline?window=3h`. Open like `/api/day`; the route is lan-only.
+async fn digest_json(
+    state: Arc<AppState>,
+    tool: &'static str,
+    q: HashMap<String, String>,
+) -> Response {
+    let mut args = serde_json::Map::new();
+    for (k, v) in &q {
+        // `window=3` is a length, not a number.
+        let value = if k == "window" {
+            json!(v)
+        } else {
+            v.parse::<u64>().map_or_else(|_| json!(v), |n| json!(n))
+        };
+        args.insert(k.clone(), value);
+    }
+    let args = Value::Object(args);
+    let done =
+        tokio::task::spawn_blocking(move || crate::mcp::call_tool(&state, tool, &args)).await;
+    match done {
+        Ok(Ok(d)) => Json(json!({"summary": d.text, "data": d.json})).into_response(),
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST, format!("{e:#}\n")).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn api_now(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>,
+) -> Response {
+    digest_json(state, "time_now", q).await
+}
+
+async fn api_summary(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>,
+) -> Response {
+    digest_json(state, "time_summary", q).await
+}
+
+async fn api_timeline(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>,
+) -> Response {
+    digest_json(state, "time_timeline", q).await
+}
+
+/// The last hour in one plain-text line, for the hourly review.
+async fn api_summary_line(State(state): State<Arc<AppState>>) -> Response {
+    let done = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+        let now = state.clock.now_ms();
+        let from = now - crate::digest::NOW_LOOKBACK_MIN * time_core::clock::MINUTE_MS;
+        let (labels, events) = crate::digest::load(&state.store, from, now)?;
+        Ok(crate::digest::line(
+            &state.config.mcp,
+            state.tz,
+            now,
+            &labels,
+            &events,
+        ))
+    })
+    .await;
+    match done {
+        Ok(Ok(l)) => (
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            format!("{l}\n"),
+        )
+            .into_response(),
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}\n")).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }

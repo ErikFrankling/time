@@ -667,3 +667,112 @@ fn places_and_signals_show_on_the_day() {
     );
     assert!(html.contains("framework lid closed 10:00–10:20"));
 }
+
+fn mcp(w: &World, body: serde_json::Value) -> serde_json::Value {
+    let r = reqwest::blocking::Client::new()
+        .post(format!("{}/mcp", w.base_url))
+        .json(&body)
+        .send()
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    r.json().unwrap()
+}
+
+fn tool(w: &World, name: &str, args: serde_json::Value) -> (String, serde_json::Value) {
+    let r = mcp(
+        w,
+        serde_json::json!({"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+            "params": {"name": name, "arguments": args}}),
+    );
+    assert_eq!(r["result"]["isError"], false, "{r}");
+    let text = r["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // The paragraph, a blank line, then the JSON.
+    let (para, json) = text.split_once("\n\n").unwrap();
+    (para.to_owned(), serde_json::from_str(json).unwrap())
+}
+
+#[test]
+fn the_mcp_server_answers_what_he_did_this_morning() {
+    let w = morning();
+
+    let init = mcp(
+        &w,
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                       "clientInfo": {"name": "test", "version": "0"}}}),
+    );
+    assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
+    assert_eq!(init["result"]["serverInfo"]["name"], "time");
+    let list = mcp(
+        &w,
+        serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+    );
+    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 3);
+
+    // 09:00-09:40 YouTube, 09:40-10:10 T3 Code (the rest browsing or away).
+    let (para, s) = tool(
+        &w,
+        "time_summary",
+        serde_json::json!({"window": "yesterday"}),
+    );
+    let _ = (para, s);
+    let (para, s) = tool(&w, "time_summary", serde_json::json!({"window": "today"}));
+    assert!(s["totals"]["unproductive"].as_u64().unwrap() >= 30, "{s}");
+    assert!(s["totals"]["productive"].as_u64().unwrap() >= 25, "{s}");
+    assert_eq!(s["top_sites"][0]["name"], "youtube.com", "{s}");
+    assert!(para.contains("unproductive"), "{para}");
+
+    let (_, t) = tool(&w, "time_timeline", serde_json::json!({"window": "3h"}));
+    assert!(t["blocks"].as_array().unwrap().len() >= 3, "{t}");
+
+    let (para, n) = tool(&w, "time_now", serde_json::json!({}));
+    assert!(n["last_hour"].is_object(), "{n}");
+    assert!(!para.is_empty());
+
+    // A bad window is a tool error the model can read, not a transport error.
+    let bad = mcp(
+        &w,
+        serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {"name": "time_summary", "arguments": {"window": "soon"}}}),
+    );
+    assert_eq!(bad["result"]["isError"], true);
+    let unknown = mcp(
+        &w,
+        serde_json::json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+            "params": {"name": "delete_everything", "arguments": {}}}),
+    );
+    assert_eq!(unknown["error"]["code"], -32602);
+
+    // Notifications are accepted without a body; GET is not served.
+    let c = reqwest::blocking::Client::new();
+    let r = c
+        .post(format!("{}/mcp", w.base_url))
+        .json(&serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}))
+        .send()
+        .unwrap();
+    assert_eq!(r.status(), 202);
+    assert_eq!(w.get("/mcp").unwrap().0, 405);
+}
+
+#[test]
+fn the_plain_http_summary_is_one_line() {
+    let w = morning();
+    let (code, line) = w.get("/api/summary/line").unwrap();
+    assert_eq!(code, 200);
+    assert_eq!(line.trim_end().lines().count(), 1, "{line}");
+    assert!(line.starts_with("Last hour ("), "{line}");
+
+    let (code, body) = w.get("/api/summary?window=3h").unwrap();
+    assert_eq!(code, 200);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(
+        v["summary"].as_str().unwrap().starts_with("Last 3h"),
+        "{body}"
+    );
+    assert!(v["data"]["categories"].is_array());
+    assert_eq!(w.get("/api/summary?window=soon").unwrap().0, 400);
+    assert_eq!(w.get("/api/now").unwrap().0, 200);
+}
