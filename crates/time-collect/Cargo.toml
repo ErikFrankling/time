@@ -1,6 +1,6 @@
 [package]
 name = "time-collect"
-description = "Commits from local git, pull requests and reviews from GitHub, and T3 Code prompts, tokens and dictations, as Time events."
+description = "Commits from local git, pull requests and reviews from GitHub, and T3 Code prompts, tokens, dictations, listening and focus, as Time events."
 edition.workspace = true
 version.workspace = true
 license.workspace = true

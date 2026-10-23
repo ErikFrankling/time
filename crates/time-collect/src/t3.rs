@@ -1,5 +1,6 @@
 //! T3 Code, read from its own state on this machine: prompts (typed or
-//! dictated, Erik's or an agent's), tokens per provider turn, and dictations.
+//! dictated, Erik's or an agent's), tokens per provider turn, dictations, read-aloud
+//! plays, voice-mode spans and thread focus.
 //!
 //! Read only, never written: `statev2.sqlite` is opened read-only (T3 keeps
 //! writing it; WAL lets both happen) and the dictation delivery files are
@@ -14,7 +15,8 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Deserialize;
 use time_core::clock::Millis;
 use time_core::event::{
-    DictationFinished, Envelope, Event, InputMode, Origin, PromptSent, TokensUsed,
+    DictationFinished, Envelope, Event, FocusSpan, InputMode, Origin, PromptSent, ReadAloudPlayed,
+    TokensUsed, VoiceModeSpan,
 };
 
 use crate::stable_id;
@@ -207,7 +209,145 @@ pub fn collect(userdata: &Path, device: &str, since: Millis) -> Result<Vec<Envel
         env.id = stable_id(&format!("t3:dictation:{message}"));
         out.push(env);
     }
+
+    out.extend(activity(&conn, &since_iso, since, device, &threads)?);
     Ok(out)
+}
+
+/// How long a thread in front of Erik stays counted after its last report:
+/// the clients report once a minute, so half a beat is the expected overshoot.
+const FOCUS_TAIL_MS: Millis = 30_000;
+/// A focus report comes this long after the thread came to the front.
+const FOCUS_SETTLE_MS: Millis = 5_000;
+/// Two reports further apart than this are two stretches of focus.
+const FOCUS_GAP_MS: Millis = 90_000;
+
+/// Read-aloud plays, voice-mode spans and thread focus, from T3's
+/// `activity_log` (a table newer T3 versions have; older ones simply give
+/// nothing). Focus arrives as a beat a minute and is joined into stretches;
+/// a stretch is reported once it has ended, so its id and length stay put.
+fn activity(
+    conn: &Connection,
+    since_iso: &str,
+    since: Millis,
+    device: &str,
+    threads: &HashMap<String, Thread>,
+) -> Result<Vec<Envelope>> {
+    let has_table = conn
+        .query_row(
+            "select 1 from sqlite_master where type = 'table' and name = 'activity_log'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !has_table {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn.prepare(
+        "select kind, thread_id, message_id, client, started_at, ended_at, seconds
+         from activity_log where started_at >= ?1 order by started_at",
+    )?;
+    let rows = stmt
+        .query_map([since_iso], |r| {
+            Ok(Activity {
+                kind: r.get(0)?,
+                thread: r.get(1)?,
+                message: r.get(2)?,
+                client: r.get(3)?,
+                started: r.get(4)?,
+                ended: r.get(5)?,
+                seconds: r.get(6)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let machine = |client: &str| if client == "mobile" { "phone" } else { device };
+    let now = chrono::Utc::now().timestamp_millis();
+    let mut out = Vec::new();
+    // Focus beats by (client, thread), oldest first.
+    let mut beats: HashMap<(String, String), Vec<Millis>> = HashMap::new();
+    for a in rows {
+        let (Some(start), Some(end)) = (parse_ms(&a.started), parse_ms(&a.ended)) else {
+            continue;
+        };
+        let key = format!("{}|{}|{}|{}|{}", a.kind, a.client, a.started, a.thread, a.message);
+        match a.kind.as_str() {
+            "t3.readaloud.played" => {
+                let mut env = Envelope::new(
+                    machine(&a.client),
+                    SERVICE,
+                    start,
+                    end,
+                    Event::ReadAloudPlayed(ReadAloudPlayed {
+                        thread_id: a.thread,
+                        mode: String::new(),
+                        voice: String::new(),
+                        seconds_played: a.seconds,
+                        words_heard: 0,
+                        outcome: "played".into(),
+                    }),
+                );
+                env.id = stable_id(&format!("t3:activity:{key}"));
+                out.push(env);
+            }
+            "t3.voicemode.span" => {
+                let mut env = Envelope::new(
+                    machine(&a.client),
+                    SERVICE,
+                    start,
+                    end,
+                    Event::VoiceModeSpan(VoiceModeSpan {
+                        thread_id: a.thread,
+                        turns: 0,
+                    }),
+                );
+                env.id = stable_id(&format!("t3:activity:{key}"));
+                out.push(env);
+            }
+            "thread.focus" => beats.entry((a.client, a.thread)).or_default().push(start),
+            _ => {}
+        }
+    }
+    for ((client, thread), times) in beats {
+        let mut i = 0;
+        while i < times.len() {
+            let mut j = i;
+            while j + 1 < times.len() && times[j + 1] - times[j] <= FOCUS_GAP_MS {
+                j += 1;
+            }
+            let from = times[i] - FOCUS_SETTLE_MS;
+            let to = times[j] + FOCUS_TAIL_MS;
+            // Still going, or cut by the start of the window: reported later.
+            if now - times[j] > FOCUS_GAP_MS && from >= since {
+                let mut env = Envelope::new(
+                    machine(&client),
+                    SERVICE,
+                    from,
+                    to,
+                    Event::FocusSpan(FocusSpan {
+                        client: client.clone(),
+                        thread_id: thread.clone(),
+                        project: threads.get(&thread).and_then(|t| t.project.clone()),
+                        focused: true,
+                    }),
+                );
+                env.id = stable_id(&format!("t3:focus:{client}|{thread}|{}", times[i]));
+                out.push(env);
+            }
+            i = j + 1;
+        }
+    }
+    Ok(out)
+}
+
+struct Activity {
+    kind: String,
+    thread: String,
+    message: String,
+    client: String,
+    started: String,
+    ended: String,
+    seconds: f64,
 }
 
 struct Thread {
@@ -545,6 +685,85 @@ mod tests {
         );
         assert_eq!(word_count("[dictation:abc] fix the  status bar\nplease"), 5);
         assert!(is_test("This is a transcription delivery test, ignore"));
+    }
+
+    /// Listening and attention from `activity_log`: plays and voice spans as
+    /// they are, focus beats joined into stretches per project.
+    #[test]
+    fn reads_listening_and_focus_from_the_activity_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Connection::open(dir.path().join("statev2.sqlite")).unwrap();
+        db.execute_batch(
+            r#"
+            create table projection_projects(project_id text, title text);
+            insert into projection_projects values ('p1', 'time');
+            create table orchestration_v2_projection_threads(thread_id text, project_id text,
+              default_provider text, provider_instance_id text, payload_json text);
+            insert into orchestration_v2_projection_threads values ('t1', 'p1', 'codex', null, '{}');
+            create table orchestration_v2_projection_runs(run_id text, provider_instance_id text,
+              requested_at text, payload_json text);
+            create table orchestration_v2_projection_messages(message_id text, thread_id text,
+              role text, created_at text, payload_json text);
+            create table orchestration_v2_projection_provider_turns(provider_turn_id text,
+              thread_id text, status text, started_at text, completed_at text, payload_json text);
+            create table activity_log(id integer primary key, kind text, thread_id text,
+              message_id text, client text, started_at text, ended_at text, seconds real);
+            insert into activity_log(kind, thread_id, message_id, client, started_at, ended_at, seconds) values
+              ('t3.readaloud.played', 't1', 'm1', 'web', '2026-10-22T10:00:00.000Z', '2026-10-22T10:01:30.000Z', 72.5),
+              ('t3.voicemode.span', 't1', '', 'mobile', '2026-10-22T11:00:00.000Z', '2026-10-22T11:10:00.000Z', 600),
+              ('thread.focus', 't1', '', 'web', '2026-10-22T12:00:05.000Z', '2026-10-22T12:00:05.000Z', 0),
+              ('thread.focus', 't1', '', 'web', '2026-10-22T12:01:05.000Z', '2026-10-22T12:01:05.000Z', 0),
+              ('thread.focus', 't1', '', 'web', '2026-10-22T12:02:05.000Z', '2026-10-22T12:02:05.000Z', 0),
+              ('thread.focus', 't1', '', 'web', '2026-10-22T14:00:05.000Z', '2026-10-22T14:00:05.000Z', 0);
+            "#,
+        )
+        .unwrap();
+        drop(db);
+
+        let since = parse_ms("2026-10-22T00:00:00Z").unwrap();
+        let events = collect(dir.path(), "pc", since).unwrap();
+
+        let plays: Vec<_> = events
+            .iter()
+            .filter_map(|e| match &e.event {
+                Event::ReadAloudPlayed(p) => Some((e, p)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(plays.len(), 1);
+        assert_eq!(plays[0].0.device, "pc");
+        assert_eq!(plays[0].0.end_ms - plays[0].0.start_ms, 90_000);
+        assert_eq!(
+            (plays[0].1.seconds_played, plays[0].1.thread_id.as_str()),
+            (72.5, "t1")
+        );
+
+        let voice: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e.event, Event::VoiceModeSpan(_)))
+            .collect();
+        assert_eq!(voice.len(), 1);
+        assert_eq!(voice[0].device, "phone", "the phone app reports as the phone");
+        assert_eq!(voice[0].end_ms - voice[0].start_ms, 600_000);
+
+        let mut focus: Vec<_> = events
+            .iter()
+            .filter_map(|e| match &e.event {
+                Event::FocusSpan(f) => Some((e.start_ms, e.end_ms, f)),
+                _ => None,
+            })
+            .collect();
+        focus.sort_by_key(|f| f.0);
+        assert_eq!(focus.len(), 2, "three beats a minute apart are one stretch");
+        // Five seconds before the first beat to half a beat after the last.
+        assert_eq!(focus[0].1 - focus[0].0, 2 * 60_000 + 35_000);
+        assert_eq!(focus[1].1 - focus[1].0, 35_000);
+        assert_eq!(focus[0].2.project.as_deref(), Some("time"));
+        assert!(focus[0].2.focused);
+
+        let again = collect(dir.path(), "pc", since).unwrap();
+        let ids: HashSet<_> = events.iter().map(|e| e.id.clone()).collect();
+        assert!(again.iter().all(|e| ids.contains(&e.id)), "ids stay put");
     }
 
     /// A miniature of T3's schema: a dictated prompt from Erik, an agent's

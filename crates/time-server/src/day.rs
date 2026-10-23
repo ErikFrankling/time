@@ -343,7 +343,17 @@ pub struct Modalities {
     /// Minutes with sound playing: computers, phone media, read-aloud.
     pub listening_minutes: u32,
     pub read_aloud_minutes: u32,
+    /// Minutes with voice mode on (the hands-free loop), on any device.
+    pub voice_mode_minutes: u32,
+    /// Minutes with a T3 Code thread in front of Erik, per project.
+    pub focus: Vec<FocusTotal>,
     pub tokens: Vec<TokenTotal>,
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct FocusTotal {
+    pub project: String,
+    pub minutes: u32,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -366,12 +376,29 @@ impl Modalities {
             + self.dictations
             + self.prompts_by_agents
             + self.listening_minutes
+            + self.voice_mode_minutes
             == 0
+            && self.focus.is_empty()
             && self.tokens.is_empty()
     }
 
     pub fn tokens_total(&self) -> u64 {
         self.tokens.iter().map(|t| t.input + t.output).sum()
+    }
+}
+
+/// The minutes of the day an event covers, as minute starts.
+fn minutes_in(
+    e: &time_core::event::Envelope,
+    start: Millis,
+    end: Millis,
+    floor: impl Fn(Millis) -> Millis,
+    into: &mut std::collections::BTreeSet<Millis>,
+) {
+    let mut t = floor(e.start_ms.max(start));
+    while t < e.end_ms.min(end) {
+        into.insert(t);
+        t += MINUTE_MS;
     }
 }
 
@@ -381,6 +408,9 @@ pub fn modalities(events: &[time_core::event::Envelope], start: Millis, end: Mil
     let mut m = Modalities::default();
     let mut typing: BTreeSet<Millis> = BTreeSet::new();
     let mut listening: BTreeSet<Millis> = BTreeSet::new();
+    let mut voice_mode: BTreeSet<Millis> = BTreeSet::new();
+    let mut focus: BTreeSet<(String, Millis)> = BTreeSet::new();
+    let mut read_aloud_seconds = 0.0;
     let mut tokens: BTreeMap<String, TokenTotal> = BTreeMap::new();
     let floor = |t: Millis| t - t.rem_euclid(MINUTE_MS);
     for e in events {
@@ -408,10 +438,17 @@ pub fn modalities(events: &[time_core::event::Envelope], start: Millis, end: Mil
             }
             Event::ReadAloudPlayed(r) if in_day => {
                 let mins = (r.seconds_played / 60.0).ceil() as i64;
-                m.read_aloud_minutes += mins as u32;
+                read_aloud_seconds += r.seconds_played;
                 for i in 0..mins.max(1) {
                     listening.insert(floor(e.start_ms) + i * MINUTE_MS);
                 }
+            }
+            Event::VoiceModeSpan(_) => minutes_in(e, start, end, floor, &mut voice_mode),
+            Event::FocusSpan(f) if f.focused => {
+                let mut mins = BTreeSet::new();
+                minutes_in(e, start, end, floor, &mut mins);
+                let project = f.project.clone().unwrap_or_else(|| "(no project)".into());
+                focus.extend(mins.into_iter().map(|t| (project.clone(), t)));
             }
             Event::PromptSent(p) if in_day => match p.origin {
                 Origin::Human => {
@@ -446,6 +483,17 @@ pub fn modalities(events: &[time_core::event::Envelope], start: Millis, end: Mil
     }
     m.typing_minutes = typing.len() as u32;
     m.listening_minutes = listening.len() as u32;
+    m.read_aloud_minutes = (read_aloud_seconds / 60.0_f64).ceil() as u32;
+    m.voice_mode_minutes = voice_mode.len() as u32;
+    let mut per_project: BTreeMap<String, u32> = BTreeMap::new();
+    for (project, _) in focus {
+        *per_project.entry(project).or_default() += 1;
+    }
+    m.focus = per_project
+        .into_iter()
+        .map(|(project, minutes)| FocusTotal { project, minutes })
+        .collect();
+    m.focus.sort_by_key(|f| std::cmp::Reverse(f.minutes));
     m.tokens = tokens.into_values().collect();
     m.tokens
         .sort_by_key(|t| std::cmp::Reverse(t.input + t.output));
@@ -573,5 +621,68 @@ mod tests {
             (2, 1, 2000)
         );
         assert_eq!(md.tokens_total(), 3030);
+    }
+
+    #[test]
+    fn read_aloud_voice_mode_and_focus_add_up() {
+        use time_core::event::{FocusSpan, ReadAloudPlayed, VoiceModeSpan};
+        let m = MINUTE_MS;
+        let at = |s: Millis, e: Millis, event: Event| Envelope::new("pc", "t3-code", s, e, event);
+        let focus = |s: Millis, e: Millis, project: &str| {
+            at(
+                s,
+                e,
+                Event::FocusSpan(FocusSpan {
+                    client: "web".into(),
+                    thread_id: "t".into(),
+                    project: Some(project.into()),
+                    focused: true,
+                }),
+            )
+        };
+        let events = vec![
+            at(
+                0,
+                90_000,
+                Event::ReadAloudPlayed(ReadAloudPlayed {
+                    thread_id: "t".into(),
+                    mode: String::new(),
+                    voice: String::new(),
+                    seconds_played: 70.0,
+                    words_heard: 0,
+                    outcome: "played".into(),
+                }),
+            ),
+            at(
+                10 * m,
+                10 * m + 40_000,
+                Event::ReadAloudPlayed(ReadAloudPlayed {
+                    thread_id: "t".into(),
+                    mode: String::new(),
+                    voice: String::new(),
+                    seconds_played: 40.0,
+                    words_heard: 0,
+                    outcome: "played".into(),
+                }),
+            ),
+            at(
+                20 * m,
+                30 * m,
+                Event::VoiceModeSpan(VoiceModeSpan {
+                    thread_id: "t".into(),
+                    turns: 0,
+                }),
+            ),
+            // Two devices on the same project at once count the minutes once.
+            focus(40 * m, 45 * m, "time"),
+            focus(43 * m, 46 * m, "time"),
+            focus(50 * m, 52 * m, "t3code"),
+        ];
+        let md = modalities(&events, 0, 60 * m);
+        assert_eq!(md.read_aloud_minutes, 2, "110 s of playing, rounded up");
+        assert_eq!(md.voice_mode_minutes, 10);
+        let focus: Vec<_> = md.focus.iter().map(|f| (f.project.as_str(), f.minutes)).collect();
+        assert_eq!(focus, [("time", 6), ("t3code", 2)]);
+        assert!(!md.is_empty());
     }
 }

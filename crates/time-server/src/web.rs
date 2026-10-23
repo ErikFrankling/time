@@ -484,6 +484,25 @@ pub fn day_page(day: &crate::day::Day, tz: chrono_tz::Tz, is_today: bool) -> Str
                 String::new()
             }
         );
+        if md.voice_mode_minutes > 0 {
+            let _ = write!(
+                body,
+                "<dt>Voice mode</dt><dd>{} talking with an agent</dd>",
+                duration(md.voice_mode_minutes)
+            );
+        }
+        if !md.focus.is_empty() {
+            let projects: Vec<String> = md
+                .focus
+                .iter()
+                .map(|f| format!("{} {}", esc(&f.project), duration(f.minutes)))
+                .collect();
+            let _ = write!(
+                body,
+                "<dt>In T3 Code</dt><dd>{}</dd>",
+                projects.join(" · ")
+            );
+        }
         let _ = write!(
             body,
             "<dt>Screen</dt><dd>{} at a computer · {} on the phone</dd>",
