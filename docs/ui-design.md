@@ -84,3 +84,29 @@ device was doing.
 - Period totals come from minute labels and Health Connect step records
   (`views::summarise`). The previous period is summarised the same way for
   the comparison.
+
+## Visual first (2026-10-23, second pass)
+
+Erik, after the first version: "it's just a shit load of numbers … make it
+nice graphs". So every view now leads with charts, drawn by ECharts 5.6.0
+(Apache-2.0). It is vendored and served from `/assets`, so the phone app
+works without a CDN.
+
+- **Top of the page.** Only three big figures: tracked, work and study, and
+  on the phone. Each has a small ▲/▼ chip comparing it with the period
+  before.
+- **Charts, in this order.**
+  1. The two-ring donut, with a legend.
+  2. "In parallel": a bar per pair, half one activity's colour and half the
+     other's.
+  3. A stacked bar chart over the day, week or month, with average lines.
+  4. For a month, a calendar heatmap.
+  5. The steps ring and step bars against the goal.
+  6. "Compared with …": this period against the one before, per activity.
+  7. Projects.
+- **Numbers live in tap tooltips.** That covers totals, the computer/phone
+  split, and changes in minutes. Bars and calendar days open that day.
+- **Day detail folds away.** Minute by minute, places, typing and voice,
+  AI and code are cards closed by default.
+- **Theme.** The charts are redrawn when the theme changes, and the server
+  puts their data into the page as JSON (`#time-data`).

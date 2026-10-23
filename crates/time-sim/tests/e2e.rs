@@ -349,11 +349,12 @@ fn the_day_page_and_api_show_the_morning() {
     assert_eq!(code, 200);
     for needle in [
         "Wed 21 Oct",
-        "Hour by hour",
-        "By activity",
+        "Minute by minute",
+        "Where the time went",
+        "/assets/echarts-5.6.0.min.js",
         r#"class="on" aria-current="page">Day</a>"#,
-        "3\u{2009}000",
-        "2.1 km",
+        r#""total":3000"#,
+        r#""km":2.1"#,
         "09:00–09:40 · video on the computer",
     ] {
         assert!(html.contains(needle), "day page lacks {needle:?}");
@@ -433,8 +434,8 @@ fn the_week_page_sums_the_days() {
     // 2026-10-23 is a Friday; its week starts Monday 19 October.
     assert!(html.contains("Week 43, 19–25 Oct"), "{html}");
     assert!(html.contains(r#"href="/day/2026-10-21""#));
-    assert!(html.contains("3\u{2009}000"), "steps from Wednesday");
-    assert!(html.contains("Day by day"));
+    assert!(html.contains(r#""total":3000"#), "steps from Wednesday");
+    assert!(html.contains("Over the week"));
 }
 
 #[test]
@@ -444,7 +445,7 @@ fn the_month_page_has_a_calendar_and_compares() {
         let (code, html) = w.get(path).unwrap();
         assert_eq!(code, 200, "{path}");
         assert!(html.contains("October 2026"), "{html}");
-        assert!(html.contains("Calendar"));
+        assert!(html.contains("Work and study by day"));
         assert!(html.contains(r#"href="/day/2026-10-21""#));
         assert!(html.contains(r#"href="/month/2026-09""#), "previous month");
     }
@@ -791,4 +792,15 @@ fn the_plain_http_summary_is_one_line() {
     assert!(v["data"]["categories"].is_array());
     assert_eq!(w.get("/api/summary?window=soon").unwrap().0, 400);
     assert_eq!(w.get("/api/now").unwrap().0, 200);
+}
+
+#[test]
+fn the_chart_assets_are_served() {
+    let w = morning();
+    let (code, js) = w.get("/assets/time.js").unwrap();
+    assert_eq!(code, 200);
+    assert!(js.contains("time-data"));
+    let (code, lib) = w.get("/assets/echarts-5.6.0.min.js").unwrap();
+    assert_eq!(code, 200);
+    assert!(lib.len() > 500_000);
 }

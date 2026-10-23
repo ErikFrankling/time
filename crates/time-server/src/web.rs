@@ -89,7 +89,7 @@ footer { color:var(--muted); font-size:.8rem; text-align:center; padding:0 1rem 
 /// Before the first paint: the remembered theme (dark unless light was
 /// chosen), and `?theme=light|dark` to choose one by link.
 const THEME_JS: &str = r#"(function(){var q=new URLSearchParams(location.search).get('theme');try{if(q==='light'||q==='dark')localStorage.setItem('theme',q);var t=localStorage.getItem('theme');}catch(e){var t=q;}if(t==='light'){document.documentElement.dataset.theme='light';}})();
-function timeTheme(){var l=document.documentElement.dataset.theme!=='light';if(l){document.documentElement.dataset.theme='light';}else{delete document.documentElement.dataset.theme;}try{localStorage.setItem('theme',l?'light':'dark');}catch(e){}var m=document.querySelector('meta[name=theme-color]');if(m)m.content=l?'#f4f3ef':'#141413';}"#;
+function timeTheme(){var l=document.documentElement.dataset.theme!=='light';if(l){document.documentElement.dataset.theme='light';}else{delete document.documentElement.dataset.theme;}try{localStorage.setItem('theme',l?'light':'dark');}catch(e){}var m=document.querySelector('meta[name=theme-color]');if(m)m.content=l?'#f4f3ef':'#141413';window.dispatchEvent(new Event('timetheme'));}"#;
 
 pub fn page(title: &str, here: &str, refresh_secs: Option<u32>, body: &str) -> String {
     page_with(title, here, refresh_secs, "", body)
@@ -379,9 +379,9 @@ pub fn day_page(
     use crate::views;
     let is_today = day.date == today;
     let mut body = views::nav(cur.period, today);
-    body.push_str(&views::hero(cur, prev));
-    body.push_str(&views::parallel_list(cur));
-    body.push_str(&views::steps_card(cur, prev, step_goal, &day.steps_by_hour));
+    body.push_str(&views::charts(cur, prev, step_goal, Some(day)));
+    // The detail below folds away: each card opens with a tap.
+    let detail_start = body.len();
     body.push_str(&views::lanes(
         &day.minutes,
         day.start_ms,
@@ -389,7 +389,6 @@ pub fn day_page(
         tz,
         phones,
     ));
-    body.push_str(&views::activity_table(cur, prev));
     if day.unknown_minutes > 0 {
         let _ = write!(
             body,
@@ -397,9 +396,6 @@ pub fn day_page(
             duration(day.unknown_minutes)
         );
     }
-
-    // The detail below folds away: each card opens with a tap.
-    let detail_start = body.len();
 
     // Places and signals: where he was and what the devices were doing.
     let sg = &day.signals;
@@ -515,15 +511,6 @@ pub fn day_page(
                 t.turns,
                 t.turns_by_erik
             );
-        }
-        body.push_str("</dl></section>");
-    }
-
-    // Projects.
-    if !day.projects.is_empty() {
-        let _ = write!(body, r#"<section><h2>Projects</h2><dl>"#);
-        for (p, n) in &day.projects {
-            let _ = write!(body, "<dt>{}</dt><dd>{}</dd>", esc(p), duration(*n));
         }
         body.push_str("</dl></section>");
     }
@@ -738,6 +725,11 @@ pub fn app_page(s: &crate::apk::State, repo: &str, tz: chrono_tz::Tz) -> String 
     );
     page("Time · App", "/app/", None, &body)
 }
+
+/// The page script that draws the charts from the page's JSON.
+pub const TIME_JS: &str = include_str!("../assets/time.js");
+/// ECharts 5.6.0 (Apache-2.0), served from here so the app works offline.
+pub const ECHARTS_JS: &[u8] = include_bytes!("../assets/echarts.min.js");
 
 #[cfg(test)]
 mod tests {

@@ -42,6 +42,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/day/{date}", get(day_html))
         .route("/week", get(this_week_html))
         .route("/week/{date}", get(week_html))
+        .route("/assets/echarts-5.6.0.min.js", get(echarts_js))
+        .route("/assets/time.js", get(time_js))
         .route("/month", get(this_month_html))
         .route("/month/{date}", get(month_html))
         .route("/api/day/{date}", get(day_json))
@@ -626,4 +628,37 @@ async fn api_summary_line(State(state): State<Arc<AppState>>) -> Response {
         Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}\n")).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
+}
+
+/// Never changes under this name: cache for a year.
+async fn echarts_js() -> Response {
+    (
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "text/javascript; charset=utf-8",
+            ),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "public, max-age=31536000, immutable",
+            ),
+        ],
+        crate::web::ECHARTS_JS,
+    )
+        .into_response()
+}
+
+/// Versioned by `?v=` in the page, so it can be cached too.
+async fn time_js() -> Response {
+    (
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "text/javascript; charset=utf-8",
+            ),
+            (axum::http::header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        crate::web::TIME_JS,
+    )
+        .into_response()
 }
