@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use chrono::{NaiveDate, TimeZone};
 use serde::Serialize;
-use time_core::clock::{Millis, MINUTE_MS};
+use time_core::clock::{MINUTE_MS, Millis};
 use time_core::event::Event;
 use time_core::label::{Activity, MinuteLabel, Place};
 
@@ -625,7 +625,7 @@ mod tests {
 
     #[test]
     fn read_aloud_voice_mode_and_focus_add_up() {
-        use time_core::event::{FocusSpan, ReadAloudPlayed, VoiceModeSpan};
+        use time_core::event::{Envelope, FocusSpan, ReadAloudPlayed, VoiceModeSpan};
         let m = MINUTE_MS;
         let at = |s: Millis, e: Millis, event: Event| Envelope::new("pc", "t3-code", s, e, event);
         let focus = |s: Millis, e: Millis, project: &str| {
@@ -681,7 +681,11 @@ mod tests {
         let md = modalities(&events, 0, 60 * m);
         assert_eq!(md.read_aloud_minutes, 2, "110 s of playing, rounded up");
         assert_eq!(md.voice_mode_minutes, 10);
-        let focus: Vec<_> = md.focus.iter().map(|f| (f.project.as_str(), f.minutes)).collect();
+        let focus: Vec<_> = md
+            .focus
+            .iter()
+            .map(|f| (f.project.as_str(), f.minutes))
+            .collect();
         assert_eq!(focus, [("time", 6), ("t3code", 2)]);
         assert!(!md.is_empty());
     }

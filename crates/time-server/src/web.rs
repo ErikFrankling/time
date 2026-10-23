@@ -497,11 +497,7 @@ pub fn day_page(day: &crate::day::Day, tz: chrono_tz::Tz, is_today: bool) -> Str
                 .iter()
                 .map(|f| format!("{} {}", esc(&f.project), duration(f.minutes)))
                 .collect();
-            let _ = write!(
-                body,
-                "<dt>In T3 Code</dt><dd>{}</dd>",
-                projects.join(" · ")
-            );
+            let _ = write!(body, "<dt>In T3 Code</dt><dd>{}</dd>", projects.join(" · "));
         }
         let _ = write!(
             body,

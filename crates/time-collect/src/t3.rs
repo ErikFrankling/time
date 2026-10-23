@@ -270,7 +270,10 @@ fn activity(
         let (Some(start), Some(end)) = (parse_ms(&a.started), parse_ms(&a.ended)) else {
             continue;
         };
-        let key = format!("{}|{}|{}|{}|{}", a.kind, a.client, a.started, a.thread, a.message);
+        let key = format!(
+            "{}|{}|{}|{}|{}",
+            a.kind, a.client, a.started, a.thread, a.message
+        );
         match a.kind.as_str() {
             "t3.readaloud.played" => {
                 let mut env = Envelope::new(
@@ -743,7 +746,10 @@ mod tests {
             .filter(|e| matches!(e.event, Event::VoiceModeSpan(_)))
             .collect();
         assert_eq!(voice.len(), 1);
-        assert_eq!(voice[0].device, "phone", "the phone app reports as the phone");
+        assert_eq!(
+            voice[0].device, "phone",
+            "the phone app reports as the phone"
+        );
         assert_eq!(voice[0].end_ms - voice[0].start_ms, 600_000);
 
         let mut focus: Vec<_> = events
