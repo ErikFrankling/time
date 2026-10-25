@@ -282,8 +282,10 @@ pub fn is_generic(media: &str, app: &str) -> bool {
 /// Largest absolute sample of signed 16-bit little-endian audio, 0..1.
 pub fn peak_s16(bytes: &[u8]) -> f64 {
     bytes
-        .chunks_exact(2)
-        .map(|b| i16::from_le_bytes([b[0], b[1]]).unsigned_abs())
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|b| i16::from_le_bytes(*b).unsigned_abs())
         .max()
         .map_or(0.0, |m| f64::from(m) / 32768.0)
 }
