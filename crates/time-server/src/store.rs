@@ -405,6 +405,35 @@ impl Store {
         Ok((steps.max(0) as u32, meters))
     }
 
+    /// Audible-sound events starting in `[from, to)`: (device, start, what).
+    pub fn listening_between(
+        &self,
+        from: Millis,
+        to: Millis,
+    ) -> Result<Vec<(String, Millis, time_core::event::Listening)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT device, start_ms, body FROM event
+             WHERE name = 'time.audio.listening' AND start_ms >= ?1 AND start_ms < ?2
+             ORDER BY start_ms",
+        )?;
+        let rows = stmt.query_map([from, to], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Millis>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (device, start, body) = row?;
+            if let Ok(Event::Listening(l)) = serde_json::from_str(&body) {
+                out.push((device, start, l));
+            }
+        }
+        Ok(out)
+    }
+
     pub fn labels_between(&self, from: Millis, to: Millis) -> Result<Vec<MinuteLabel>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(

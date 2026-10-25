@@ -145,6 +145,8 @@ pub struct DayTotals {
     pub projects: BTreeMap<String, u32>,
     pub steps: u32,
     pub distance_m: f64,
+    /// Sound that could really be heard, per source.
+    pub listening: crate::listening::Tally,
     /// After today: nothing yet, not nothing.
     pub future: bool,
 }
@@ -187,6 +189,12 @@ impl DayTotals {
         }
         self.steps += o.steps;
         self.distance_m += o.distance_m;
+        for (s, h) in &o.listening.sources {
+            self.listening.sources.entry(s.clone()).or_default().add(*h);
+        }
+        for (k, n) in &o.listening.titles {
+            *self.listening.titles.entry(k.clone()).or_default() += n;
+        }
     }
 }
 
@@ -277,6 +285,14 @@ pub fn summarise(
         let labels = store.labels_between(from, to)?;
         let mut t = day_totals(&labels, phones);
         (t.steps, t.distance_m) = store.steps_between(from, to)?;
+        let heard = store.listening_between(from, to)?;
+        t.listening = crate::listening::Tally::new(
+            heard.iter().map(|(d, s, l)| (d.as_str(), *s, l)),
+            &labels,
+            from,
+            to,
+            3_600_000,
+        );
         t.date = Some(date);
         if t.tracked() > 0 {
             days_with_data += 1;
@@ -617,6 +633,7 @@ pub fn chart_data(
         "pairs": pairs,
         "projects": projects,
         "calendar": calendar,
+        "listening": listening_chart(cur, prev, &labels),
     })
 }
 
@@ -683,6 +700,7 @@ pub fn charts(cur: &Summary, prev: &Summary, goal: u32, day: Option<&crate::day:
     } else {
         out.push_str(r#"<section class="chartcard"><h2>Steps</h2><div class="sub">No steps recorded in this period. <a href="/status">Status</a> shows whether the phone is sending them.</div></section>"#);
     }
+    out.push_str(&listening_card(&data["listening"], cur.period.kind));
     out.push_str(&slot(
         "c-compare",
         &format!("Compared with {}", cur.period.prev_name()),
@@ -890,6 +908,7 @@ pub const STYLE: &str = r#"
 .k-out { width:.8rem; height:.8rem; border-radius:50%; border:1.5px dashed var(--muted); }
 .k-avg { width:1.1rem; border-top:2px dashed var(--fg); }
 .k-prev { width:1.1rem; border-top:2px dotted var(--muted); }
+.k-afk { width:.8rem; height:.8rem; border-radius:2px; background:var(--muted); opacity:.4; }
 .figs { background:none; border:0; padding:0 .3rem; text-align:center; }
 .figs .fs { display:flex; justify-content:center; flex-wrap:wrap; gap:.2rem 1rem; margin-top:.35rem; font-size:.85rem; color:var(--muted); }
 .figs .fs b { color:var(--fg); font-variant-numeric:tabular-nums; }
@@ -970,6 +989,146 @@ details.card > summary { cursor:pointer; font-size:.8rem; text-transform:upperca
 details.card > summary::after { content:" ›"; } details.card[open] > summary::after { content:" ⌄"; } details.card[open] > summary { margin-bottom:.6rem; }
 .lane > span { min-width:0; background:var(--c, transparent); }
 "#;
+
+/// Most sources drawn on their own; the rest are "Other".
+const LISTEN_SOURCES: usize = 6;
+
+/// The listening card: minutes per source (at a device or away from the
+/// keyboard), and per hour or per day by source.
+fn listening_chart(cur: &Summary, prev: &Summary, labels: &[String]) -> serde_json::Value {
+    use serde_json::json;
+    let l = &cur.total.listening;
+    let ranked = l.ranked();
+    let top: Vec<&String> = ranked
+        .iter()
+        .take(LISTEN_SOURCES)
+        .map(|(s, _)| *s)
+        .collect();
+    let mut sources: Vec<serde_json::Value> = ranked
+        .iter()
+        .take(LISTEN_SOURCES)
+        .map(|(s, h)| {
+            json!({"key": s, "name": crate::listening::name(s), "m": h.minutes(),
+                "away": h.away_minutes()})
+        })
+        .collect();
+    let rest: crate::listening::Heard =
+        ranked
+            .iter()
+            .skip(LISTEN_SOURCES)
+            .fold(Default::default(), |mut a, (_, h)| {
+                a.add(**h);
+                a
+            });
+    if rest.minutes() > 0 {
+        sources.push(
+            json!({"key": "", "name": "Other", "m": rest.minutes(), "away": rest.away_minutes()}),
+        );
+    }
+    let per_slot = |key: Option<&String>| -> Vec<u32> {
+        // Hours of a day: from its slots.
+        let pick = |t: &crate::listening::Tally| -> Vec<u32> {
+            let mut out: Vec<u32> = Vec::new();
+            for (s, v) in &t.slots {
+                if key.is_some_and(|k| k != s) || (key.is_none() && top.contains(&s)) {
+                    continue;
+                }
+                if out.len() < v.len() {
+                    out.resize(v.len(), 0);
+                }
+                for (o, x) in out.iter_mut().zip(v) {
+                    *o += x;
+                }
+            }
+            out.into_iter().map(crate::listening::minutes).collect()
+        };
+        match cur.period.kind {
+            Kind::Day => cur
+                .days
+                .first()
+                .map(|d| pick(&d.listening))
+                .unwrap_or_default(),
+            _ => cur
+                .days
+                .iter()
+                .map(|d| {
+                    let secs: u32 = d
+                        .listening
+                        .sources
+                        .iter()
+                        .filter(|(s, _)| match key {
+                            Some(k) => *s == k,
+                            None => !top.contains(s),
+                        })
+                        .map(|(_, h)| h.seconds)
+                        .sum();
+                    crate::listening::minutes(secs)
+                })
+                .collect(),
+        }
+    };
+    let mut series: Vec<serde_json::Value> = top
+        .iter()
+        .map(|s| json!({"key": s, "name": crate::listening::name(s), "data": per_slot(Some(s))}))
+        .collect();
+    if rest.minutes() > 0 {
+        series.push(json!({"key": "", "name": "Other", "data": per_slot(None)}));
+    }
+    let slot_labels: Vec<String> = match cur.period.kind {
+        Kind::Day => {
+            let n = series
+                .first()
+                .and_then(|s| s["data"].as_array().map(Vec::len))
+                .unwrap_or(24);
+            (0..n).map(|h| format!("{h:02}")).collect()
+        }
+        _ => labels.to_vec(),
+    };
+    let total = l.total();
+    json!({
+        "total": total.minutes(),
+        "away": total.away_minutes(),
+        "prev": prev.total.listening.total().minutes(),
+        "sentence": l.sentence(4),
+        "sources": sources,
+        "labels": slot_labels,
+        "series": series,
+    })
+}
+
+/// "Listening": minutes per source, then when. Only sound that could be
+/// heard counts, so a paused or muted tab left open is not in it.
+fn listening_card(l: &serde_json::Value, kind: Kind) -> String {
+    let total = l["total"].as_u64().unwrap_or(0) as u32;
+    if total == 0 {
+        return r#"<section class="chartcard"><h2>Listening</h2><div class="sub">Nothing audible recorded in this period. Only sound that could really be heard counts: playing, not muted, above silence.</div></section>"#.to_owned();
+    }
+    let away = l["away"].as_u64().unwrap_or(0) as u32;
+    let away_note = if away > 0 {
+        format!(
+            r#" <span class="k-afk"></span>faded: away from the keyboard ({})"#,
+            short(away)
+        )
+    } else {
+        String::new()
+    };
+    let n = l["sources"].as_array().map_or(1, Vec::len).max(1);
+    let mut out = slot(
+        "c-listen",
+        &format!("Listening · {}", short(total)),
+        &format!("{:.1}rem", 2.5 + 2.0 * n as f64),
+        &format!(
+            r#"<div class="cap">{}. Only sound you could hear: playing, not muted, above silence.{away_note}</div>"#,
+            esc(l["sentence"].as_str().unwrap_or_default())
+        ),
+    );
+    let when = match kind {
+        Kind::Day => "Listening by hour",
+        _ => "Listening by day",
+    };
+    out.push_str(&slot("c-listen-time", when, "11rem", ""));
+    out
+}
 
 #[cfg(test)]
 mod tests {

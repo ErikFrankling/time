@@ -240,6 +240,57 @@
       ]
     });
 
+    // Listening: what could really be heard, per source, then when.
+    var L = D.listening;
+    if (L && L.total) {
+      var LC = ['#1db954', '#e5484d', '#9085e9', '#c98500', '#3987e5', '#d55181', '#7d7c76'];
+      var known = { spotify: '#1db954', 'youtube.com': '#e5484d', 'netflix.com': '#b81d24', 'music.youtube.com': '#ff6b6b' };
+      var used = {};
+      function lcol(key, i) {
+        if (known[key]) return known[key];
+        if (!key) return '#7d7c76';
+        if (!used[key]) used[key] = LC[2 + (Object.keys(used).length % (LC.length - 3))];
+        return used[key];
+      }
+      var src = L.sources.slice().reverse();
+      make('c-listen', {
+        animation: false,
+        grid: { left: 4, right: 64, top: 2, bottom: 2, containLabel: true },
+        tooltip: Object.assign({ trigger: 'axis', axisPointer: { type: 'shadow' }, formatter: function (ps) {
+          var x = src[ps[0].dataIndex];
+          return '<b>' + x.name + '</b> ' + dur(x.m) + (x.away ? '<br>at a device ' + dur(x.m - x.away) + '<br>away from the keyboard ' + dur(x.away) : '');
+        } }, tip),
+        xAxis: { type: 'value', show: false },
+        yAxis: { type: 'category', axisTick: { show: false }, axisLine: { show: false },
+          axisLabel: Object.assign({}, axisText, { color: fg, fontSize: 11 }), data: src.map(function (x) { return x.name; }) },
+        series: [
+          { type: 'bar', stack: 'l', barWidth: 12,
+            data: src.map(function (x) { return { value: x.m - x.away, itemStyle: { color: lcol(x.key), borderRadius: x.away ? [4, 0, 0, 4] : 4 } }; }) },
+          { type: 'bar', stack: 'l', barWidth: 12,
+            label: { show: true, position: 'right', color: mu, fontSize: 11, fontFamily: font,
+              formatter: function (p) { return dur(src[p.dataIndex].m); } },
+            data: src.map(function (x) { return { value: x.away, itemStyle: { color: lcol(x.key), opacity: 0.4, borderRadius: x.m - x.away ? [0, 4, 4, 0] : 4 } }; }) }
+        ]
+      });
+      var lt = make('c-listen-time', {
+        animation: false,
+        grid: { left: 4, right: 4, top: 10, bottom: 4, containLabel: true },
+        tooltip: Object.assign({ trigger: 'axis', axisPointer: { type: 'shadow' }, formatter: function (ps) {
+          var total = 0, rows = '';
+          ps.forEach(function (p) { if (p.value) { total += p.value; rows += '<br><span style="color:' + p.color + '">●</span> ' + p.seriesName + ' ' + dur(p.value); } });
+          return '<b>' + ps[0].axisValue + (D.kind === 'day' ? ':00' : '') + '</b> · ' + dur(total) + rows;
+        } }, tip),
+        xAxis: { type: 'category', data: L.labels, axisTick: { show: false }, axisLine: { lineStyle: { color: line } },
+          axisLabel: Object.assign({}, axisText, { interval: D.kind === 'day' ? 5 : (D.kind === 'month' ? 4 : 0) }) },
+        yAxis: { type: 'value', splitNumber: 2, splitLine: { lineStyle: { color: line, opacity: 0.6 } },
+          axisLabel: Object.assign({}, axisText, { formatter: function (v) { return D.kind === 'day' ? v + 'm' : hours(v); } }),
+          max: D.kind === 'day' ? 60 : null },
+        series: L.series.map(function (s) {
+          return { type: 'bar', name: s.name, stack: 'l', barCategoryGap: '30%', itemStyle: { color: lcol(s.key) }, data: s.data };
+        })
+      });
+      if (lt && D.time.links.length) lt.on('click', function (p) { link(D.time.links[p.dataIndex]); });
+    }
     // Projects.
     var pr = (D.projects || []).slice().reverse();
     make('c-projects', {

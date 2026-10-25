@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use time_core::clock::{floor_minute, Clock, Millis, MINUTE_MS};
-use time_core::event::{Asleep, Envelope, Event, Heartbeat, ScreenMinute};
+use time_core::event::{Asleep, Envelope, Event, Heartbeat, Listening, ScreenMinute};
 
 use crate::config::AgentConfig;
 use crate::probe::{Audio, Desktop, Input, Tabs};
@@ -115,7 +115,7 @@ impl Agent {
             }
         }
         if self.last_minute.is_none_or(|m| minute > m) {
-            let event = self.observe();
+            let (event, heard) = self.observe();
             self.spool.push(&Envelope::new(
                 &self.config.device,
                 SERVICE,
@@ -123,6 +123,15 @@ impl Agent {
                 minute + MINUTE_MS,
                 Event::ScreenMinute(event),
             ))?;
+            for l in heard {
+                self.spool.push(&Envelope::new(
+                    &self.config.device,
+                    SERVICE,
+                    minute,
+                    minute + MINUTE_MS,
+                    Event::Listening(l),
+                ))?;
+            }
             self.last_minute = Some(minute);
             report.recorded = true;
         }
@@ -166,9 +175,27 @@ impl Agent {
         Ok(report)
     }
 
-    fn observe(&mut self) -> ScreenMinute {
+    /// The minute, and each source that was audible in it.
+    fn observe(&mut self) -> (ScreenMinute, Vec<Listening>) {
         let input = self.input.take();
-        let audio_playing = self.audio.playing();
+        let heard = self.audio.take();
+        let audio_playing = heard.audible();
+        let heard = heard
+            .sources
+            .into_iter()
+            .map(|mut l| {
+                // A blocked title or site: only that something played.
+                if self
+                    .config
+                    .is_blocked(&format!("{} {} {} {}", l.app, l.source, l.title, l.artist))
+                {
+                    l.source = "blocked".into();
+                    l.title.clear();
+                    l.artist.clear();
+                }
+                l
+            })
+            .collect();
         let sys = self.system.sample();
         let window = match self.desktop.active_window() {
             Ok(w) => {
@@ -193,7 +220,7 @@ impl Agent {
             ..Default::default()
         };
         let Some(window) = window else {
-            return minute;
+            return (minute, heard);
         };
         let tab = if self.config.is_browser(&window.class) {
             self.tabs.front_tab(&window)
@@ -209,13 +236,13 @@ impl Agent {
         if self.config.is_blocked(&hay) {
             // The title or host may itself be the sensitive part.
             minute.blocked = true;
-            return minute;
+            return (minute, heard);
         }
         minute.window_class = window.class;
         minute.window_title = window.title;
         minute.fullscreen = window.fullscreen;
         minute.browser_host = tab.map(|t| t.host);
-        minute
+        (minute, heard)
     }
 }
 

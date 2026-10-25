@@ -727,7 +727,7 @@ fn the_mcp_server_answers_what_he_did_this_morning() {
         &w,
         serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
     );
-    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 3);
+    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 4);
 
     // 09:00-09:40 YouTube, 09:40-10:10 T3 Code (the rest browsing or away).
     let (para, s) = tool(
@@ -741,6 +741,12 @@ fn the_mcp_server_answers_what_he_did_this_morning() {
     assert!(s["totals"]["productive"].as_u64().unwrap() >= 25, "{s}");
     assert_eq!(s["top_sites"][0]["name"], "youtube.com", "{s}");
     assert!(para.contains("unproductive"), "{para}");
+
+    // 09:00-09:40 the YouTube tab was audible: that is the listening.
+    let (para, l) = tool(&w, "time_listening", serde_json::json!({"window": "today"}));
+    assert_eq!(l["sources"][0]["source"], "youtube.com", "{l}");
+    assert!(l["sources"][0]["minutes"].as_u64().unwrap() >= 35, "{l}");
+    assert!(para.contains("YouTube"), "{para}");
 
     let (_, t) = tool(&w, "time_timeline", serde_json::json!({"window": "3h"}));
     assert!(t["blocks"].as_array().unwrap().len() >= 3, "{t}");

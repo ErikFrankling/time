@@ -1,12 +1,13 @@
 //! Time as an MCP server, so Erik's personal agent can ask what he is doing.
 //!
 //! Streamable HTTP, stateless: every `POST /mcp` carries one JSON-RPC message
-//! (or a batch) and is answered with plain JSON, no sessions and no SSE. Three
+//! (or a batch) and is answered with plain JSON, no sessions and no SSE. Four
 //! read-only tools:
 //!
 //! - `time_now`: what he is doing right now and in the last 5 minutes
 //! - `time_summary`: a window (today, 3h, ...) by category, app and site
 //! - `time_timeline`: the window as blocks
+//! - `time_listening`: what was audible, per source (Spotify, YouTube, ...)
 //!
 //! Each answers with one paragraph and the same facts as compact JSON
 //! ([`crate::digest`]). Auth: when `TIME_MCP_TOKEN` is set, `/mcp` requires
@@ -26,7 +27,7 @@ const SUPPORTED_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"]
 
 const INSTRUCTIONS: &str = "Time records what Erik does on his devices (computers and phone) and labels every minute. \
 Use time_now to see what he is doing right now and whether it is unproductive (video, social feeds; gaming counts as neutral), \
-time_summary for minutes per category over today or the last N hours, time_timeline for the blocks. \
+time_summary for minutes per category over today or the last N hours, time_timeline for the blocks, time_listening for what he listened to (Spotify, YouTube, ...) by audible minutes. \
 Every result starts with a one-paragraph summary followed by the JSON. Minutes of 'away' mean no device was in use.";
 
 pub fn tools() -> Value {
@@ -66,6 +67,17 @@ pub fn tools() -> Value {
                     "min_minutes": {"type": "integer", "minimum": 1, "description": "Hide blocks shorter than this. Default 2."},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 200, "description": "Latest blocks to return. Default 60."},
                 },
+                "additionalProperties": false,
+            },
+            "annotations": {"readOnlyHint": true, "openWorldHint": false},
+        },
+        {
+            "name": "time_listening",
+            "title": "What Erik listened to",
+            "description": "Minutes of sound that could really be heard on the computers (playing, not muted, above silence), per source (Spotify, YouTube, Netflix, ...), with the top tracks or titles, how much of it was while away from the keyboard, and what is audible right now. A paused or muted tab never counts.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"window": window("today")},
                 "additionalProperties": false,
             },
             "annotations": {"readOnlyHint": true, "openWorldHint": false},
@@ -119,6 +131,11 @@ pub fn call_tool(state: &AppState, name: &str, args: &Value) -> anyhow::Result<d
                 min_minutes,
                 limit,
             ))
+        }
+        "time_listening" => {
+            let w = window_arg("today")?;
+            let (labels, events) = digest::load(&state.store, w.from_ms, w.to_ms)?;
+            Ok(crate::listening::digest(&w, &labels, &events, now))
         }
         other => anyhow::bail!("unknown tool {other:?}"),
     }
@@ -253,6 +270,14 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap().to_owned())
             .collect();
-        assert_eq!(names, ["time_now", "time_summary", "time_timeline"]);
+        assert_eq!(
+            names,
+            [
+                "time_now",
+                "time_summary",
+                "time_timeline",
+                "time_listening"
+            ]
+        );
     }
 }

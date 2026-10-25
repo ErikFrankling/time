@@ -36,8 +36,9 @@ pub trait Input: Send {
     }
 }
 
+/// What was audible since the previous call.
 pub trait Audio: Send {
-    fn playing(&mut self) -> bool;
+    fn take(&mut self) -> crate::audio::Heard;
     fn problem(&self) -> Option<String> {
         None
     }
@@ -74,8 +75,8 @@ impl Input for Nothing {
 }
 
 impl Audio for Nothing {
-    fn playing(&mut self) -> bool {
-        false
+    fn take(&mut self) -> crate::audio::Heard {
+        crate::audio::Heard::default()
     }
 }
 

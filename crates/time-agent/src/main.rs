@@ -3,11 +3,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use time_agent::audio::Mpris;
+use time_agent::audio::PipeWire;
 use time_agent::browser::Watcher;
 use time_agent::hyprland::Hyprland;
 use time_agent::input::Evdev;
-use time_agent::probe::{Audio, Desktop, Input, Tabs};
+use time_agent::probe::{Desktop, Input, Tabs};
 use time_agent::sender::HttpSender;
 use time_agent::{Agent, AgentConfig};
 use time_core::clock::{Clock, SystemClock, MINUTE_MS};
@@ -45,7 +45,7 @@ fn main() -> anyhow::Result<()> {
         clock.clone(),
         Box::new(Hyprland::from_env()?),
         Box::new(Evdev::start()),
-        Box::new(Mpris::default()),
+        Box::new(PipeWire::start(Some(tabs.clone()))),
         Box::new(tabs),
         Box::new(sender),
     )?
@@ -105,11 +105,17 @@ fn run_probe(config: &AgentConfig) -> anyhow::Result<()> {
             snap.idle_seconds
         ),
     }
-    let mut audio = Mpris::default();
-    let playing = audio.playing();
-    match audio.problem() {
-        Some(p) => println!("audio:   ERROR {p}"),
-        None => println!("audio:   playing={playing}"),
+    match time_agent::audio::sample(None) {
+        Err(p) => println!("audio:   ERROR {p}"),
+        Ok(found) if found.is_empty() => println!("audio:   nothing audible"),
+        Ok(found) => {
+            for ((app, source, title, _), peak, status) in found {
+                println!(
+                    "audio:   audible {source} ({app}) peak={peak:.3} mpris={status:?} title={} chars",
+                    title.chars().count()
+                );
+            }
+        }
     }
     let s = time_agent::system::System::sample(&mut time_agent::system::Linux);
     println!(

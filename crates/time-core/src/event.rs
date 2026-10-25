@@ -88,6 +88,9 @@ pub enum Event {
     Asleep(Asleep),
     #[serde(rename = "time.health.steps")]
     HealthSteps(HealthSteps),
+    /// One source a computer was audibly playing during a minute.
+    #[serde(rename = "time.audio.listening")]
+    Listening(Listening),
     /// A device saying it is alive and how much it still has to send.
     #[serde(rename = "time.heartbeat")]
     Heartbeat(Heartbeat),
@@ -122,6 +125,7 @@ impl Event {
             Event::ScreenMinute(_) => "time.screen.minute",
             Event::PhoneApp(_) => "time.phone.app",
             Event::HealthSteps(_) => "time.health.steps",
+            Event::Listening(_) => "time.audio.listening",
             Event::PhoneState(_) => "time.phone.state",
             Event::Asleep(_) => "time.device.asleep",
             Event::Heartbeat(_) => "time.heartbeat",
@@ -459,4 +463,48 @@ pub struct Asleep {
     /// `suspended` (a gap in the agent's minutes) or what the OS reported.
     #[serde(default)]
     pub reason: String,
+}
+
+/// One audio source a computer was audibly playing during one minute.
+///
+/// Audible means measured, not reported: the PipeWire stream was running,
+/// linked to an unmuted sink, not muted itself, and its peak level was above
+/// silence. A paused tab, a muted stream or a page holding a silent stream
+/// open never produces one. Track and tab titles stay in Time's own
+/// database, like window titles.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Listening {
+    /// The program: `spotify`, `firefox`, `zen`, `mpv`.
+    #[serde(rename = "audio.app")]
+    pub app: String,
+    /// What it was, for totals: `spotify`, a site (`youtube.com`) for a
+    /// browser, otherwise the program.
+    #[serde(rename = "audio.source")]
+    pub source: String,
+    /// Track or tab title, when there is one.
+    #[serde(
+        rename = "media.title",
+        default,
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub title: String,
+    #[serde(
+        rename = "media.artist",
+        default,
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub artist: String,
+    /// Seconds of the minute it was heard (sampled every few seconds).
+    #[serde(rename = "audible.seconds")]
+    pub audible_seconds: u32,
+    /// Loudest sample seen, 0..1 of full scale after stream and sink volume.
+    #[serde(rename = "audio.peak", default)]
+    pub peak: f64,
+    /// The MPRIS status, when a player could be matched to the stream.
+    #[serde(
+        rename = "mpris.status",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub mpris_status: Option<String>,
 }

@@ -51,6 +51,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/summary", get(api_summary))
         .route("/api/summary/line", get(api_summary_line))
         .route("/api/timeline", get(api_timeline))
+        .route("/api/listening", get(api_listening))
         .route(
             "/mcp",
             post(crate::mcp::post)
@@ -595,6 +596,13 @@ async fn api_summary(
     axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>,
 ) -> Response {
     digest_json(state, "time_summary", q).await
+}
+
+async fn api_listening(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>,
+) -> Response {
+    digest_json(state, "time_listening", q).await
 }
 
 async fn api_timeline(

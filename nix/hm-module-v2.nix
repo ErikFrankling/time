@@ -60,6 +60,17 @@ let
     echo "$(date -Is) $dir/time-$day.db restored: $events events, $labelled labelled minutes" | tee -a "$dir/restore-test.log"
     find "$dir" -name 'time-*.db' -mtime +14 -delete
   '';
+  # pw-dump, pw-record (what is audible) and playerctl (track names) first,
+  # then whatever the session has (iwgetid for the Wi-Fi name).
+  agentStart = pkgs.writeShellScript "time-agent-start" ''
+    export PATH=${
+      lib.makeBinPath [
+        pkgs.pipewire
+        pkgs.playerctl
+      ]
+    }:$PATH
+    exec ${lib.getExe' cfg.package "time-agent"} ${agentConfig}
+  '';
   agentConfig = toml.generate "time-agent.toml" {
     inherit (cfg)
       device
@@ -232,7 +243,7 @@ in
         PartOf = [ "graphical-session.target" ];
       };
       Service = {
-        ExecStart = "${lib.getExe' cfg.package "time-agent"} ${agentConfig}";
+        ExecStart = "${agentStart}";
         Restart = "always";
         RestartSec = 10;
         # A minute's work is milliseconds; keep it out of the way of

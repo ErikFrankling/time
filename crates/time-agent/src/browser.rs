@@ -20,6 +20,8 @@ use crate::probe::{match_tab, Tab, Tabs, Window};
 pub const PORT: u16 = 5600;
 /// The extension beats every minute and on every tab switch.
 const MAX_AGE: Duration = Duration::from_secs(150);
+/// How long a title keeps naming its host.
+const TITLE_AGE: Duration = Duration::from_secs(12 * 3600);
 
 #[derive(Debug, Clone)]
 struct Beat {
@@ -30,6 +32,9 @@ struct Beat {
 #[derive(Clone, Default)]
 pub struct Watcher {
     beats: Arc<Mutex<HashMap<String, Beat>>>,
+    /// Tab title -> host for longer, so a tab playing sound in the
+    /// background (no longer the front tab) can still be named.
+    titles: Arc<Mutex<HashMap<String, (String, Instant)>>>,
     bind_error: Option<String>,
 }
 
@@ -41,10 +46,10 @@ impl Watcher {
         let addr = format!("127.0.0.1:{PORT}");
         match tiny_http::Server::http(&addr) {
             Ok(server) => {
-                let (beats, hostname) = (w.beats.clone(), device.to_string());
+                let (watcher, hostname) = (w.clone(), device.to_string());
                 std::thread::spawn(move || {
                     for req in server.incoming_requests() {
-                        serve(req, &beats, &hostname);
+                        serve(req, &watcher, &hostname);
                     }
                 });
             }
@@ -64,6 +69,12 @@ impl Watcher {
             .and_then(host_of);
         let title = data["title"].as_str().unwrap_or_default().to_owned();
         let tab = host.map(|host| Tab { host, title });
+        if let (Some(t), Ok(mut titles)) = (tab.as_ref(), self.titles.lock()) {
+            if !t.title.is_empty() {
+                titles.retain(|_, (_, at)| at.elapsed() <= TITLE_AGE);
+                titles.insert(t.title.clone(), (t.host.clone(), Instant::now()));
+            }
+        }
         if let Ok(mut beats) = self.beats.lock() {
             // Keyed by bucket *and* title: Firefox and Zen both report into
             // "aw-watcher-web-firefox_<host>", so a bucket alone would let one
@@ -81,6 +92,28 @@ impl Watcher {
                 },
             );
         }
+    }
+
+    /// The host of a tab reported with this title in the last hours, for
+    /// naming a stream by its `media.name` (the tab title).
+    pub fn host_for_title(&self, title: &str) -> Option<String> {
+        if title.is_empty() {
+            return None;
+        }
+        let titles = self.titles.lock().ok()?;
+        titles
+            .get(title)
+            .or_else(|| {
+                titles
+                    .iter()
+                    .filter(|(t, _)| {
+                        t.len() > 3 && (title.contains(t.as_str()) || t.contains(title))
+                    })
+                    .max_by_key(|(t, _)| t.len())
+                    .map(|(_, v)| v)
+            })
+            .filter(|(_, at)| at.elapsed() <= TITLE_AGE)
+            .map(|(h, _)| h.clone())
     }
 }
 
@@ -100,7 +133,7 @@ impl Tabs for Watcher {
     }
 }
 
-fn serve(mut req: tiny_http::Request, beats: &Arc<Mutex<HashMap<String, Beat>>>, hostname: &str) {
+fn serve(mut req: tiny_http::Request, watcher: &Watcher, hostname: &str) {
     // DNS rebinding: any page can resolve a name to 127.0.0.1, so only
     // requests addressed to loopback by name are answered.
     let host_ok = req
@@ -152,11 +185,7 @@ fn serve(mut req: tiny_http::Request, beats: &Arc<Mutex<HashMap<String, Beat>>>,
             return;
         }
         let event: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
-        Watcher {
-            beats: beats.clone(),
-            bind_error: None,
-        }
-        .beat(&bucket, &event);
+        watcher.beat(&bucket, &event);
         // The extension parses the reply as the stored event.
         respond(req, 200, body);
         return;

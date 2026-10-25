@@ -51,8 +51,26 @@ impl Input for SimInput {
 struct SimAudio(Now);
 
 impl Audio for SimAudio {
-    fn playing(&mut self) -> bool {
-        self.0.lock().unwrap().as_ref().is_some_and(|s| s.audio)
+    /// A scripted "audio = true" is a minute of the first tab (or the
+    /// window's program) being audible.
+    fn take(&mut self) -> time_agent::audio::Heard {
+        let seg = self.0.lock().unwrap().clone().filter(|s| s.audio);
+        time_agent::audio::Heard {
+            sources: seg
+                .map(|s| time_core::event::Listening {
+                    source: s
+                        .tabs
+                        .first()
+                        .map_or(s.class.clone().unwrap_or_default(), |t| t.host.clone()),
+                    title: s.tabs.first().map(|t| t.title.clone()).unwrap_or_default(),
+                    app: s.class.clone().unwrap_or_default(),
+                    audible_seconds: 60,
+                    peak: 0.5,
+                    ..Default::default()
+                })
+                .into_iter()
+                .collect(),
+        }
     }
 }
 

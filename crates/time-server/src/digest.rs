@@ -544,6 +544,13 @@ pub fn summary(
             dur(missing)
         ));
     }
+    let listening =
+        crate::listening::Tally::from_events(events, labels, w.from_ms, w.to_ms, 3_600_000);
+    let mut json = json;
+    json["listening"] = listening.json(3);
+    if listening.total().minutes() > 0 {
+        text.push_str(&format!(" Audible: {}.", listening.sentence(4)));
+    }
     Digest { json, text }
 }
 
@@ -941,6 +948,11 @@ pub fn now(
             dur(hour.away)
         )
     };
+    // What can be heard right now, from the agents' level measurements.
+    let (audible, audible_text) = crate::listening::now_json_text(events, now_ms);
+    let mut json = json;
+    json["audible"] = audible;
+    let text = if stale { text } else { text + &audible_text };
     Digest { json, text }
 }
 
