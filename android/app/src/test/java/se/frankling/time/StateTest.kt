@@ -15,7 +15,7 @@ class StateTest {
     @Test
     fun `samples become one stable event per minute with the server's field names`() {
         val s = StateSamples(tmp.root.resolve("s.jsonl"))
-        s.add(JSONObject().put("ts", 60_000L).put("charging", true).put("locked", false).put("interactive", true).put("battery", 80).put("gateway", "192.168.50.1"))
+        s.add(JSONObject().put("ts", 60_000L).put("charging", true).put("locked", false).put("interactive", true).put("battery", 80).put("gateway", "192.168.50.1").put("alarm", 1_792_990_800_000L))
         s.add(JSONObject().put("ts", 120_000L).put("charging", false).put("locked", true).put("interactive", false).put("ssid", "eduroam"))
         val events = StateSamples.toEvents("phone", s.read())
         assertEquals(2, events.size)
@@ -24,7 +24,9 @@ class StateTest {
         assertEquals(80L, events[0].fields["battery.percent"])
         assertEquals("192.168.50.1", events[0].fields["network.gateway"])
         assertEquals("eduroam", events[1].fields["wifi.ssid"])
+        assertEquals(1_792_990_800_000L, events[0].fields["alarm.next_ms"])
         assertFalse(events[1].fields.containsKey("network.gateway"))
+        assertFalse(events[1].fields.containsKey("alarm.next_ms"))
         assertEquals(events[0].id, StateSamples.toEvents("phone", s.read())[0].id)
         s.clear()
         assertEquals(0, s.read().size)

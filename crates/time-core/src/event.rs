@@ -471,6 +471,14 @@ pub struct PhoneState {
     /// Screen on.
     #[serde(default)]
     pub interactive: bool,
+    /// When the next alarm set in the clock app goes off. It moving on
+    /// after its time has come is the alarm being dismissed.
+    #[serde(
+        rename = "alarm.next_ms",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub alarm_next_ms: Option<i64>,
     #[serde(flatten)]
     pub network: Network,
 }

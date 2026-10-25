@@ -1,5 +1,6 @@
 package se.frankling.time
 
+import android.app.AlarmManager
 import android.app.KeyguardManager
 import android.content.Context
 import android.content.Intent
@@ -39,6 +40,10 @@ object PhoneStateSampler {
         }
         o.put("locked", ctx.getSystemService(KeyguardManager::class.java)?.isKeyguardLocked == true)
         o.put("interactive", ctx.getSystemService(PowerManager::class.java)?.isInteractive == true)
+        // The next alarm the clock app set, if any. When it moves on after
+        // its time has come, the alarm went off and was dismissed: that is
+        // when Erik was woken. Needs no permission.
+        ctx.getSystemService(AlarmManager::class.java)?.nextAlarmClock?.triggerTime?.let { o.put("alarm", it) }
         network(ctx, o)
         return o
     }
@@ -96,6 +101,7 @@ class StateSamples(private val file: File) {
                 put("locked", s.optBoolean("locked"))
                 put("interactive", s.optBoolean("interactive"))
                 if (s.has("battery")) put("battery.percent", s.getInt("battery").toLong())
+                if (s.has("alarm")) put("alarm.next_ms", s.getLong("alarm"))
                 if (s.has("ssid")) put("wifi.ssid", s.getString("ssid"))
                 if (s.has("gateway")) put("network.gateway", s.getString("gateway"))
                 if (s.has("domain")) put("network.domain", s.getString("domain"))

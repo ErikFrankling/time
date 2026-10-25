@@ -421,6 +421,7 @@ mod tests {
                     battery_percent: Some(81),
                     locked: false,
                     interactive: true,
+                    alarm_next_ms: Some(1_700_003_600_000),
                     network: Network {
                         ssid: Some("eduroam".into()),
                         gateway: Some("10.0.0.1".into()),
