@@ -151,6 +151,10 @@ pub struct DayTotals {
     pub tracks: crate::tracks::Tracks,
     /// After today: nothing yet, not nothing.
     pub future: bool,
+    /// Attention minutes per activity, by what filled them (x.com, discord).
+    pub whats: BTreeMap<Activity, BTreeMap<String, u32>>,
+    /// Commits, pull requests and reviews.
+    pub code: crate::day::CodeTotals,
 }
 
 impl DayTotals {
@@ -198,6 +202,13 @@ impl DayTotals {
             *self.listening.titles.entry(k.clone()).or_default() += n;
         }
         self.tracks.add(&o.tracks);
+        for (a, by) in &o.whats {
+            let me = self.whats.entry(*a).or_default();
+            for (w, n) in by {
+                *me.entry(w.clone()).or_default() += n;
+            }
+        }
+        self.code.merge(&o.code);
     }
 }
 
@@ -231,6 +242,11 @@ pub fn day_totals(labels: &[MinuteLabel], phones: &[String]) -> DayTotals {
                 })
                 .or_default() += 1;
         }
+        *t.whats
+            .entry(a)
+            .or_default()
+            .entry(l.what.clone().unwrap_or_else(|| "(not recorded)".into()))
+            .or_default() += 1;
         if let Some(p) = &l.project {
             *t.projects.entry(p.clone()).or_default() += 1;
         }
@@ -247,6 +263,9 @@ pub struct Summary {
     /// Days that had anything recorded, the divisor for averages.
     pub days_with_data: u32,
     pub step_days: u32,
+    /// Local minute of the day now, when the period holds today: the
+    /// clock's "now" hand.
+    pub now_min: Option<u32>,
 }
 
 impl Summary {
@@ -296,13 +315,23 @@ pub fn summarise(
             to,
             3_600_000,
         );
+        let input = store.input_between(from, to)?;
+        let voice = store.named_between(&crate::tracks::VOICE_EVENTS, from, to)?;
         t.tracks = crate::tracks::Tracks::build(
             &labels,
             heard.iter().map(|(d, s, l)| (d.as_str(), *s, l)),
+            &input,
+            &voice,
             phones,
+            tz,
             from,
             to,
         );
+        for e in store.named_between(&crate::day::CodeTotals::EVENTS, from, to)? {
+            if e.start_ms >= from {
+                t.code.add(&e.event);
+            }
+        }
         t.date = Some(date);
         if t.tracked() > 0 {
             days_with_data += 1;
@@ -319,6 +348,7 @@ pub fn summarise(
         total,
         days_with_data,
         step_days,
+        now_min: None,
     })
 }
 
@@ -434,6 +464,13 @@ pub fn headline(cur: &Summary, prev: &Summary) -> String {
         chip(t, v(prev, &|t| t.tracked())),
         small("work &amp; study", &|t| t.work()),
         small("phone", &|t| t.phone()),
+    )
+}
+
+/// A chart slot with a drill-down panel under it, filled when a mark is tapped.
+fn drill_slot(id: &str, title: &str, height: &str, note: &str) -> String {
+    format!(
+        r#"<section class="chartcard"><h2>{title}</h2>{note}<div class="chart" id="{id}" style="height:{height}"></div><div class="drill" id="{id}-drill" hidden><div class="dh"><b></b><button type="button" aria-label="Close">×</button></div><div class="chart"></div></div></section>"#
     )
 }
 
@@ -645,6 +682,10 @@ pub fn chart_data(
         "calendar": calendar,
         "listening": listening_chart(cur, prev, &labels),
         "tracks": tracks_chart(cur, &labels),
+        "rings": rings_chart(cur),
+        "clock": clock_chart(cur),
+        "drill": cur.total.whats.iter().map(|(a, by)| (a.as_str().to_owned(), serde_json::Value::from(drill(by, 60)))).collect::<serde_json::Map<_, _>>(),
+        "code": code_chart(&cur.total.code),
     })
 }
 
@@ -652,36 +693,81 @@ pub fn chart_data(
 pub fn charts(cur: &Summary, prev: &Summary, goal: u32, day: Option<&crate::day::Day>) -> String {
     let data = chart_data(cur, prev, goal, day);
     let mut out = headline(cur, prev);
-    out.push_str(&slot(
+    let per_day = cur.period.kind != Kind::Day;
+    let full = cur.total.tracks.active_minutes;
+    if data["tracks"]["any"].as_bool() == Some(true) {
+        out.push_str(&drill_slot(
+            "c-rings",
+            "Every track at once",
+            "22rem",
+            &format!(
+                r#"<div class="cap">One ring per track, outside in: computer screen and sound, phone screen and sound, keyboard &amp; mouse, voice. A full circle is every minute anything was going on ({}{}). Colours are what filled each ring: hover for the breakdown, tap to open it.</div>"#,
+                short(if per_day { full / cur.total.tracks.days.max(1) } else { full }),
+                if per_day { " a day" } else { "" }
+            ),
+        ));
+        out.push_str(&drill_slot(
+            "c-clock",
+            "Around the clock",
+            "25rem",
+            if per_day {
+                r#"<div class="cap">The same rings on a 24-hour dial (outside in: computer screen, computer sound, phone screen, phone sound, keyboard &amp; mouse, voice), midnight at the top and noon at the bottom. Each ten minutes is shaded by how often it was filled on these days, coloured by what filled it most.</div>"#
+            } else {
+                r#"<div class="cap">The same rings on a 24-hour dial (outside in: computer screen, computer sound, phone screen, phone sound, keyboard &amp; mouse, voice), midnight at the top and noon at the bottom: each stretch sits at the hour it happened. Keyboard &amp; mouse is shaded by how much of each ten minutes had input.</div>"#
+            },
+        ));
+    }
+    out.push_str(&drill_slot(
         "c-donut",
-        "Where the time went",
+        "Where the attention went",
         "19rem",
-        r#"<div class="cap"><span class="k-in"></span>inside: what had your attention <span class="k-out"></span>outer ring: a second device busy at the same time, grey when nothing else was</div>"#,
+        r#"<div class="cap"><span class="k-in"></span>inside: what had your attention <span class="k-out"></span>outer ring: a second device busy at the same time, grey when nothing else was. Hover a category for its apps and sites; tap to open it.</div>"#,
     ));
+    if data["tracks"]["any"].as_bool() == Some(true) {
+        let when = match cur.period.kind {
+            Kind::Day => ("When, track by track", "Six tracks: what was on each screen (by activity), what could be heard (by source), how much of each ten minutes had keyboard or mouse input (darker: more), and when you dictated or were read to. Filled at the same time means at the same time."),
+            _ => ("Tracks by day", "Minutes per track each day. Tap a day to open it."),
+        };
+        out.push_str(&slot(
+            "c-tracks",
+            when.0,
+            if per_day { "13rem" } else { "17rem" },
+            &format!(r#"<div class="cap">{}</div>"#, when.1),
+        ));
+    }
+    if !cur.total.projects.is_empty() || !cur.total.code.is_empty() {
+        let c = &cur.total.code;
+        let code = if c.is_empty() {
+            "no commits or pull requests".to_owned()
+        } else {
+            format!(
+                "{} commits · +{} −{} lines · {} pull requests opened, {} merged · {} reviews",
+                c.commits,
+                crate::web::group_thousands(c.lines_added),
+                crate::web::group_thousands(c.lines_removed),
+                c.prs_opened,
+                c.prs_merged,
+                c.reviews
+            )
+        };
+        let n = cur
+            .total
+            .projects
+            .len()
+            .clamp(1, 8)
+            .max(c.commits_by_repo.len().min(8));
+        let _ = write!(
+            out,
+            r#"<section class="chartcard"><h2>Projects and code</h2><div class="cap">Left: time on each project. Right: commits per repository. {code}.</div><div class="two"><div class="chart" id="c-projects" style="height:{h:.1}rem"></div><div class="chart" id="c-code" style="height:{h:.1}rem"></div></div></section>"#,
+            h = 2.0 + 1.6 * n as f64
+        );
+    }
     if cur.total.parallel() > 0 {
         out.push_str(&slot(
             "c-pairs",
             "Two devices at once",
             "13rem",
             r#"<div class="cap">Each bar: left colour what you were focused on, right colour what the other device (📱 phone, 💻 computer) was doing.</div>"#,
-        ));
-    }
-    if data["tracks"]["any"].as_bool() == Some(true) {
-        let when = match cur.period.kind {
-            Kind::Day => ("Screens and sound over the day", "Four tracks, one per device and kind: what was on each screen (by activity) and what could be heard from it (by source). Filled at the same time means at the same time."),
-            _ => ("Screens and sound by day", "Minutes per track each day. Tap a day to open it."),
-        };
-        out.push_str(&slot(
-            "c-tracks-total",
-            "Screens and sound",
-            "12rem",
-            r#"<div class="cap">Each bar is one track; its colours are what filled it.</div>"#,
-        ));
-        out.push_str(&slot(
-            "c-tracks",
-            when.0,
-            "13rem",
-            &format!(r#"<div class="cap">{}</div>"#, when.1),
         ));
     }
     let over = match cur.period.kind {
@@ -736,9 +822,6 @@ pub fn charts(cur: &Summary, prev: &Summary, goal: u32, day: Option<&crate::day:
         "16rem",
         "",
     ));
-    if !cur.total.projects.is_empty() {
-        out.push_str(&slot("c-projects", "Projects", "11rem", ""));
-    }
     // `</` cannot appear inside JSON strings in a script element.
     let json = data.to_string().replace("</", "<\\/");
     let _ = write!(
@@ -1017,6 +1100,10 @@ details.card { background:var(--card); border:1px solid var(--line); border-radi
 details.card > summary { cursor:pointer; font-size:.8rem; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); font-weight:700; list-style:none; }
 details.card > summary::after { content:" ›"; } details.card[open] > summary::after { content:" ⌄"; } details.card[open] > summary { margin-bottom:.6rem; }
 .lane > span { min-width:0; background:var(--c, transparent); }
+.two { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:.5rem; }
+.drill { border-top:1px solid var(--line); margin:.4rem .3rem 0; padding-top:.5rem; }
+.drill .dh { display:flex; justify-content:space-between; align-items:center; font-size:.85rem; }
+.drill .dh button { background:none; border:0; color:var(--muted); font-size:1.3rem; line-height:1; cursor:pointer; padding:0 .3rem; }
 "#;
 
 /// Most sources drawn on their own; the rest are "Other".
@@ -1165,7 +1252,7 @@ const TRACK_TOP: usize = 5;
 /// The four tracks: totals per track by what filled it, then when (lanes
 /// for a day, a bar per track per day for a week or month).
 fn tracks_chart(cur: &Summary, labels: &[String]) -> serde_json::Value {
-    use crate::tracks::{is_sound, NAMES};
+    use crate::tracks::{is_sound, NAMES, TRACKS};
     use serde_json::json;
     let t = &cur.total.tracks;
     let name = |track: usize, key: &str| {
@@ -1175,7 +1262,7 @@ fn tracks_chart(cur: &Summary, labels: &[String]) -> serde_json::Value {
             key.to_owned()
         }
     };
-    let totals: Vec<serde_json::Value> = (0..4)
+    let totals: Vec<serde_json::Value> = (0..TRACKS)
         .map(|track| {
             let mut v: Vec<(&String, &u32)> = t.seconds[track].iter().collect();
             v.sort_by_key(|(k, s)| (std::cmp::Reverse(**s), (*k).clone()));
@@ -1197,29 +1284,174 @@ fn tracks_chart(cur: &Summary, labels: &[String]) -> serde_json::Value {
                 "parts": parts})
         })
         .collect();
-    let (spans, minutes) = match (cur.period.kind, cur.days.first()) {
-        (Kind::Day, Some(d)) => (
-            d.tracks
-                .spans
-                .iter()
-                .map(|s| json!([s.track, s.from, s.to, s.what, name(s.track, &s.what)]))
-                .collect::<Vec<_>>(),
-            // A DST day runs an hour short or long; the axis stays 24 h.
-            24 * 60,
-        ),
-        _ => (vec![], 0),
-    };
-    let per_day: Vec<Vec<u32>> = (0..4)
+    let per_day: Vec<Vec<u32>> = (0..TRACKS)
         .map(|track| cur.days.iter().map(|d| d.tracks.minutes(track)).collect())
         .collect();
     json!({
         "names": NAMES,
         "totals": totals,
-        "spans": spans,
-        "minutes": minutes,
+        "minutes": 24 * 60,
         "labels": labels,
         "perDay": per_day,
-        "any": (0..4).any(|i| t.minutes(i) > 0),
+        "any": (0..TRACKS).any(|i| t.minutes(i) > 0),
+    })
+}
+
+/// Most named parts drawn in a drill-down before the rest is "other".
+const DRILL_TOP: usize = 12;
+
+/// A breakdown, biggest first: `[{name, m}]` in minutes (one decimal, so a
+/// 20-second dictation is not zero). `unit` is seconds per count.
+fn drill(by: &BTreeMap<String, u32>, unit: u32) -> Vec<serde_json::Value> {
+    use serde_json::json;
+    let mut v: Vec<(&String, &u32)> = by.iter().filter(|(_, n)| **n > 0).collect();
+    v.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+    let m = |n: u32| (f64::from(n) * f64::from(unit) / 6.0).round() / 10.0;
+    let mut out: Vec<serde_json::Value> = v
+        .iter()
+        .take(DRILL_TOP)
+        .map(|(k, n)| json!({"name": k, "m": m(**n)}))
+        .collect();
+    let rest: u32 = v.iter().skip(DRILL_TOP).map(|(_, n)| **n).sum();
+    if rest > 0 {
+        out.push(
+            json!({"name": format!("{} more", v.len() - DRILL_TOP), "m": m(rest), "rest": true}),
+        );
+    }
+    out
+}
+
+/// A track key as a person reads it.
+fn key_name(track: usize, key: &str) -> String {
+    use crate::tracks::{is_sound, INPUT};
+    if is_sound(track) {
+        crate::listening::name(key)
+    } else if track == INPUT && key == "pointer" {
+        "pointer only".to_owned()
+    } else {
+        key.to_owned()
+    }
+}
+
+/// Concentric rings, one per track; the full circle is every minute any
+/// track was filled, so rings compare. Each ring's segments are what filled
+/// it, each with its own breakdown for the tooltip and the drill-down.
+fn rings_chart(cur: &Summary) -> serde_json::Value {
+    use crate::tracks::{is_sound, NAMES, TRACKS};
+    use serde_json::json;
+    let t = &cur.total.tracks;
+    let tracks: Vec<serde_json::Value> = (0..TRACKS)
+        .map(|track| {
+            let mut v: Vec<(&String, &u32)> = t.seconds[track].iter().collect();
+            v.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+            let parts: Vec<serde_json::Value> = v
+                .iter()
+                .filter(|(_, s)| **s > 0)
+                .map(|(k, s)| {
+                    let top = t.whats[track]
+                        .get(*k)
+                        .map(|by| drill(by, 1))
+                        .unwrap_or_default();
+                    json!({"key": k, "name": key_name(track, k),
+                        "m": (f64::from(**s) / 6.0).round() / 10.0, "top": top})
+                })
+                .collect();
+            json!({"name": NAMES[track], "sound": is_sound(track), "m": t.minutes(track),
+                "parts": parts})
+        })
+        .collect();
+    json!({"full": t.active_minutes, "tracks": tracks, "days": t.days.max(1)})
+}
+
+/// The 24-hour clock: `[track, from, to, key, name, detail, intensity]` in
+/// local minutes of the day. A day draws its stretches minute by minute and
+/// keyboard and mouse as ten-minute chunks shaded by how much of each had
+/// input; a week or month draws ten-minute slots shaded by how often they
+/// were filled.
+fn clock_chart(cur: &Summary) -> serde_json::Value {
+    use crate::tracks::{INPUT, SLOTS, SLOT_MIN, TRACKS};
+    use serde_json::json;
+    let mut items: Vec<serde_json::Value> = Vec::new();
+    match (cur.period.kind, cur.days.first()) {
+        (Kind::Day, Some(d)) => {
+            let t = &d.tracks;
+            for s in t.spans.iter().filter(|s| s.track != INPUT) {
+                items.push(json!([
+                    s.track,
+                    s.from,
+                    s.to,
+                    s.what,
+                    key_name(s.track, &s.what),
+                    s.detail,
+                    1.0
+                ]));
+            }
+            for c in &t.chunks {
+                let (h, m) = c.from.split_once(':').unwrap_or(("0", "0"));
+                let from = h.parse::<u32>().unwrap_or(0) * 60 + m.parse::<u32>().unwrap_or(0);
+                let key = if c.keys > 0 { "typing" } else { "pointer" };
+                let detail = format!(
+                    "{} keys · {} clicks · {} s of 600 with input · {}/min",
+                    c.keys, c.clicks, c.active_seconds, c.per_minute
+                );
+                let intensity = (f64::from(c.active_seconds) / 600.0).clamp(0.08, 1.0);
+                items.push(json!([
+                    INPUT,
+                    from,
+                    from + SLOT_MIN,
+                    key,
+                    key_name(INPUT, key),
+                    detail,
+                    (intensity * 100.0).round() / 100.0
+                ]));
+            }
+        }
+        _ => {
+            let t = &cur.total.tracks;
+            let days = f64::from(t.days.max(1));
+            for track in 0..TRACKS {
+                for slot in 0..SLOTS {
+                    let by = &t.slots[track][slot];
+                    let total: u32 = by.values().sum();
+                    let Some((key, _)) = by.iter().max_by_key(|(_, s)| **s) else {
+                        continue;
+                    };
+                    if total == 0 {
+                        continue;
+                    }
+                    let share = f64::from(total) / (days * f64::from(SLOT_MIN) * 60.0);
+                    let from = slot as u32 * SLOT_MIN;
+                    let detail = format!(
+                        "{} on average · mostly {}",
+                        crate::listening::minutes((f64::from(total) / days) as u32).max(1),
+                        key_name(track, key)
+                    );
+                    items.push(json!([
+                        track,
+                        from,
+                        from + SLOT_MIN,
+                        key,
+                        key_name(track, key),
+                        detail,
+                        (share.sqrt().clamp(0.15, 1.0) * 100.0).round() / 100.0
+                    ]));
+                }
+            }
+        }
+    }
+    json!({"items": items, "now": cur.now_min, "names": crate::tracks::NAMES})
+}
+
+/// Code in the main view: totals and commits per repository.
+fn code_chart(c: &crate::day::CodeTotals) -> serde_json::Value {
+    use serde_json::json;
+    let mut repos: Vec<(&String, &u32)> = c.commits_by_repo.iter().collect();
+    repos.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+    json!({
+        "commits": c.commits, "added": c.lines_added, "removed": c.lines_removed,
+        "prsOpened": c.prs_opened, "prsMerged": c.prs_merged, "reviews": c.reviews,
+        "repos": repos.iter().take(8).map(|(r, n)| json!({"name": r.rsplit('/').next().unwrap_or(r), "n": n})).collect::<Vec<_>>(),
+        "any": !c.is_empty(),
     })
 }
 
@@ -1264,6 +1496,8 @@ mod tests {
             decider: Decider::Rule,
             complete: true,
             location: None,
+            what: None,
+            background_what: None,
         }
     }
 
@@ -1282,11 +1516,7 @@ mod tests {
                 Some((Activity::Video, "phone")),
             ),
             label(Place::Computer, Activity::Work, None),
-            label(
-                Place::Phone,
-                Activity::Social,
-                Some((Activity::Music, "pc")),
-            ),
+            label(Place::Phone, Activity::Feeds, Some((Activity::Music, "pc"))),
         ];
         let t = day_totals(&labels, &phones);
         assert_eq!(

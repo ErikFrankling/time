@@ -7,14 +7,21 @@
   var D = JSON.parse(el.textContent);
   // One hue per activity, everywhere (same as the CSS palette).
   var C = {
-    work: '#3987e5', study: '#199e70', comms: '#d55181', video: '#c98500',
-    social: '#d95926', browsing: '#008300', music: '#9085e9', games: '#e66767',
+    work: '#3987e5', study: '#199e70', messaging: '#d55181', video: '#c98500',
+    feeds: '#d95926', browsing: '#008300', music: '#9085e9', games: '#e66767',
     other: '#7d7c76', unknown: '#4a4a46'
+  };
+  // Keyboard and mouse (one hue, darker for less), and voice: in is warm,
+  // out is cool. Validated as one categorical set on the dark surface.
+  var K = {
+    typing: '#4fb3bf', pointer: '#2a6f78',
+    dictation: '#c08a10', 'voice mode': '#1f9e8a', 'read aloud': '#5b7fe0', speak: '#d4567a'
   };
   var charts = [];
 
   function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
   function dur(m) {
+    if (m > 0 && m < 1) return Math.max(1, Math.round(m * 60)) + ' s';
     m = Math.round(m);
     var h = Math.floor(m / 60), r = m % 60;
     return h ? (r ? h + ' h ' + r + ' min' : h + ' h') : r + ' min';
@@ -23,9 +30,21 @@
   function thou(n) { return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ' '); }
   function pct(a, b) { return b ? (a >= b ? '+' : '−') + Math.round(Math.abs(a - b) * 100 / b) + '%' : ''; }
   function link(url) { if (url) location.href = url; }
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+  // A breakdown for a tooltip: "x.com 60% · 34 min", the biggest first.
+  function breakdown(top, n) {
+    if (!top || !top.length) return '';
+    var s = 0, out = '';
+    top.forEach(function (x) { s += x.m; });
+    top.slice(0, n).forEach(function (x) {
+      out += '<br>' + esc(x.name) + ' <b>' + Math.round(x.m * 100 / (s || 1)) + '%</b> <span style="opacity:.7">' + dur(x.m) + '</span>';
+    });
+    out += '<br><i style="opacity:.7">' + (top.length > n ? (top.length - n) + ' more · ' : '') + 'tap to open</i>';
+    return out;
+  }
 
-  function make(id, opt) {
-    var e = document.getElementById(id);
+  function make(id, opt) { return makeIn(document.getElementById(id), opt); }
+  function makeIn(e, opt) {
     if (!e) return null;
     var c = echarts.getInstanceByDom(e);
     if (c) c.dispose();
@@ -57,16 +76,161 @@
     }
     function hhmm(min) { var h = Math.floor(min / 60), m = min % 60; return (h < 10 ? '0' : '') + h + ':' + (m < 10 ? '0' : '') + m; }
 
+    function kcol(track, key) {
+      if (track === 1 || track === 3) return lcol(key);
+      if (track >= 4) return K[key] || '#7d7c76';
+      return C[key] || C.other;
+    }
+    // A tapped mark opens its breakdown under the chart: bars, biggest first.
+    function openDrill(id, title, rows, color) {
+      var box = document.getElementById(id + '-drill');
+      if (!box || !rows || !rows.length) return;
+      box.hidden = false;
+      box.querySelector('.dh b').textContent = title;
+      box.querySelector('.dh button').onclick = function () { box.hidden = true; };
+      var s = 0;
+      rows.forEach(function (x) { s += x.m; });
+      var r = rows.slice().reverse();
+      var ch = box.querySelector('.chart');
+      ch.style.height = (1.2 + r.length * 1.55) + 'rem';
+      makeIn(ch, {
+        animation: false,
+        grid: { left: 4, right: 92, top: 2, bottom: 2, containLabel: true },
+        tooltip: Object.assign({ trigger: 'item', formatter: function (p) {
+          var x = r[p.dataIndex];
+          return '<b>' + esc(x.name) + '</b> ' + dur(x.m) + ' (' + Math.round(x.m * 100 / (s || 1)) + '%)';
+        } }, tip),
+        xAxis: { type: 'value', show: false },
+        yAxis: { type: 'category', axisTick: { show: false }, axisLine: { show: false },
+          axisLabel: Object.assign({}, axisText, { color: fg, fontSize: 11, width: 170, overflow: 'truncate' }),
+          data: r.map(function (x) { return x.name; }) },
+        series: [{ type: 'bar', barWidth: 10,
+          itemStyle: { color: color || mu, borderRadius: 3 },
+          label: { show: true, position: 'right', color: mu, fontSize: 10, fontFamily: font,
+            formatter: function (p) { var x = r[p.dataIndex]; return dur(x.m) + ' · ' + Math.round(x.m * 100 / (s || 1)) + '%'; } },
+          data: r.map(function (x) { return { value: x.m, itemStyle: x.rest ? { color: line } : undefined }; }) }]
+      });
+      box.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+
+    // Rings: one per track, the full circle every minute anything was on.
+    var R = D.rings;
+    var RW = 0.104, RG = 0.016;
+    function ringR(i) { var o = 0.95 - i * RW; return [o - RW + RG, o]; }
+    if (R && R.full) {
+      var days = R.days || 1;
+      var rings = make('c-rings', {
+        animation: false,
+        tooltip: Object.assign({ trigger: 'item', formatter: function (p) {
+          var x = p.data, tr = R.tracks[p.seriesIndex];
+          if (!tr) return '';
+          if (x.gap) return '<b>' + tr.name + '</b><br>nothing on this track ' + dur(x.value) + (D.perDay ? ' (' + dur(x.value / days) + ' a day)' : '');
+          return '<b>' + tr.name + ' · ' + esc(x.name) + '</b><br>' + dur(x.value) + (D.perDay ? ' (' + dur(x.value / days) + ' a day)' : '') +
+            ' · ' + Math.round(x.value * 100 / (tr.m || 1)) + '% of the track' + breakdown(x.top, 6);
+        } }, tip),
+        series: R.tracks.map(function (tr, i) {
+          var used = 0;
+          var data = tr.parts.map(function (p) {
+            used += p.m;
+            return { name: p.name, value: p.m, top: p.top, key: p.key, itemStyle: { color: kcol(i, p.key) } };
+          });
+          data.push({ name: '', value: Math.max(R.full - used, 0), gap: true,
+            itemStyle: { color: line, opacity: 0.35 }, emphasis: { disabled: true } });
+          var r = ringR(i);
+          return { type: 'pie', radius: [r[0] * 100 + '%', r[1] * 100 + '%'], center: ['50%', '50%'], startAngle: 90,
+            clockwise: true, label: { show: false }, labelLine: { show: false },
+            itemStyle: { borderColor: card, borderWidth: 1 }, data: data };
+        }).concat([{
+          type: 'pie', radius: [0, '30%'], center: ['50%', '50%'], silent: true, tooltip: { show: false },
+          label: { show: true, position: 'center', fontFamily: font,
+            formatter: '{a|' + dur(D.perDay ? R.full / days : R.full) + '}\n{b|' + (D.perDay ? 'a day with' : 'with') + '}\n{b|anything on}',
+            rich: { a: { color: fg, fontSize: 16, fontWeight: 700, lineHeight: 22 }, b: { color: mu, fontSize: 10, lineHeight: 13 } } },
+          labelLine: { show: false }, data: [{ value: 1, name: '', itemStyle: { color: 'transparent' } }]
+        }])
+      });
+      if (rings) {
+        // Each ring's name and length where it starts, at 12 o'clock.
+        var W = rings.getWidth(), H = rings.getHeight(), half = Math.min(W, H) / 2;
+        rings.setOption({ graphic: R.tracks.map(function (tr, i) {
+          var r = ringR(i), y = H / 2 - half * (r[0] + r[1]) / 2;
+          return { type: 'text', silent: true, x: W / 2 - 6, y: y, style: {
+            text: tr.name + '  ' + hours(D.perDay ? tr.m / days : tr.m), align: 'right', verticalAlign: 'middle',
+            fill: tr.m ? fg : mu, fontSize: 10, fontFamily: font, backgroundColor: card, padding: [1, 3] } };
+        }) });
+        rings.on('click', function (p) {
+          var tr = R.tracks[p.seriesIndex];
+          if (tr && p.data && !p.data.gap) openDrill('c-rings', tr.name + ' · ' + p.data.name, p.data.top, kcol(p.seriesIndex, p.data.key));
+        });
+      }
+
+      // The 24-hour clock: the same rings around a dial, midnight at the top.
+      var K24 = D.clock;
+      var clock = make('c-clock', { animation: false });
+      if (clock) {
+        var cw = clock.getWidth(), chh = clock.getHeight();
+        var cx = cw / 2, cy = chh / 2, CR = Math.min(cw, chh) / 2 - 22;
+        var ang = function (m) { return -Math.PI / 2 + m / 1440 * 2 * Math.PI; };
+        var band = function (i) { var r = ringR(i); return [CR * r[0], CR * r[1]]; };
+        var g = [];
+        for (var i = 0; i < 6; i++) {
+          var b = band(i);
+          g.push({ type: 'ring', silent: true, shape: { cx: cx, cy: cy, r: b[1], r0: b[0] }, style: { fill: line, opacity: 0.3 } });
+        }
+        for (var h = 0; h < 24; h++) {
+          var a = ang(h * 60), major = h % 6 === 0, r1 = CR + 1, r2 = CR + (major ? 7 : 4);
+          g.push({ type: 'line', silent: true, shape: { x1: cx + r1 * Math.cos(a), y1: cy + r1 * Math.sin(a), x2: cx + r2 * Math.cos(a), y2: cy + r2 * Math.sin(a) },
+            style: { stroke: mu, lineWidth: major ? 1.5 : 1 } });
+          if (h % 3 === 0) {
+            g.push({ type: 'text', silent: true, x: cx + (CR + 15) * Math.cos(a), y: cy + (CR + 15) * Math.sin(a),
+              style: { text: (h < 10 ? '0' : '') + h, align: 'center', verticalAlign: 'middle', fill: major ? fg : mu, fontSize: major ? 11 : 9, fontFamily: font, fontWeight: major ? 700 : 400 } });
+          }
+        }
+        if (K24.now != null) {
+          var an = ang(K24.now), r0 = CR * (ringR(5)[0] - 0.03);
+          g.push({ type: 'line', silent: true, z: 10, shape: { x1: cx + r0 * Math.cos(an), y1: cy + r0 * Math.sin(an), x2: cx + (CR + 4) * Math.cos(an), y2: cy + (CR + 4) * Math.sin(an) },
+            style: { stroke: fg, lineWidth: 2 } });
+          g.push({ type: 'circle', silent: true, z: 10, shape: { cx: cx + (CR + 4) * Math.cos(an), cy: cy + (CR + 4) * Math.sin(an), r: 3.5 }, style: { fill: fg } });
+        }
+        g.push({ type: 'text', silent: true, x: cx, y: cy, style: {
+          text: (K24.now != null ? 'now ' + hhmm(K24.now) : (D.perDay ? '24 h' : 'the day')) + '\n' + (D.perDay ? 'on average' : ''),
+          align: 'center', verticalAlign: 'middle', fill: fg, fontSize: 12, fontWeight: 700, fontFamily: font, lineHeight: 16 } });
+        clock.setOption({
+          tooltip: Object.assign({ trigger: 'item', formatter: function (p) {
+            var x = p.data.value;
+            return '<b>' + K24.names[x[0]] + '</b> · ' + hhmm(x[1]) + '–' + hhmm(Math.min(x[2], 1440)) +
+              '<br>' + esc(x[4]) + (x[5] ? ' · ' + esc(x[5]) : '');
+          } }, tip),
+          graphic: g,
+          series: [{
+            type: 'custom', coordinateSystem: 'none',
+            renderItem: function (params, api) {
+              var x = K24.items[params.dataIndex], b = band(x[0]);
+              return { type: 'sector', shape: { cx: cx, cy: cy, r0: b[0], r: b[1], startAngle: ang(x[1]),
+                endAngle: ang(Math.max(x[2], x[1] + 1.5)), clockwise: true },
+                style: { fill: kcol(x[0], x[3]), opacity: x[6] } };
+            },
+            data: K24.items.map(function (x) { return { value: x }; })
+          }]
+        });
+        clock.on('click', function (p) {
+          var x = p.data && p.data.value;
+          if (!x) return;
+          var tr = R.tracks[x[0]], part = tr && tr.parts.filter(function (q) { return q.key === x[3]; })[0];
+          if (part) openDrill('c-clock', tr.name + ' · ' + part.name + (D.perDay ? '' : ' · the whole day'), part.top, kcol(x[0], x[3]));
+        });
+      }
+    }
+
     // Where the time went: attention inside, a second device outside.
     var d = D.donut;
-    make('c-donut', {
+    var donut = make('c-donut', {
       animation: false,
       tooltip: Object.assign({ trigger: 'item', formatter: function (p) {
         var x = p.data;
         if (p.seriesIndex === 2) return '';
         if (x.gap) return '<b>' + x.with + '</b>: ' + dur(x.value) + ' with nothing else going on';
         if (p.seriesIndex === 1) return '<b>' + x.name + '</b> on a second device<br>while the attention was on ' + x.with + ': ' + dur(x.value);
-        return '<b>' + x.name + '</b> ' + dur(x.value) + ' (' + p.percent + '%)<br>computer ' + dur(x.computer) + ' · phone ' + dur(x.phone);
+        return '<b>' + x.name + '</b> ' + dur(x.value) + ' (' + p.percent + '%)<br>computer ' + dur(x.computer) + ' · phone ' + dur(x.phone) + breakdown((D.drill || {})[x.name], 6);
       } }, tip),
       legend: {
         bottom: 0, icon: 'circle', itemWidth: 9, itemHeight: 9, itemGap: 10,
@@ -101,6 +265,9 @@
         }
       ]
     });
+    if (donut) donut.on('click', function (p) {
+      if (p.seriesIndex === 0) openDrill('c-donut', p.data.name + ' · what filled it', (D.drill || {})[p.data.name], C[p.data.name]);
+    });
 
     // In parallel: the biggest pairs, each bar half one activity, half the other.
     var pairs = (D.pairs || []).slice().reverse();
@@ -126,49 +293,22 @@
       }]
     });
 
-    // Four tracks: computer and phone, screen and sound.
+    // Six tracks over time: lanes for a day, a bar per track per day otherwise.
     var T = D.tracks;
     if (T && T.any) {
-      function tcol(sound, key) { return sound ? lcol(key) : (C[key] || C.other); }
-      // Totals: one bar per track, its colours what filled it.
-      var rows = T.totals.slice().reverse();
-      var seen = {}, tseries = [];
-      rows.forEach(function (r, ri) {
-        r.parts.forEach(function (p) {
-          var id = (r.sound ? 's:' : 'a:') + p.key;
-          if (!(id in seen)) {
-            seen[id] = tseries.length;
-            tseries.push({ type: 'bar', stack: 't', barWidth: 14, name: p.name,
-              itemStyle: { color: p.key ? tcol(r.sound, p.key) : '#7d7c76' }, data: rows.map(function () { return 0; }) });
-          }
-          tseries[seen[id]].data[ri] = p.m;
-        });
-      });
-      make('c-tracks-total', {
-        animation: false,
-        grid: { left: 4, right: 12, top: 2, bottom: 2, containLabel: true },
-        tooltip: Object.assign({ trigger: 'axis', axisPointer: { type: 'shadow' }, formatter: function (ps) {
-          var r = rows[ps[0].dataIndex], out = '<b>' + r.name + '</b> · ' + dur(r.m) + per;
-          ps.forEach(function (p) { if (p.value) out += '<br><span style="color:' + p.color + '">●</span> ' + p.seriesName + ' ' + dur(p.value); });
-          return out;
-        } }, tip),
-        xAxis: { type: 'value', show: false },
-        yAxis: { type: 'category', axisTick: { show: false }, axisLine: { show: false },
-          axisLabel: Object.assign({}, axisText, { color: fg, fontSize: 11 }),
-          data: rows.map(function (r) { return r.name + '  ' + hours(r.m); }) },
-        series: tseries
-      });
       if (D.kind === 'day') {
-        // Lanes: every stretch of a track doing one thing, minute exact.
-        var names = T.names;
+        // Lanes: every stretch minute-exact; keyboard and mouse per ten
+        // minutes, darker for more of it with input.
+        var names = T.names, items = D.clock.items;
         make('c-tracks', {
           animation: false,
           grid: { left: 4, right: 10, top: 4, bottom: 4, containLabel: true },
           tooltip: Object.assign({ trigger: 'item', formatter: function (p) {
             var s = p.value;
-            return '<b>' + names[s[0]] + '</b><br>' + s[4] + ' ' + hhmm(s[1]) + '–' + hhmm(s[2]) + ' (' + dur(s[2] - s[1]) + ')';
+            return '<b>' + names[s[0]] + '</b> · ' + hhmm(s[1]) + '–' + hhmm(Math.min(s[2], 1440)) + ' (' + dur(s[2] - s[1]) + ')<br>' +
+              esc(s[4]) + (s[5] ? ' · ' + esc(s[5]) : '');
           } }, tip),
-          xAxis: { type: 'value', min: 0, max: T.minutes, interval: 360, splitLine: { lineStyle: { color: line, opacity: 0.6 } },
+          xAxis: { type: 'value', min: 0, max: T.minutes, interval: 180, splitLine: { lineStyle: { color: line, opacity: 0.6 } },
             axisLabel: Object.assign({}, axisText, { formatter: function (v) { return hhmm(v).slice(0, 2); } }) },
           yAxis: { type: 'category', inverse: true, data: names, axisTick: { show: false }, axisLine: { show: false },
             axisLabel: Object.assign({}, axisText, { color: fg, fontSize: 11 }) },
@@ -176,19 +316,19 @@
             type: 'custom',
             renderItem: function (params, api) {
               var a = api.coord([api.value(1), api.value(0)]), b = api.coord([api.value(2), api.value(0)]);
-              var h = api.size([0, 1])[1] * 0.62;
-              return { type: 'rect', shape: { x: a[0], y: a[1] - h / 2, width: Math.max(b[0] - a[0], 1), height: h },
-                style: { fill: tcol(api.value(0) % 2 === 1, T.spans[params.dataIndex][3]) } };
+              var h = api.size([0, 1])[1] * 0.62, x = items[params.dataIndex];
+              return { type: 'rect', shape: { x: a[0], y: a[1] - h / 2, width: Math.max(b[0] - a[0], 1.5), height: h },
+                style: { fill: kcol(x[0], x[3]), opacity: x[6] } };
             },
             encode: { x: [1, 2], y: 0 },
-            data: T.spans
+            data: items
           }]
         });
       } else {
-        var TC = ['#3987e5', '#9085e9', '#d95926', '#1db954'];
+        var TC = ['#3987e5', '#9085e9', '#d95926', '#1db954', '#4fb3bf', '#c08a10'];
         var tr = make('c-tracks', {
           animation: false,
-          grid: { left: 4, right: 4, top: 24, bottom: 4, containLabel: true },
+          grid: { left: 4, right: 4, top: 40, bottom: 4, containLabel: true },
           legend: { top: 0, itemWidth: 10, itemHeight: 8, textStyle: { color: mu, fontSize: 10, fontFamily: font } },
           tooltip: Object.assign({ trigger: 'axis', axisPointer: { type: 'shadow' }, formatter: function (ps) {
             var out = '<b>' + ps[0].axisValue + '</b>';
@@ -386,9 +526,24 @@
         label: { show: true, position: 'right', color: mu, fontSize: 10, fontFamily: font, formatter: function (p) { return hours(p.value); } },
         data: pr.map(function (x) { return x.m; }) }]
     });
+    // Code: commits per repository.
+    var cd = D.code && D.code.repos ? D.code.repos.slice().reverse() : [];
+    make('c-code', cd.length ? {
+      animation: false,
+      grid: { left: 4, right: 30, top: 2, bottom: 2, containLabel: true },
+      tooltip: Object.assign({ trigger: 'item', formatter: function (p) { return '<b>' + esc(cd[p.dataIndex].name) + '</b> ' + p.value + ' commits'; } }, tip),
+      xAxis: { type: 'value', show: false },
+      yAxis: { type: 'category', axisTick: { show: false }, axisLine: { show: false },
+        axisLabel: Object.assign({}, axisText, { color: fg, fontSize: 11 }), data: cd.map(function (x) { return x.name; }) },
+      series: [{ type: 'bar', barWidth: 10, itemStyle: { color: '#199e70', borderRadius: 3 },
+        label: { show: true, position: 'right', color: mu, fontSize: 10, fontFamily: font },
+        data: cd.map(function (x) { return x.n; }) }]
+    } : { graphic: [{ type: 'text', left: 'center', top: 'middle', style: { text: 'no commits', fill: mu, fontSize: 12, fontFamily: font } }] });
   }
 
   draw();
   window.addEventListener('timetheme', draw);
-  window.addEventListener('resize', function () { charts.forEach(function (c) { c.resize(); }); });
+  // The rings' and the clock's labels are placed in pixels: redraw, not resize.
+  var redraw = null;
+  window.addEventListener('resize', function () { clearTimeout(redraw); redraw = setTimeout(draw, 150); });
 })();

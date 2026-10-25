@@ -188,9 +188,9 @@ pub fn map_v1_category(c: &str) -> Option<Activity> {
     Some(match c {
         "work_neptune" | "work_husk" | "work_personal" => Activity::Work,
         "kth" => Activity::Study,
-        "comms" => Activity::Comms,
+        "comms" => Activity::Messaging,
         "youtube" | "streaming" | "netflix" => Activity::Video,
-        "twitter" => Activity::Social,
+        "twitter" => Activity::Feeds,
         "browsing" => Activity::Browsing,
         "music" => Activity::Music,
         "other" => Activity::Other,

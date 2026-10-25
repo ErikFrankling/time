@@ -2,7 +2,7 @@
 //!
 //! Every check looks at the last `window` minutes of the merged timeline.
 //! Erik is nudged when at least `threshold` of them were unproductive (video,
-//! social, games by default) and fewer than `productive_floor` minutes had
+//! feeds, games by default) and fewer than `productive_floor` minutes had
 //! anything productive in them: a work or study label, a prompt he sent, a
 //! dictation, a commit. YouTube playing next to real work therefore never
 //! counts against him. Then the guards: quiet hours, a cooldown, a daily cap,
@@ -45,7 +45,7 @@ impl Default for NudgeConfig {
             start_hour: 9,
             end_hour: 18,
             weekdays_only: true,
-            unproductive: vec![Activity::Video, Activity::Social, Activity::Games],
+            unproductive: vec![Activity::Video, Activity::Feeds, Activity::Games],
         }
     }
 }
@@ -186,6 +186,8 @@ mod tests {
             decider: Decider::Rule,
             complete: true,
             location: None,
+            what: None,
+            background_what: None,
         }
     }
 
@@ -213,7 +215,7 @@ mod tests {
     #[test]
     fn a_focus_day_lowers_the_threshold_and_ignores_quiet_hours() {
         let cfg = NudgeConfig::default();
-        let labels: Vec<_> = (0..20).map(|i| label(i, Activity::Social)).collect();
+        let labels: Vec<_> = (0..20).map(|i| label(i, Activity::Feeds)).collect();
         assert!(!assess(&cfg, None, &labels, &BTreeSet::new()).over);
         let focus = Focus {
             until_ms: 10_000 * MINUTE_MS,

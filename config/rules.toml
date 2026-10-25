@@ -1,6 +1,6 @@
 # Time's rule table. First match wins; order matters.
 #
-# Activities: work, study, comms, video, social, browsing, music, games, other.
+# Activities: work, study, messaging, video, feeds, browsing, music, games, other.
 # Anything no rule matches is `unknown` and lands in the inbox; labelling it
 # there adds a rule here. Built from the window classes, titles, hosts and
 # phone packages actually seen in the v1 database (Aug-Oct 2026).
@@ -63,22 +63,23 @@ package = [
   "com.amazon.avod.thirdpartyclient",
 ]
 
-# ---------------------------------------------------------------- social
+# ---------------------------------------------------------------- feeds
+# Content made for scrolling: consumption, not conversation.
 
 [[rule]]
-id = "social.sites"
-activity = "social"
+id = "feeds.sites"
+activity = "feeds"
 host = ["x.com", "twitter.com", "reddit.com", "instagram.com", "tiktok.com", "facebook.com", "linkedin.com", "jodel.com"]
 
 [[rule]]
-id = "social.titles"
-activity = "social"
+id = "feeds.titles"
+activity = "feeds"
 class = ["firefox", "zen*", "helium", "google-chrome", "chromium*", "brave-browser"]
-title = "(?i)( / x( —|$)| on x: |home / x|explore / x|\\| linkedin|\\breddit\\b|instagram|tiktok|4chan)"
+title = "(?i)(^(\\(\\d+\\) )?x( —| -|$)| / x( —|$)| on x: |home / x|explore / x|\\| linkedin|\\breddit\\b|instagram|tiktok|4chan)"
 
 [[rule]]
-id = "social.phone"
-activity = "social"
+id = "feeds.phone"
+activity = "feeds"
 package = [
   "com.twitter.android", "com.instagram.android", "com.zhiliaoapp.musically",
   "com.linkedin.android", "com.tellm.android.app", "com.reddit.frontpage",
@@ -86,26 +87,27 @@ package = [
 ]
 
 [[rule]]
-id = "social.grok"
-activity = "social"
+id = "feeds.grok"
+activity = "feeds"
 class = ["grok-bot"]
 
-# ---------------------------------------------------------------- comms
+# ---------------------------------------------------------------- messaging
+# Talking with people: communication, not consumption.
 
 [[rule]]
-id = "comms.desktop"
-activity = "comms"
+id = "messaging.desktop"
+activity = "messaging"
 class = ["webcord", "discord", "vesktop", "thunderbird", "Slack", "signal", "org.telegram.desktop"]
 
 [[rule]]
-id = "comms.titles"
-activity = "comms"
+id = "messaging.titles"
+activity = "messaging"
 class = ["firefox", "zen*", "helium", "google-chrome", "chromium*", "brave-browser"]
 title = "(?i)(microsoft teams|\\bmail -|outlook|gmail|whatsapp|messenger|meet –|google meet|discord)"
 
 [[rule]]
-id = "comms.phone"
-activity = "comms"
+id = "messaging.phone"
+activity = "messaging"
 package = [
   "com.snapchat.android", "com.discord", "com.whatsapp", "com.google.android.apps.messaging",
   "com.google.android.dialer", "com.microsoft.teams", "com.microsoft.office.outlook", "com.Slack", "com.facebook.orca",
@@ -172,7 +174,7 @@ class = [
 id = "work.browser-tools"
 activity = "work"
 class = ["firefox", "zen*", "helium", "google-chrome", "chromium*", "brave-browser", "agent-*"]
-title = "(?i)(t3 code|github|pull requests?|issues? ·|new issue|grafana|claude|chatgpt|openrouter|google (docs|dokument)|brand hub|localhost|sillytavern|time — today)"
+title = "(?i)(t3 code|github|pull requests?|issues? ·|new issue|grafana|claude|chatgpt|openrouter|google (docs|dokument)|brand hub|localhost|sillytavern|time — today|^time · \\d{4}-)"
 
 [[rule]]
 id = "work.sites"

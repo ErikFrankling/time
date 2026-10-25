@@ -27,9 +27,16 @@ pub enum Place {
 pub enum Activity {
     Work,
     Study,
-    Comms,
+    /// Talking with people: Discord, Messenger, Signal, mail, Teams.
+    /// Was `comms`; the old name still parses.
+    #[serde(alias = "comms")]
+    Messaging,
     Video,
-    Social,
+    /// Feeds made for scrolling: X, Reddit, Instagram, LinkedIn, TikTok.
+    /// Content consumption, not conversation. Was `social`; the old name
+    /// still parses.
+    #[serde(alias = "social")]
+    Feeds,
     Browsing,
     Music,
     Games,
@@ -42,9 +49,9 @@ impl Activity {
     pub const ALL: [Activity; 10] = [
         Activity::Work,
         Activity::Study,
-        Activity::Comms,
+        Activity::Messaging,
         Activity::Video,
-        Activity::Social,
+        Activity::Feeds,
         Activity::Browsing,
         Activity::Music,
         Activity::Games,
@@ -56,9 +63,9 @@ impl Activity {
         match self {
             Activity::Work => "work",
             Activity::Study => "study",
-            Activity::Comms => "comms",
+            Activity::Messaging => "messaging",
             Activity::Video => "video",
-            Activity::Social => "social",
+            Activity::Feeds => "feeds",
             Activity::Browsing => "browsing",
             Activity::Music => "music",
             Activity::Games => "games",
@@ -83,6 +90,12 @@ impl FromStr for Activity {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // Names from before the split, in rules files and stored labels.
+        let s = match s {
+            "social" => "feeds",
+            "comms" => "messaging",
+            s => s,
+        };
         Activity::ALL
             .into_iter()
             .find(|a| a.as_str() == s)
@@ -132,6 +145,14 @@ pub struct MinuteLabel {
     /// `Wi-Fi <name>`. None when no device said.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub location: Option<String>,
+    /// What filled the minute, so a category can be opened up: the site
+    /// (`x.com`) for a browser, else the program (`discord`), or the
+    /// phone app's name (`Instagram`). None when away.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub what: Option<String>,
+    /// The same for `background`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_what: Option<String>,
 }
 
 /// Why an away minute was away. Never an activity: it is what the data
@@ -212,5 +233,12 @@ mod tests {
             );
         }
         assert!("twitter".parse::<Activity>().is_err());
+        // The names from before social and comms were split up.
+        assert_eq!("social".parse::<Activity>().unwrap(), Activity::Feeds);
+        assert_eq!("comms".parse::<Activity>().unwrap(), Activity::Messaging);
+        assert_eq!(
+            serde_json::from_str::<Activity>("\"comms\"").unwrap(),
+            Activity::Messaging
+        );
     }
 }

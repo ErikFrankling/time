@@ -292,7 +292,7 @@ mod tests {
 
         [[rule]]
         id = "phone.x"
-        activity = "social"
+        activity = "feeds"
         source = "phone"
         package = ["com.twitter.android"]
 
@@ -362,7 +362,7 @@ mod tests {
             package: Some("com.twitter.android"),
             ..Default::default()
         };
-        assert_eq!(s.classify(&phone).unwrap().activity, Activity::Social);
+        assert_eq!(s.classify(&phone).unwrap().activity, Activity::Feeds);
         let desktop = Facts {
             source: Some(Source::Desktop),
             ..phone

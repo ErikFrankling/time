@@ -357,6 +357,8 @@ mod tests {
             decider: Decider::Rule,
             complete: true,
             location: None,
+            what: None,
+            background_what: None,
         }
     }
 

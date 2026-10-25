@@ -6,7 +6,7 @@
 //! Everything here is a pure function of minute labels and events, so it is
 //! tested without a server. Which activities count as productive or
 //! unproductive comes from `[mcp]` in `config.toml` ([`McpConfig`]); the rest
-//! is neutral (gaming, music, browsing, comms, ...).
+//! is neutral (gaming, music, browsing, messaging, ...).
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -1052,6 +1052,8 @@ mod tests {
             decider: Decider::Rule,
             complete: true,
             location: None,
+            what: None,
+            background_what: None,
         }
     }
 
@@ -1221,8 +1223,8 @@ mod tests {
     #[test]
     fn phone_minutes_name_the_app() {
         let labels = vec![
-            label(0, Some(Activity::Social), "phone"),
-            label(1, Some(Activity::Social), "phone"),
+            label(0, Some(Activity::Feeds), "phone"),
+            label(1, Some(Activity::Feeds), "phone"),
         ];
         let events = vec![Envelope::new(
             "phone",
@@ -1248,8 +1250,8 @@ mod tests {
     #[test]
     fn timeline_merges_runs_and_cuts_blips() {
         let (mut labels, events) = morning();
-        // A one-minute blip of comms inside the work stretch.
-        labels[10] = label(10, Some(Activity::Comms), "pc");
+        // A one-minute blip of messaging inside the work stretch.
+        labels[10] = label(10, Some(Activity::Messaging), "pc");
         let w = Window {
             label: "last 1h".into(),
             from_ms: T0,

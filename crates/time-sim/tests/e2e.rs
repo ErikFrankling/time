@@ -350,7 +350,10 @@ fn the_day_page_and_api_show_the_morning() {
     for needle in [
         "Wed 21 Oct",
         "Minute by minute",
-        "Where the time went",
+        "Where the attention went",
+        "Every track at once",
+        "Around the clock",
+        r#""drill":{"#,
         "/assets/echarts-5.6.0.min.js",
         r#"class="on" aria-current="page">Day</a>"#,
         r#""total":3000"#,
@@ -360,6 +363,13 @@ fn the_day_page_and_api_show_the_morning() {
         assert!(html.contains(needle), "day page lacks {needle:?}");
     }
     assert_eq!(w.get("/day/yesterday").unwrap().0, 400);
+    let (code, json) = w.get("/api/interactivity/2026-10-21").unwrap();
+    assert_eq!(code, 200);
+    assert!(json.contains(r#""chunk_minutes":10"#), "{json}");
+    assert!(
+        json.contains(r#""from":"09:40""#),
+        "typing from 09:40: {json}"
+    );
 }
 
 #[test]

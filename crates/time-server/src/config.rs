@@ -59,13 +59,13 @@ pub struct Config {
 }
 
 /// How the agent-facing summaries judge a minute. Erik's call (2026-10-23):
-/// video and social feeds are unproductive, gaming is fine (neutral), and
+/// video and feeds are unproductive, gaming is fine (neutral), and
 /// this is meant to be tuned, so it lives in `config.toml`:
 ///
 /// ```toml
 /// [mcp]
 /// productive = ["work", "study"]
-/// unproductive = ["video", "social"]
+/// unproductive = ["video", "feeds"]
 /// ```
 #[derive(Debug, Clone, PartialEq, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields, default)]
@@ -78,7 +78,7 @@ impl Default for McpConfig {
     fn default() -> Self {
         Self {
             productive: vec![Activity::Work, Activity::Study],
-            unproductive: vec![Activity::Video, Activity::Social],
+            unproductive: vec![Activity::Video, Activity::Feeds],
         }
     }
 }

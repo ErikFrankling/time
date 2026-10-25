@@ -40,7 +40,7 @@ use crate::rules::{Facts, RuleSet, Source};
 /// Bump whenever a change here can change a label. Stored labels carry it,
 /// and the server relabels all history when it differs, exactly as it does
 /// when the rules file changes.
-pub const LOGIC_VERSION: u32 = 5;
+pub const LOGIC_VERSION: u32 = 6;
 
 /// Input this recent at the end of a minute means someone was there.
 const RECENT_INPUT_SECS: u32 = 90;
@@ -77,6 +77,8 @@ struct Observation<'e> {
     rule: String,
     project: Option<String>,
     class: &'e str,
+    /// What filled it, for drilling into a category: site, program or app.
+    what: String,
 }
 
 /// Label every minute in `[from, to)`.
@@ -174,6 +176,11 @@ pub fn label_minutes(
                     rule,
                     project,
                     class: "",
+                    what: if app.label.is_empty() {
+                        app.package.clone()
+                    } else {
+                        app.label.clone()
+                    },
                 });
             }
         }
@@ -204,6 +211,8 @@ pub fn label_minutes(
                 decider: Decider::Presence,
                 complete,
                 location: None,
+                what: None,
+                background_what: None,
             },
             Some(p) => {
                 let mut project = p.project.clone();
@@ -253,6 +262,8 @@ pub fn label_minutes(
                     decider: Decider::Rule,
                     complete,
                     location: None,
+                    what: Some(p.what.clone()).filter(|w| !w.is_empty()),
+                    background_what: parallel.map(|o| o.what.clone()).filter(|w| !w.is_empty()),
                 }
             }
         };
@@ -302,7 +313,97 @@ fn observe_screen<'e>(
         rule,
         project,
         class: &m.window_class,
+        what: screen_what(m),
     }
+}
+
+/// What a computer minute showed, by the name a person would use: the site
+/// for a browser tab, else the program.
+fn screen_what(m: &ScreenMinute) -> String {
+    if m.blocked {
+        return "(private window)".into();
+    }
+    match m.browser_host.as_deref() {
+        Some(h) if !h.is_empty() => h.strip_prefix("www.").unwrap_or(h).to_owned(),
+        // A browser whose tab the extension did not report: its title says
+        // more than "firefox" does.
+        _ if is_browser(&m.window_class) && !m.window_title.trim().is_empty() => {
+            tab_title(&m.window_title)
+        }
+        _ => m.window_class.clone(),
+    }
+}
+
+fn is_browser(class: &str) -> bool {
+    let c = class.to_ascii_lowercase();
+    ["firefox", "zen", "chrom", "brave", "helium"]
+        .iter()
+        .any(|b| c.contains(b))
+}
+
+/// The site a tab title gives away, for the sites Erik uses most, so a
+/// minute without the browser extension still says `x.com`.
+fn site_of_title(t: &str) -> Option<&'static str> {
+    let l = t.to_lowercase();
+    let bare = l
+        .strip_prefix('(')
+        .and_then(|r| r.split_once(") "))
+        .map_or(l.as_str(), |(_, rest)| rest);
+    let site = if bare == "x" || l.ends_with(" / x") || l.contains(" on x: ") {
+        "x.com"
+    } else if l.ends_with(" - youtube") || bare == "youtube" {
+        "youtube.com"
+    } else if l.contains("reddit") {
+        "reddit.com"
+    } else if l.ends_with("| linkedin") || bare == "linkedin" || bare.starts_with("feed | linkedin")
+    {
+        "linkedin.com"
+    } else if l.contains("instagram") {
+        "instagram.com"
+    } else if l.contains("discord") {
+        "discord.com"
+    } else if l.contains("netflix") {
+        "netflix.com"
+    } else if l.contains("gmail") {
+        "mail.google.com"
+    } else if l.contains("messenger") {
+        "messenger.com"
+    } else {
+        return None;
+    };
+    Some(site)
+}
+
+/// A tab title without the browser's own name, kept short.
+fn tab_title(title: &str) -> String {
+    let mut t = title.trim();
+    // "Article — Original profile — Mozilla Firefox": the browser, then
+    // its profile.
+    let mut again = true;
+    while again {
+        again = false;
+        for sep in [" — ", " - "] {
+            if let Some((head, tail)) = t.rsplit_once(sep) {
+                let tail = tail.to_ascii_lowercase();
+                if ["firefox", "zen", "chrom", "brave", "helium", "profile"]
+                    .iter()
+                    .any(|b| tail.contains(b))
+                {
+                    t = head.trim();
+                    again = true;
+                    break;
+                }
+            }
+        }
+    }
+    if let Some(site) = site_of_title(t) {
+        return site.to_owned();
+    }
+    let mut out: String = t.chars().take(60).collect();
+    if t.chars().count() > 60 {
+        out.push('…');
+    }
+    format!("tab: {out}")
 }
 
 fn decide(rules: &RuleSet, f: &Facts) -> (Activity, String, Option<String>) {
@@ -451,7 +552,7 @@ mod tests {
         host = ["netflix.com"]
         [[rule]]
         id = "phone.x"
-        activity = "social"
+        activity = "feeds"
         package = ["com.twitter.android"]
         [[rule]]
         id = "work.t3"
@@ -527,10 +628,7 @@ mod tests {
             }),
         );
         let l = label(&[screen(T, youtube()), phone]);
-        assert_eq!(
-            (l.place, l.activity),
-            (Place::Phone, Some(Activity::Social))
-        );
+        assert_eq!((l.place, l.activity), (Place::Phone, Some(Activity::Feeds)));
         assert_eq!(l.background, Some(Activity::Video));
     }
 
@@ -559,7 +657,7 @@ mod tests {
         // ...and the phone in hand is the minute's parallel activity.
         assert_eq!(
             (l.background, l.background_device.as_deref()),
-            (Some(Activity::Social), Some("phone"))
+            (Some(Activity::Feeds), Some("phone"))
         );
     }
 
@@ -732,6 +830,37 @@ mod tests {
         };
         let l = label(&[screen(T, typing), steps(2107)]);
         assert_eq!(l.activity, Some(Activity::Work));
+    }
+
+    #[test]
+    fn a_minute_says_what_filled_it() {
+        let m = |class: &str, host: Option<&str>, title: &str| ScreenMinute {
+            window_class: class.into(),
+            browser_host: host.map(Into::into),
+            window_title: title.into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            screen_what(&m("firefox", Some("www.x.com"), "Home / X")),
+            "x.com"
+        );
+        assert_eq!(
+            screen_what(&m("firefox", None, "Some article — Mozilla Firefox")),
+            "tab: Some article"
+        );
+        assert_eq!(
+            screen_what(&m("firefox", None, "(1) X — Original profile")),
+            "x.com"
+        );
+        assert_eq!(
+            screen_what(&m(
+                "firefox",
+                None,
+                "Yuchen Jin on X: \"GPUs\" / X — Mozilla Firefox"
+            )),
+            "x.com"
+        );
+        assert_eq!(screen_what(&m("webcord", None, "Discord")), "webcord");
     }
 
     #[test]

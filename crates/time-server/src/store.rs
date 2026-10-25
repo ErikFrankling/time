@@ -60,7 +60,23 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE minute ADD COLUMN location TEXT;",
     // 4: which device the parallel activity was on.
     "ALTER TABLE minute ADD COLUMN background_device TEXT;",
+    // 5: what filled the minute (site, program, phone app), for drill-downs.
+    "ALTER TABLE minute ADD COLUMN what TEXT;
+     ALTER TABLE minute ADD COLUMN background_what TEXT;",
 ];
+
+/// One computer minute of input counts (never which keys).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct InputMinute {
+    pub ts: Millis,
+    /// Key presses, mouse buttons included.
+    pub keys: u32,
+    pub clicks: u32,
+    /// Pointer motion events.
+    pub mouse: u32,
+    /// Seconds with any input; None from agents that did not count them.
+    pub active_seconds: Option<u32>,
+}
 
 pub struct Store {
     conn: Mutex<Connection>,
@@ -360,13 +376,14 @@ impl Store {
         let tx = conn.transaction()?;
         {
             let mut up = tx.prepare_cached(
-                "INSERT INTO minute (ts, place, device, activity, project, background, rule, decider, complete, rules_version, computed_ms, location, background_device)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                "INSERT INTO minute (ts, place, device, activity, project, background, rule, decider, complete, rules_version, computed_ms, location, background_device, what, background_what)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
                  ON CONFLICT(ts) DO UPDATE SET place = excluded.place, device = excluded.device,
                     activity = excluded.activity, project = excluded.project, background = excluded.background,
                     rule = excluded.rule, decider = excluded.decider, complete = excluded.complete,
                     rules_version = excluded.rules_version, computed_ms = excluded.computed_ms,
-                    location = excluded.location, background_device = excluded.background_device",
+                    location = excluded.location, background_device = excluded.background_device,
+                    what = excluded.what, background_what = excluded.background_what",
             )?;
             let mut done = tx.prepare_cached("DELETE FROM dirty WHERE ts = ?1")?;
             for l in labels {
@@ -384,6 +401,8 @@ impl Store {
                     computed_ms,
                     l.location,
                     l.background_device,
+                    l.what,
+                    l.background_what,
                 ])?;
                 done.execute([l.ts])?;
             }
@@ -434,10 +453,80 @@ impl Store {
         Ok(out)
     }
 
+    /// Keyboard and pointer counts per computer minute starting in
+    /// `[from, to)`, read straight out of the JSON so a month stays cheap.
+    pub fn input_between(&self, from: Millis, to: Millis) -> Result<Vec<InputMinute>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT start_ms,
+                    COALESCE(json_extract(body, '$.keys'), 0),
+                    COALESCE(json_extract(body, '$.clicks'), 0),
+                    COALESCE(json_extract(body, '$.mouse'), 0),
+                    json_extract(body, '$.\"active.seconds\"')
+             FROM event WHERE name = 'time.screen.minute' AND start_ms >= ?1 AND start_ms < ?2
+             ORDER BY start_ms",
+        )?;
+        let rows = stmt.query_map([from, to], |r| {
+            Ok(InputMinute {
+                ts: r.get(0)?,
+                keys: r.get::<_, i64>(1)?.max(0) as u32,
+                clicks: r.get::<_, i64>(2)?.max(0) as u32,
+                mouse: r.get::<_, i64>(3)?.max(0) as u32,
+                active_seconds: r.get::<_, Option<i64>>(4)?.map(|s| s.clamp(0, 60) as u32),
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Events by name overlapping `[from, to)`, for the small kinds (voice,
+    /// code) that a period view needs without the whole event table.
+    pub fn named_between(&self, names: &[&str], from: Millis, to: Millis) -> Result<Vec<Envelope>> {
+        let conn = self.conn();
+        let marks = vec!["?"; names.len()].join(",");
+        let mut stmt = conn.prepare(&format!(
+            "SELECT id, name, device, service, start_ms, end_ms, body FROM event
+             WHERE name IN ({marks}) AND start_ms < ?{} AND end_ms >= ?{}
+             ORDER BY start_ms",
+            names.len() + 1,
+            names.len() + 2
+        ))?;
+        let mut args: Vec<rusqlite::types::Value> = names
+            .iter()
+            .map(|n| rusqlite::types::Value::Text((*n).to_owned()))
+            .collect();
+        args.push(rusqlite::types::Value::Integer(to));
+        args.push(rusqlite::types::Value::Integer(from));
+        let rows = stmt.query_map(rusqlite::params_from_iter(args), |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, Millis>(4)?,
+                r.get::<_, Millis>(5)?,
+                r.get::<_, String>(6)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, device, service, start_ms, end_ms, body) = row?;
+            if let Ok(event) = serde_json::from_str::<Event>(&body) {
+                out.push(Envelope {
+                    id,
+                    device,
+                    service,
+                    start_ms,
+                    end_ms,
+                    event,
+                });
+            }
+        }
+        Ok(out)
+    }
+
     pub fn labels_between(&self, from: Millis, to: Millis) -> Result<Vec<MinuteLabel>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT ts, place, device, activity, project, background, rule, decider, complete, location, background_device
+            "SELECT ts, place, device, activity, project, background, rule, decider, complete, location, background_device, what, background_what
              FROM minute WHERE ts >= ?1 AND ts < ?2 ORDER BY ts",
         )?;
         let rows = stmt.query_map([from, to], |r| {
@@ -455,6 +544,8 @@ impl Store {
                     r.get::<_, Option<String>>(9)?,
                 ),
                 r.get::<_, Option<String>>(10)?,
+                r.get::<_, Option<String>>(11)?,
+                r.get::<_, Option<String>>(12)?,
             ))
         })?;
         let mut out = Vec::new();
@@ -473,6 +564,8 @@ impl Store {
                     location,
                 ),
                 background_device,
+                what,
+                background_what,
             ) = row?;
             out.push(MinuteLabel {
                 ts,
@@ -492,6 +585,8 @@ impl Store {
                 decider: parse_enum(&decider)?,
                 complete,
                 location,
+                what,
+                background_what,
             });
         }
         Ok(out)

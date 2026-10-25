@@ -14,13 +14,14 @@ questions and the go-live runbook: [PROPOSAL.md](PROPOSAL.md).
 ```
 pc / laptop: time-agent (screen, input, audio, browser tab)
              time-collect (git commits, GitHub PRs and reviews)
-             T3 Code, dictation (planned, M7)            phone: Android app
+             time-collect (T3 Code; speak read-aloud and hotkey dictation)   phone: Android app
         │ OTLP/HTTP JSON, one event per fact                │
         └───────────► gateway Alloy (homelab) ◄─────────────┘
                          │
                          ▼
                time-server: events (SQLite) → rules → one label a minute
-               website: /  /week  /inbox  /status  /app ; /metrics, /healthz
+               website: /  /week  /month  /inbox  /status  /app ; /metrics, /healthz
+               api: /api/day/<date>, /api/interactivity/<date> (keyboard and mouse per 10 min)
 ```
 
 Everything stored is an event with a stable id; minutes are derived and

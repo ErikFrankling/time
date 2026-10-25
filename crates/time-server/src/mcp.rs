@@ -26,7 +26,7 @@ use crate::{digest, AppState};
 const SUPPORTED_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
 const INSTRUCTIONS: &str = "Time records what Erik does on his devices (computers and phone) and labels every minute. \
-Use time_now to see what he is doing right now and whether it is unproductive (video, social feeds; gaming counts as neutral), \
+Use time_now to see what he is doing right now and whether it is unproductive (video, feeds like X and Reddit; gaming counts as neutral), \
 time_summary for minutes per category over today or the last N hours, time_timeline for the blocks, time_listening for what he listened to (Spotify, YouTube, ...) by audible minutes. \
 Every result starts with a one-paragraph summary followed by the JSON. Minutes of 'away' mean no device was in use.";
 
@@ -48,7 +48,7 @@ pub fn tools() -> Value {
         {
             "name": "time_summary",
             "title": "Time summary for a window",
-            "description": "Minutes per category for a window (today so far, the last N hours), the top apps and sites, projects, and productive vs unproductive vs neutral totals. Which categories are unproductive is configured on the server (video and social by default; gaming is neutral).",
+            "description": "Minutes per category for a window (today so far, the last N hours), the top apps and sites, projects, and productive vs unproductive vs neutral totals. Which categories are unproductive is configured on the server (video and feeds by default; gaming is neutral).",
             "inputSchema": {
                 "type": "object",
                 "properties": {"window": window("today")},

@@ -32,10 +32,12 @@ pub struct Day {
     pub code: CodeTotals,
     pub signals: Signals,
     pub modalities: Modalities,
+    /// Keyboard and mouse per ten minutes, chunks with no input left out.
+    pub interactivity: Vec<crate::tracks::Chunk>,
 }
 
 /// What was shipped that day, from git and GitHub.
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, Clone, Serialize)]
 pub struct CodeTotals {
     pub commits: u32,
     pub lines_added: u32,
@@ -44,15 +46,20 @@ pub struct CodeTotals {
     pub prs_merged: u32,
     pub reviews: u32,
     pub repos: Vec<String>,
+    /// Commits per repository.
+    pub commits_by_repo: BTreeMap<String, u32>,
 }
 
 impl CodeTotals {
-    fn add(&mut self, e: &Event) {
+    pub const EVENTS: [&str; 3] = ["github.commit", "github.pr", "github.review"];
+
+    pub fn add(&mut self, e: &Event) {
         let repo = match e {
             Event::Commit(c) => {
                 self.commits += 1;
                 self.lines_added += c.lines_added;
                 self.lines_removed += c.lines_removed;
+                *self.commits_by_repo.entry(c.repo.clone()).or_default() += 1;
                 &c.repo
             }
             Event::PullRequest(p) if p.action == "opened" => {
@@ -71,6 +78,23 @@ impl CodeTotals {
         };
         if !self.repos.contains(repo) {
             self.repos.push(repo.clone());
+        }
+    }
+
+    pub fn merge(&mut self, o: &CodeTotals) {
+        self.commits += o.commits;
+        self.lines_added += o.lines_added;
+        self.lines_removed += o.lines_removed;
+        self.prs_opened += o.prs_opened;
+        self.prs_merged += o.prs_merged;
+        self.reviews += o.reviews;
+        for r in &o.repos {
+            if !self.repos.contains(r) {
+                self.repos.push(r.clone());
+            }
+        }
+        for (r, n) in &o.commits_by_repo {
+            *self.commits_by_repo.entry(r.clone()).or_default() += n;
         }
     }
 
@@ -164,6 +188,18 @@ pub fn summarise(store: &Store, tz: chrono_tz::Tz, date: NaiveDate) -> anyhow::R
     let day_events = store.events_between(start_ms, end_ms)?;
     let signals = signals(&minutes, &day_events, start_ms, end_ms);
     let modalities = modalities(&day_events, start_ms, end_ms);
+    let input = store.input_between(start_ms, end_ms)?;
+    let interactivity = crate::tracks::Tracks::build(
+        &[],
+        std::iter::empty(),
+        &input,
+        &[],
+        &[],
+        tz,
+        start_ms,
+        end_ms,
+    )
+    .chunks;
     for e in day_events {
         if e.start_ms >= start_ms && e.start_ms < end_ms {
             code.add(&e.event);
@@ -200,6 +236,7 @@ pub fn summarise(store: &Store, tz: chrono_tz::Tz, date: NaiveDate) -> anyhow::R
         code,
         signals,
         modalities,
+        interactivity,
     })
 }
 

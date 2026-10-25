@@ -47,6 +47,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/month", get(this_month_html))
         .route("/month/{date}", get(month_html))
         .route("/api/day/{date}", get(day_json))
+        .route("/api/interactivity/{date}", get(interactivity_json))
         .route("/api/now", get(api_now))
         .route("/api/summary", get(api_summary))
         .route("/api/summary/line", get(api_summary_line))
@@ -261,7 +262,14 @@ async fn period_html(
     let phones = phones(&state);
     let goal = state.config.step_goal;
     let r = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
-        let cur = crate::views::summarise(&state.store, tz, period, &phones, today)?;
+        let mut cur = crate::views::summarise(&state.store, tz, period, &phones, today)?;
+        if period.contains(today) {
+            use chrono::{TimeZone, Timelike};
+            cur.now_min = tz
+                .timestamp_millis_opt(state.clock.now_ms())
+                .single()
+                .map(|t| t.hour() * 60 + t.minute());
+        }
         let prev = crate::views::summarise(&state.store, tz, period.prev(), &phones, today)?;
         Ok(match kind {
             Kind::Day => {
@@ -318,6 +326,28 @@ async fn day_json(
 ) -> Response {
     match load_day(state, Some(date)).await {
         Ok((day, _)) => Json(day).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+/// Keyboard and mouse in ten-minute chunks: counts only, never which keys.
+async fn interactivity_json(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(date): axum::extract::Path<String>,
+) -> Response {
+    match load_day(state, Some(date)).await {
+        Ok((day, _)) => {
+            let active: u32 = day.interactivity.iter().map(|c| c.active_seconds).sum();
+            Json(serde_json::json!({
+                "date": day.date,
+                "chunk_minutes": crate::tracks::SLOT_MIN,
+                "active_seconds": active,
+                "key_presses": day.interactivity.iter().map(|c| c.keys).sum::<u32>(),
+                "clicks": day.interactivity.iter().map(|c| c.clicks).sum::<u32>(),
+                "chunks": day.interactivity,
+            }))
+            .into_response()
+        }
         Err(e) => e.into_response(),
     }
 }
