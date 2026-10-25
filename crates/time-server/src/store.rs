@@ -63,6 +63,51 @@ const MIGRATIONS: &[&str] = &[
     // 5: what filled the minute (site, program, phone app), for drill-downs.
     "ALTER TABLE minute ADD COLUMN what TEXT;
      ALTER TABLE minute ADD COLUMN background_what TEXT;",
+    // 6: what the rules and the decision model derived on top of minutes:
+    // gaps filled with the activity around them, a night's sleep, and every
+    // question put to the model with its answer (the cache and the log).
+    "CREATE TABLE decision (
+        id            INTEGER PRIMARY KEY,
+        kind          TEXT NOT NULL,
+        key           TEXT NOT NULL,
+        input_hash    TEXT NOT NULL,
+        model         TEXT NOT NULL,
+        prompt        TEXT NOT NULL,
+        answer        TEXT,
+        error         TEXT,
+        input_tokens  INTEGER,
+        output_tokens INTEGER,
+        created_ms    INTEGER NOT NULL
+     );
+     CREATE INDEX decision_key ON decision(kind, key, input_hash);
+     CREATE TABLE fill (
+        start_ms    INTEGER PRIMARY KEY,
+        end_ms      INTEGER NOT NULL,
+        place       TEXT NOT NULL,
+        device      TEXT NOT NULL,
+        activity    TEXT NOT NULL,
+        what        TEXT,
+        project     TEXT,
+        confidence  REAL NOT NULL,
+        source      TEXT NOT NULL,
+        reason      TEXT NOT NULL,
+        decision_id INTEGER,
+        computed_ms INTEGER NOT NULL
+     );
+     CREATE TABLE sleep (
+        night              TEXT PRIMARY KEY,
+        fell_asleep_ms     INTEGER,
+        woke_up_ms         INTEGER,
+        interruptions      TEXT NOT NULL,
+        confidence         REAL,
+        reason             TEXT NOT NULL,
+        source             TEXT NOT NULL,
+        candidate_start_ms INTEGER,
+        candidate_end_ms   INTEGER,
+        decision_id        INTEGER,
+        final              INTEGER NOT NULL,
+        computed_ms        INTEGER NOT NULL
+     );",
 ];
 
 /// One computer minute of input counts (never which keys).
@@ -523,7 +568,92 @@ impl Store {
         Ok(out)
     }
 
+    /// What each minute was, as the website and the agents see it: the
+    /// labels with gaps filled and the night's sleep marked. The raw
+    /// labels are [`Self::raw_labels_between`].
     pub fn labels_between(&self, from: Millis, to: Millis) -> Result<Vec<MinuteLabel>> {
+        let mut labels = self.raw_labels_between(from, to)?;
+        time_core::fill::overlay(&mut labels, &self.fills_between(from, to)?);
+        for (a, b) in self.sleep_between(from, to)? {
+            for l in labels.iter_mut().filter(|l| l.ts >= a && l.ts < b) {
+                if l.place == time_core::label::Place::Away && l.rule != "presence.moving" {
+                    l.rule = "presence.sleep".into();
+                }
+            }
+        }
+        Ok(labels)
+    }
+
+    /// Gap fills overlapping `[from, to)`.
+    pub fn fills_between(&self, from: Millis, to: Millis) -> Result<Vec<time_core::fill::Fill>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare_cached(
+            "SELECT start_ms, end_ms, place, device, activity, what, project, confidence, source, reason
+             FROM fill WHERE end_ms > ?1 AND start_ms < ?2 ORDER BY start_ms",
+        )?;
+        let rows = stmt.query_map([from, to], |r| {
+            Ok((
+                r.get::<_, Millis>(0)?,
+                r.get::<_, Millis>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, Option<String>>(5)?,
+                r.get::<_, Option<String>>(6)?,
+                r.get::<_, f64>(7)?,
+                r.get::<_, String>(8)?,
+                r.get::<_, String>(9)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (
+                start_ms,
+                end_ms,
+                place,
+                device,
+                activity,
+                what,
+                project,
+                confidence,
+                source,
+                reason,
+            ) = row?;
+            out.push(time_core::fill::Fill {
+                start_ms,
+                end_ms,
+                place: parse_enum(&place)?,
+                device,
+                activity: activity.parse().map_err(anyhow::Error::msg)?,
+                what,
+                project,
+                confidence: confidence as f32,
+                source: parse_enum(&source)?,
+                reason,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Sleep `[fell asleep, woke up)` overlapping `[from, to)`.
+    pub fn sleep_between(&self, from: Millis, to: Millis) -> Result<Vec<(Millis, Millis)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare_cached(
+            "SELECT fell_asleep_ms, woke_up_ms FROM sleep
+             WHERE fell_asleep_ms IS NOT NULL AND woke_up_ms > ?1 AND fell_asleep_ms < ?2
+             ORDER BY fell_asleep_ms",
+        )?;
+        let rows = stmt.query_map([from, to], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Run `f` on the connection: for the derived tables in `derive`.
+    pub fn with<T>(&self, f: impl FnOnce(&mut Connection) -> Result<T>) -> Result<T> {
+        f(&mut self.conn())
+    }
+
+    /// The labels exactly as the rules made them, minute by minute.
+    pub fn raw_labels_between(&self, from: Millis, to: Millis) -> Result<Vec<MinuteLabel>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
             "SELECT ts, place, device, activity, project, background, rule, decider, complete, location, background_device, what, background_what

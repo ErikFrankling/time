@@ -160,6 +160,10 @@ impl World {
             rules: None,
             classify_every_secs: 10,
             step_goal: 10_000,
+            decide: time_server::config::DecideConfig {
+                enabled: false,
+                ..Default::default()
+            },
             timezone: "Europe/Stockholm".into(),
             apk_repo: "ErikFrankling/time".into(),
             apk_path: None,

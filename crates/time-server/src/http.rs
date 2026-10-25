@@ -53,6 +53,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/summary/line", get(api_summary_line))
         .route("/api/timeline", get(api_timeline))
         .route("/api/listening", get(api_listening))
+        .route("/api/sleep", get(api_sleep))
+        .route("/api/spans/{date}", get(api_spans))
+        .route("/api/decisions", get(api_decisions))
         .route(
             "/mcp",
             post(crate::mcp::post)
@@ -238,6 +241,7 @@ async fn period_html(
     state: Arc<AppState>,
     kind: crate::views::Kind,
     date: Option<String>,
+    raw: bool,
 ) -> Response {
     use crate::views::{Kind, Period};
     let tz = state.tz;
@@ -262,7 +266,7 @@ async fn period_html(
     let phones = phones(&state);
     let goal = state.config.step_goal;
     let r = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
-        let mut cur = crate::views::summarise(&state.store, tz, period, &phones, today)?;
+        let mut cur = crate::views::summarise(&state.store, tz, period, &phones, today, raw)?;
         if period.contains(today) {
             use chrono::{TimeZone, Timelike};
             cur.now_min = tz
@@ -270,11 +274,12 @@ async fn period_html(
                 .single()
                 .map(|t| t.hour() * 60 + t.minute());
         }
-        let prev = crate::views::summarise(&state.store, tz, period.prev(), &phones, today)?;
+        let prev = crate::views::summarise(&state.store, tz, period.prev(), &phones, today, raw)?;
         Ok(match kind {
             Kind::Day => {
-                let day = crate::day::summarise(&state.store, tz, date)?;
-                crate::web::day_page(&day, tz, today, &cur, &prev, &phones, goal)
+                let day = crate::day::summarise_with(&state.store, tz, date, raw)?;
+                let fills = state.store.fills_between(day.start_ms, day.end_ms)?;
+                crate::web::day_page(&day, tz, today, &cur, &prev, &phones, goal, &fills)
             }
             _ => crate::views::period_page(&cur, &prev, goal, today),
         })
@@ -287,37 +292,47 @@ async fn period_html(
     }
 }
 
-async fn today_html(State(state): State<Arc<AppState>>) -> Response {
-    period_html(state, crate::views::Kind::Day, None).await
+/// `?raw=1`: the minutes as the rules made them, no gaps filled, no sleep.
+type Q = axum::extract::Query<HashMap<String, String>>;
+
+fn raw(q: &Q) -> bool {
+    q.get("raw").is_some_and(|v| v != "0")
+}
+
+async fn today_html(State(state): State<Arc<AppState>>, q: Q) -> Response {
+    period_html(state, crate::views::Kind::Day, None, raw(&q)).await
 }
 
 async fn day_html(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(date): axum::extract::Path<String>,
+    q: Q,
 ) -> Response {
-    period_html(state, crate::views::Kind::Day, Some(date)).await
+    period_html(state, crate::views::Kind::Day, Some(date), raw(&q)).await
 }
 
-async fn this_week_html(State(state): State<Arc<AppState>>) -> Response {
-    period_html(state, crate::views::Kind::Week, None).await
+async fn this_week_html(State(state): State<Arc<AppState>>, q: Q) -> Response {
+    period_html(state, crate::views::Kind::Week, None, raw(&q)).await
 }
 
 async fn week_html(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(date): axum::extract::Path<String>,
+    q: Q,
 ) -> Response {
-    period_html(state, crate::views::Kind::Week, Some(date)).await
+    period_html(state, crate::views::Kind::Week, Some(date), raw(&q)).await
 }
 
-async fn this_month_html(State(state): State<Arc<AppState>>) -> Response {
-    period_html(state, crate::views::Kind::Month, None).await
+async fn this_month_html(State(state): State<Arc<AppState>>, q: Q) -> Response {
+    period_html(state, crate::views::Kind::Month, None, raw(&q)).await
 }
 
 async fn month_html(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(date): axum::extract::Path<String>,
+    q: Q,
 ) -> Response {
-    period_html(state, crate::views::Kind::Month, Some(date)).await
+    period_html(state, crate::views::Kind::Month, Some(date), raw(&q)).await
 }
 
 async fn day_json(
@@ -699,4 +714,116 @@ async fn time_js() -> Response {
         crate::web::TIME_JS,
     )
         .into_response()
+}
+
+fn date_param(q: &HashMap<String, String>, k: &str) -> Result<Option<chrono::NaiveDate>, String> {
+    match q.get(k) {
+        None => Ok(None),
+        Some(v) => v
+            .parse()
+            .map(Some)
+            .map_err(|_| format!("{k}: not a date: {v:?} (use YYYY-MM-DD)\n")),
+    }
+}
+
+/// Nights `?from=YYYY-MM-DD&to=YYYY-MM-DD` (by the date they start on;
+/// default the last seven), each with when he fell asleep and woke, the
+/// interruptions, and why.
+async fn api_sleep(State(state): State<Arc<AppState>>, q: Q) -> Response {
+    let today = crate::day::today(state.tz, state.clock.now_ms());
+    let to = match date_param(&q, "to") {
+        Ok(d) => d.unwrap_or(today),
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
+    let from = match date_param(&q, "from") {
+        Ok(d) => d.unwrap_or(to - chrono::Days::new(7)),
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
+    let tz = state.tz;
+    let done =
+        tokio::task::spawn_blocking(move || crate::derive::nights(&state.store, from, to)).await;
+    match done {
+        Ok(Ok(nights)) => {
+            let hm = |t: Option<i64>| {
+                use chrono::TimeZone;
+                t.and_then(|t| tz.timestamp_millis_opt(t).single())
+                    .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
+            };
+            let rows: Vec<Value> = nights
+                .iter()
+                .map(|n| {
+                    json!({
+                        "night": n.night,
+                        "fell_asleep": hm(n.fell_asleep_ms),
+                        "woke_up": hm(n.woke_up_ms),
+                        "minutes_asleep": n.minutes(),
+                        "interruptions": n.interruptions.iter().map(|i| json!({
+                            "from": hm(Some(i.from_ms)), "to": hm(Some(i.to_ms)), "what": i.what
+                        })).collect::<Vec<_>>(),
+                        "confidence": n.confidence,
+                        "source": n.source,
+                        "reason": n.reason,
+                        "decision_id": n.decision_id,
+                        "done": n.done,
+                        "detail": n,
+                    })
+                })
+                .collect();
+            Json(json!({"nights": rows})).into_response()
+        }
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}\n")).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// A day as spans of activity, gaps filled, with every fill and its reason.
+async fn api_spans(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(date): axum::extract::Path<String>,
+) -> Response {
+    let Ok(date) = date.parse::<chrono::NaiveDate>() else {
+        return (StatusCode::BAD_REQUEST, "not a date (use YYYY-MM-DD)\n").into_response();
+    };
+    let tz = state.tz;
+    let done = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
+        let (from, to) = crate::day::bounds(tz, date)?;
+        let labels = state.store.labels_between(from, to)?;
+        let fills = state.store.fills_between(from, to)?;
+        Ok(json!({
+            "date": date,
+            "spans": crate::derive::spans(&labels, &fills),
+            "fills": fills,
+        }))
+    })
+    .await;
+    match done {
+        Ok(Ok(v)) => Json(v).into_response(),
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}\n")).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// The decision model's log: `?kind=sleep|gaps&key=...&limit=20`. Each
+/// question exactly as asked, with the answer, so a wrong decision can be
+/// debugged.
+async fn api_decisions(State(state): State<Arc<AppState>>, q: Q) -> Response {
+    let limit = q
+        .get("limit")
+        .and_then(|l| l.parse().ok())
+        .unwrap_or(20)
+        .min(500);
+    let done = tokio::task::spawn_blocking(move || {
+        crate::decide::log(
+            &state.store,
+            q.get("kind").map(String::as_str),
+            q.get("key").map(String::as_str),
+            limit,
+        )
+    })
+    .await;
+    match done {
+        Ok(Ok(v)) => Json(json!({"decisions": v})).into_response(),
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}\n")).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }

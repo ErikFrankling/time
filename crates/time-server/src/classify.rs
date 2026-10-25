@@ -296,7 +296,7 @@ mod tests {
             .insert(&[beat("framework", now - 60 * MINUTE_MS)], now)
             .unwrap();
         c.run_once(&store, now).unwrap();
-        assert!(!store.labels_between(t, t + MINUTE_MS).unwrap()[0].complete);
+        assert!(!store.raw_labels_between(t, t + MINUTE_MS).unwrap()[0].complete);
 
         // Three days ago instead: asleep, so nothing waits for it.
         let store = Store::open_in_memory().unwrap();
@@ -311,6 +311,6 @@ mod tests {
             )
             .unwrap();
         c.run_once(&store, now).unwrap();
-        assert!(store.labels_between(t, t + MINUTE_MS).unwrap()[0].complete);
+        assert!(store.raw_labels_between(t, t + MINUTE_MS).unwrap()[0].complete);
     }
 }

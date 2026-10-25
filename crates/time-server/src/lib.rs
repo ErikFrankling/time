@@ -8,6 +8,8 @@ pub mod apk;
 pub mod classify;
 pub mod config;
 pub mod day;
+pub mod decide;
+pub mod derive;
 pub mod digest;
 pub mod http;
 pub mod import_v1;
@@ -37,6 +39,8 @@ pub struct AppState {
     pub store: Store,
     pub clock: Arc<dyn Clock>,
     pub classifier: Classifier,
+    /// The decision model for sleep and gaps.
+    pub decider: decide::Decider,
     /// Required on `/v1/logs` when set (`TIME_INGEST_TOKEN`). The homelab
     /// gateway authenticates devices; this guards the server itself.
     pub ingest_token: Option<String>,
@@ -64,6 +68,7 @@ impl AppState {
     /// made, queue all of history for relabelling.
     pub fn new(config: Config, store: Store, clock: Arc<dyn Clock>) -> anyhow::Result<Arc<Self>> {
         let classifier = Classifier::from_config(&config)?;
+        let decider = decide::Decider::new(config.decide.clone());
         if let Some(n) = classifier.requeue_if_rules_changed(&store)? {
             eprintln!(
                 "classifier: rules are new ({}), {n} minute(s) queued",
@@ -96,6 +101,7 @@ impl AppState {
             config,
             store,
             clock,
+            decider,
             classifier,
             started_ms,
             counters: Counters::default(),

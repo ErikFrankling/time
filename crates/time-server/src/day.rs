@@ -139,8 +139,22 @@ pub fn today(tz: chrono_tz::Tz, now: Millis) -> NaiveDate {
 }
 
 pub fn summarise(store: &Store, tz: chrono_tz::Tz, date: NaiveDate) -> anyhow::Result<Day> {
+    summarise_with(store, tz, date, false)
+}
+
+/// The day from the raw minutes (`raw`) or with gaps filled and sleep marked.
+pub fn summarise_with(
+    store: &Store,
+    tz: chrono_tz::Tz,
+    date: NaiveDate,
+    raw: bool,
+) -> anyhow::Result<Day> {
     let (start_ms, end_ms) = bounds(tz, date)?;
-    let minutes = store.labels_between(start_ms, end_ms)?;
+    let minutes = if raw {
+        store.raw_labels_between(start_ms, end_ms)?
+    } else {
+        store.labels_between(start_ms, end_ms)?
+    };
 
     let mut by_activity: BTreeMap<Activity, (u32, u32)> = BTreeMap::new();
     let mut projects: BTreeMap<String, u32> = BTreeMap::new();

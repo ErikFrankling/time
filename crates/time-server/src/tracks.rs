@@ -1,5 +1,5 @@
-//! Six tracks: computer screen, computer sound, phone screen, phone sound,
-//! keyboard and mouse, and voice.
+//! Seven tracks: computer screen, computer sound, phone screen, phone sound,
+//! keyboard and mouse, voice, and sleep.
 //!
 //! The minute labels say where the attention was, one place a minute; these
 //! tracks say what each device and channel was doing, so a YouTube video on
@@ -24,13 +24,14 @@ use time_core::label::{MinuteLabel, Place};
 
 use crate::store::InputMinute;
 
-pub const NAMES: [&str; 6] = [
+pub const NAMES: [&str; 7] = [
     "Computer · screen",
     "Computer · sound",
     "Phone · screen",
     "Phone · sound",
     "Keyboard & mouse",
     "Voice",
+    "Sleep",
 ];
 pub const COMPUTER_SCREEN: usize = 0;
 pub const COMPUTER_SOUND: usize = 1;
@@ -38,6 +39,9 @@ pub const PHONE_SCREEN: usize = 2;
 pub const PHONE_SOUND: usize = 3;
 pub const INPUT: usize = 4;
 pub const VOICE: usize = 5;
+/// The night's sleep, from the `sleep` table via the labels. Not counted
+/// in `active_minutes`: asleep is not "something on".
+pub const SLEEP: usize = 6;
 pub const TRACKS: usize = NAMES.len();
 
 /// Ten-minute slots in a day: the clock's and the input chunks' resolution.
@@ -105,6 +109,8 @@ pub struct Tracks {
     pub slots: [Vec<BTreeMap<String, u32>>; TRACKS],
     /// Minutes with any track filled: the rings' full circle.
     pub active_minutes: u32,
+    /// Minutes asleep.
+    pub sleep_minutes: u32,
     /// Days added up, for averages and the clock's shading.
     pub days: u32,
     /// Only for a single day.
@@ -119,6 +125,7 @@ impl Default for Tracks {
             whats: Default::default(),
             slots: std::array::from_fn(|_| vec![BTreeMap::new(); SLOTS]),
             active_minutes: 0,
+            sleep_minutes: 0,
             days: 0,
             spans: Vec::new(),
             chunks: Vec::new(),
@@ -221,6 +228,10 @@ impl Tracks {
                 Place::Phone => Some(PHONE_SCREEN),
                 Place::Away => None,
             };
+            if l.away_kind() == Some(time_core::label::AwayKind::Sleep) {
+                grid[SLEEP][i] = Some(("sleep".to_owned(), String::new()));
+                add(&mut t, SLEEP, i, "sleep", "", 60);
+            }
             if let (Some(track), Some(a)) = (primary, l.activity) {
                 grid[track][i] = Some((a.as_str().to_owned(), l.what.clone().unwrap_or_default()));
             }
@@ -355,8 +366,9 @@ impl Tracks {
         }
 
         t.active_minutes = (0..n)
-            .filter(|i| grid.iter().any(|g| g[*i].is_some()))
+            .filter(|i| grid[..SLEEP].iter().any(|g| g[*i].is_some()))
             .count() as u32;
+        t.sleep_minutes = grid[SLEEP].iter().filter(|c| c.is_some()).count() as u32;
 
         // Stretches, in local minutes; a daylight-saving jump ends one.
         for (track, cells) in grid.iter().enumerate() {
@@ -412,6 +424,7 @@ impl Tracks {
             }
         }
         self.active_minutes += o.active_minutes;
+        self.sleep_minutes += o.sleep_minutes;
         self.days += o.days;
     }
 

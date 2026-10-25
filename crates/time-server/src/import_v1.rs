@@ -231,7 +231,7 @@ pub fn compare(path: &Path, store: &Store) -> Result<Comparison> {
         let Some(v1) = map_v1_category(&category) else {
             continue;
         };
-        let Some(label) = store.labels_between(ts, ts + 1)?.pop() else {
+        let Some(label) = store.raw_labels_between(ts, ts + 1)?.pop() else {
             continue;
         };
         // Only compare where v2 also put Erik on that device.

@@ -10,6 +10,7 @@ const USAGE: &str = "usage:
   time-server serve <config.toml>             run the server
   time-server import-v1 <config.toml> <v1.db> turn v1's history into events
   time-server classify <config.toml>          label everything queued, then exit
+  time-server derive <config.toml>            fill gaps and decide sleep, then exit
   time-server compare-v1 <config.toml> <v1.db> compare v2's labels with v1's
   time-server backup <config.toml> <out.db>     consistent copy of the live database
   time-server verify <db>                       integrity check and row counts";
@@ -50,6 +51,27 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             println!("labelled {total} minute(s) in {:.1?}", started.elapsed());
+            Ok(())
+        }
+        ("derive", Some(p)) => {
+            // Label, then derive gaps and sleep until a pass asks nothing new.
+            let (_, state) = open(&p)?;
+            while state
+                .classifier
+                .run_once(&state.store, state.clock.now_ms())?
+                >= classify::PASS_LIMIT
+            {}
+            loop {
+                let started = std::time::Instant::now();
+                let (fills, asked) = time_server::derive::run_once(&state, state.clock.now_ms())?;
+                println!(
+                    "{fills} fill(s), {asked} question(s) in {:.1?}",
+                    started.elapsed()
+                );
+                if asked == 0 {
+                    break;
+                }
+            }
             Ok(())
         }
         ("compare-v1", Some(p)) => {
@@ -155,5 +177,6 @@ async fn serve(path: &Path) -> anyhow::Result<()> {
     tokio::spawn(classify::run_forever(state.clone()));
     time_server::apk::spawn_poller(state.apk.clone());
     tokio::spawn(time_server::nudge::run_forever(state.clone()));
+    tokio::spawn(time_server::derive::run_forever(state.clone()));
     time_server::serve(listener, state).await
 }

@@ -9,13 +9,14 @@
   var C = {
     work: '#3987e5', study: '#199e70', messaging: '#d55181', video: '#c98500',
     feeds: '#d95926', browsing: '#008300', music: '#9085e9', games: '#e66767',
-    other: '#7d7c76', unknown: '#4a4a46'
+    other: '#7d7c76', unknown: '#4a4a46', sleep: '#4651a6'
   };
   // Keyboard and mouse (one hue, darker for less), and voice: in is warm,
   // out is cool. Validated as one categorical set on the dark surface.
   var K = {
     typing: '#4fb3bf', pointer: '#2a6f78',
-    dictation: '#c08a10', 'voice mode': '#1f9e8a', 'read aloud': '#5b7fe0', speak: '#d4567a'
+    dictation: '#c08a10', 'voice mode': '#1f9e8a', 'read aloud': '#5b7fe0', speak: '#d4567a',
+    sleep: '#4651a6'
   };
   var charts = [];
 
@@ -115,7 +116,7 @@
 
     // Rings: one per track, the full circle every minute anything was on.
     var R = D.rings;
-    var RW = 0.104, RG = 0.016;
+    var RW = 0.092, RG = 0.014;
     function ringR(i) { var o = 0.95 - i * RW; return [o - RW + RG, o]; }
     if (R && R.full) {
       var days = R.days || 1;
@@ -143,8 +144,16 @@
         }).concat([{
           type: 'pie', radius: [0, '30%'], center: ['50%', '50%'], silent: true, tooltip: { show: false },
           label: { show: true, position: 'center', fontFamily: font,
-            formatter: '{a|' + dur(D.perDay ? R.full / days : R.full) + '}\n{b|' + (D.perDay ? 'a day with' : 'with') + '}\n{b|anything on}',
-            rich: { a: { color: fg, fontSize: 16, fontWeight: 700, lineHeight: 22 }, b: { color: mu, fontSize: 10, lineHeight: 13 } } },
+            formatter: (function () {
+              var pd = function (m) { return dur(D.perDay ? m / days : m); };
+              var act = R.active != null ? R.active : R.full;
+              var s = '{a|' + pd(act) + '}\n{b|' + (D.perDay ? 'a day with' : 'with') + ' anything on}';
+              if (R.sleep) s += '\n{s|' + pd(R.sleep) + ' asleep}';
+              if (R.untracked != null) s += '\n{b|' + pd(R.untracked) + ' untracked}';
+              return s;
+            })(),
+            rich: { a: { color: fg, fontSize: 16, fontWeight: 700, lineHeight: 21 }, b: { color: mu, fontSize: 10, lineHeight: 13 },
+              s: { color: '#8f98e8', fontSize: 10, fontWeight: 700, lineHeight: 14 } } },
           labelLine: { show: false }, data: [{ value: 1, name: '', itemStyle: { color: 'transparent' } }]
         }])
       });
@@ -172,7 +181,7 @@
         var ang = function (m) { return -Math.PI / 2 + m / 1440 * 2 * Math.PI; };
         var band = function (i) { var r = ringR(i); return [CR * r[0], CR * r[1]]; };
         var g = [];
-        for (var i = 0; i < 6; i++) {
+        for (var i = 0; i < R.tracks.length; i++) {
           var b = band(i);
           g.push({ type: 'ring', silent: true, shape: { cx: cx, cy: cy, r: b[1], r0: b[0] }, style: { fill: line, opacity: 0.3 } });
         }
@@ -186,7 +195,7 @@
           }
         }
         if (K24.now != null) {
-          var an = ang(K24.now), r0 = CR * (ringR(5)[0] - 0.03);
+          var an = ang(K24.now), r0 = CR * (ringR(R.tracks.length - 1)[0] - 0.03);
           g.push({ type: 'line', silent: true, z: 10, shape: { x1: cx + r0 * Math.cos(an), y1: cy + r0 * Math.sin(an), x2: cx + (CR + 4) * Math.cos(an), y2: cy + (CR + 4) * Math.sin(an) },
             style: { stroke: fg, lineWidth: 2 } });
           g.push({ type: 'circle', silent: true, z: 10, shape: { cx: cx + (CR + 4) * Math.cos(an), cy: cy + (CR + 4) * Math.sin(an), r: 3.5 }, style: { fill: fg } });
@@ -325,7 +334,7 @@
           }]
         });
       } else {
-        var TC = ['#3987e5', '#9085e9', '#d95926', '#1db954', '#4fb3bf', '#c08a10'];
+        var TC = ['#3987e5', '#9085e9', '#d95926', '#1db954', '#4fb3bf', '#c08a10', '#4651a6'];
         var tr = make('c-tracks', {
           animation: false,
           grid: { left: 4, right: 4, top: 40, bottom: 4, containLabel: true },

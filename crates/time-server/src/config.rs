@@ -56,6 +56,50 @@ pub struct Config {
     /// Daily step goal for the steps ring and bars.
     #[serde(default = "default_step_goal")]
     pub step_goal: u32,
+    /// The decision model: when Erik slept, and what the gaps between his
+    /// input were.
+    #[serde(default)]
+    pub decide: DecideConfig,
+}
+
+/// The decision model for sleep and gaps (`crate::decide`). Any
+/// OpenAI-compatible chat endpoint; the key comes from `TIME_DECIDE_KEY`.
+/// Asked once a night for sleep and once per two hours with gaps, never
+/// per minute, and every answer is cached and logged in `decision`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct DecideConfig {
+    /// `false`: the rules' answers only, nothing leaves the server.
+    pub enabled: bool,
+    pub endpoint: String,
+    pub model: String,
+    /// Gaps and nights are derived from this day on (a backfill on start
+    /// when the derivation logic changed).
+    pub since: Option<chrono::NaiveDate>,
+    /// Questions per pass at most, so a backfill cannot run away.
+    pub max_calls_per_pass: usize,
+    /// `reasoning_effort` sent with each question. DeepSeek V4.1 Flash at
+    /// its default spent all of 8k tokens thinking about two hours of gaps;
+    /// `low` answers the same in a quarter of the time.
+    pub reasoning_effort: Option<String>,
+    /// Questions in flight at once.
+    pub parallel: usize,
+}
+
+impl Default for DecideConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            // OpenCode Go, which Erik already pays for: DeepSeek V4.1 Flash
+            // is cents a month at this volume and touches no Claude limit.
+            endpoint: "https://opencode.ai/zen/go/v1/chat/completions".into(),
+            model: "deepseek-v4.1-flash".into(),
+            since: None,
+            max_calls_per_pass: 40,
+            reasoning_effort: Some("low".into()),
+            parallel: 4,
+        }
+    }
 }
 
 /// How the agent-facing summaries judge a minute. Erik's call (2026-10-23):

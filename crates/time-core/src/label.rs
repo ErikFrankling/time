@@ -166,15 +166,18 @@ pub enum AwayKind {
     Out,
     /// Devices reported and nobody was at any of them.
     Idle,
+    /// Asleep: the night's sleep, decided once a night (see `time_core::sleep`).
+    Sleep,
     /// Nothing reported at all.
     Untracked,
 }
 
 impl AwayKind {
-    pub const ALL: [AwayKind; 4] = [
+    pub const ALL: [AwayKind; 5] = [
         AwayKind::Walking,
         AwayKind::Out,
         AwayKind::Idle,
+        AwayKind::Sleep,
         AwayKind::Untracked,
     ];
 
@@ -183,6 +186,7 @@ impl AwayKind {
             AwayKind::Walking => "walking",
             AwayKind::Out => "out",
             AwayKind::Idle => "idle",
+            AwayKind::Sleep => "sleep",
             AwayKind::Untracked => "untracked",
         }
     }
@@ -193,6 +197,7 @@ impl AwayKind {
             AwayKind::Walking => "away: out, walking",
             AwayKind::Out => "away: out",
             AwayKind::Idle => "away: not at any device",
+            AwayKind::Sleep => "asleep",
             AwayKind::Untracked => "untracked",
         }
     }
@@ -213,6 +218,7 @@ impl MinuteLabel {
         Some(match self.rule.as_str() {
             "presence.moving" => AwayKind::Walking,
             "presence.out" => AwayKind::Out,
+            "presence.sleep" => AwayKind::Sleep,
             "presence.no-data" => AwayKind::Untracked,
             _ => AwayKind::Idle,
         })

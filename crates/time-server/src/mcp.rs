@@ -48,7 +48,7 @@ pub fn tools() -> Value {
         {
             "name": "time_summary",
             "title": "Time summary for a window",
-            "description": "Minutes per category for a window (today so far, the last N hours), the top apps and sites, projects, and productive vs unproductive vs neutral totals. Which categories are unproductive is configured on the server (video and feeds by default; gaming is neutral).",
+            "description": "Minutes per category for a window (today so far, the last N hours), the top apps and sites, projects, productive vs unproductive vs neutral totals, and sleep (when Erik fell asleep and woke up, hours asleep, averages for longer windows). Which categories are unproductive is configured on the server (video and feeds by default; gaming is neutral).",
             "inputSchema": {
                 "type": "object",
                 "properties": {"window": window("today")},
@@ -107,7 +107,9 @@ pub fn call_tool(state: &AppState, name: &str, args: &Value) -> anyhow::Result<d
         "time_summary" => {
             let w = window_arg("today")?;
             let (labels, events) = digest::load(&state.store, w.from_ms, w.to_ms)?;
-            Ok(digest::summary(cfg, tz, &w, &labels, &events))
+            let mut d = digest::summary(cfg, tz, &w, &labels, &events);
+            add_sleep(state, &w, &mut d)?;
+            Ok(d)
         }
         "time_timeline" => {
             let w = window_arg("3h")?;
@@ -139,6 +141,87 @@ pub fn call_tool(state: &AppState, name: &str, args: &Value) -> anyhow::Result<d
         }
         other => anyhow::bail!("unknown tool {other:?}"),
     }
+}
+
+/// The nights whose sleep falls in the window: when Erik fell asleep and
+/// woke up, hours asleep and why, and the averages.
+fn add_sleep(state: &AppState, w: &digest::Window, d: &mut digest::Digest) -> anyhow::Result<()> {
+    use chrono::{TimeZone, Timelike};
+    let tz = state.tz;
+    let day = |t| crate::day::today(tz, t);
+    let nights = crate::derive::nights(
+        &state.store,
+        crate::derive::night_before(day(w.from_ms)),
+        day(w.to_ms),
+    )?;
+    let nights: Vec<_> = nights
+        .into_iter()
+        .filter(|n| match (n.fell_asleep_ms, n.woke_up_ms) {
+            (Some(a), Some(b)) => a < w.to_ms && b > w.from_ms,
+            _ => false,
+        })
+        .collect();
+    let hm = |t: Option<i64>| {
+        t.and_then(|t| tz.timestamp_millis_opt(t).single())
+            .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
+    };
+    let rows: Vec<Value> = nights
+        .iter()
+        .map(|n| {
+            json!({
+                "night": n.night,
+                "fell_asleep": hm(n.fell_asleep_ms),
+                "woke_up": hm(n.woke_up_ms),
+                "hours_asleep": n.minutes().map(|m| (m as f64 / 6.0).round() / 10.0),
+                "interruptions": n.interruptions.len(),
+                "decided_by": n.source,
+                "confidence": n.confidence,
+                "reason": n.reason,
+            })
+        })
+        .collect();
+    let mins: Vec<i64> = nights.iter().filter_map(|n| n.minutes()).collect();
+    if mins.is_empty() {
+        d.json["sleep"] = json!({"nights": [], "note": "no night's sleep found in this window"});
+        return Ok(());
+    }
+    let avg_h = mins.iter().sum::<i64>() as f64 / mins.len() as f64 / 60.0;
+    // Clock times averaged from 18:00 so 23:30 and 02:30 give 01:00.
+    let clock = |f: &dyn Fn(&crate::derive::Night) -> Option<i64>| {
+        let v: Vec<i64> = nights
+            .iter()
+            .filter_map(f)
+            .filter_map(|t| tz.timestamp_millis_opt(t).single())
+            .map(|d| (i64::from(d.hour() * 60 + d.minute()) - 1080).rem_euclid(1440))
+            .collect();
+        let m = (v.iter().sum::<i64>() / v.len().max(1) as i64 + 1080) % 1440;
+        format!("{:02}:{:02}", m / 60, m % 60)
+    };
+    let bed = clock(&|n| n.fell_asleep_ms);
+    let up = clock(&|n| n.woke_up_ms);
+    d.json["sleep"] = json!({
+        "nights": rows,
+        "average_hours_asleep": (avg_h * 10.0).round() / 10.0,
+        "average_bedtime": bed,
+        "average_wake_up": up,
+    });
+    let text = if nights.len() == 1 {
+        let n = &nights[0];
+        format!(
+            " Sleep: {} to {}, {:.1} h asleep ({}).",
+            hm(n.fell_asleep_ms).unwrap_or_default(),
+            hm(n.woke_up_ms).unwrap_or_default(),
+            avg_h,
+            n.reason
+        )
+    } else {
+        format!(
+            " Sleep: {} nights, {avg_h:.1} h asleep on average, bedtime {bed}, up {up}.",
+            nights.len()
+        )
+    };
+    d.text.push_str(&text);
+    Ok(())
 }
 
 fn rpc_error(id: Value, code: i64, message: &str) -> Value {

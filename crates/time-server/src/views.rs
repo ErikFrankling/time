@@ -155,6 +155,8 @@ pub struct DayTotals {
     pub whats: BTreeMap<Activity, BTreeMap<String, u32>>,
     /// Commits, pull requests and reviews.
     pub code: crate::day::CodeTotals,
+    /// The night that ended this morning.
+    pub sleep: Option<crate::derive::Night>,
 }
 
 impl DayTotals {
@@ -254,6 +256,16 @@ pub fn day_totals(labels: &[MinuteLabel], phones: &[String]) -> DayTotals {
     t
 }
 
+/// Sleep over a period, per night.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct SleepAvg {
+    pub minutes: u32,
+    /// Local minute of the day.
+    pub bedtime: u32,
+    pub wake: u32,
+    pub nights: usize,
+}
+
 /// A period's totals, one entry per day.
 #[derive(Debug, Clone)]
 pub struct Summary {
@@ -266,6 +278,9 @@ pub struct Summary {
     /// Local minute of the day now, when the period holds today: the
     /// clock's "now" hand.
     pub now_min: Option<u32>,
+    pub tz: chrono_tz::Tz,
+    /// Built from the raw minutes (`?raw=1`), without gaps filled or sleep.
+    pub raw: bool,
 }
 
 impl Summary {
@@ -274,6 +289,44 @@ impl Summary {
             return 0;
         }
         (f64::from(f(&self.total)) / f64::from(self.days_with_data)).round() as u32
+    }
+
+    /// Nights in this period with a sleep found: average minutes asleep,
+    /// and average bedtime and wake-up as local minutes of the day.
+    pub fn sleep_avg(&self) -> Option<SleepAvg> {
+        let tz = self.tz;
+        let local = |t: Millis| -> i64 {
+            use chrono::Timelike;
+            tz.timestamp_millis_opt(t)
+                .single()
+                .map_or(0, |d| i64::from(d.hour() * 60 + d.minute()))
+        };
+        let ns: Vec<&crate::derive::Night> = self
+            .days
+            .iter()
+            .filter_map(|d| d.sleep.as_ref())
+            .filter(|n| n.minutes().is_some())
+            .collect();
+        if ns.is_empty() {
+            return None;
+        }
+        let k = ns.len() as i64;
+        // Clock times measured from 18:00, so 23:30 and 02:30 average to 01:00.
+        let from_six = |m: i64| (m - 18 * 60).rem_euclid(1440);
+        let avg = |f: &dyn Fn(&crate::derive::Night) -> Option<Millis>| {
+            let s: i64 = ns
+                .iter()
+                .filter_map(|n| f(n))
+                .map(|t| from_six(local(t)))
+                .sum();
+            ((s / k + 18 * 60) % 1440) as u32
+        };
+        Some(SleepAvg {
+            minutes: (ns.iter().filter_map(|n| n.minutes()).sum::<i64>() / k) as u32,
+            bedtime: avg(&|n| n.fell_asleep_ms),
+            wake: avg(&|n| n.woke_up_ms),
+            nights: ns.len(),
+        })
     }
 
     pub fn avg_steps(&self) -> u32 {
@@ -290,6 +343,7 @@ pub fn summarise(
     period: Period,
     phones: &[String],
     today: NaiveDate,
+    raw: bool,
 ) -> anyhow::Result<Summary> {
     let mut days = Vec::new();
     let mut total = DayTotals::default();
@@ -304,8 +358,16 @@ pub fn summarise(
             continue;
         }
         let (from, to) = crate::day::bounds(tz, date)?;
-        let labels = store.labels_between(from, to)?;
+        let labels = if raw {
+            store.raw_labels_between(from, to)?
+        } else {
+            store.labels_between(from, to)?
+        };
         let mut t = day_totals(&labels, phones);
+        if !raw {
+            let night = crate::derive::night_before(date);
+            t.sleep = crate::derive::nights(store, night, night)?.pop();
+        }
         (t.steps, t.distance_m) = store.steps_between(from, to)?;
         let heard = store.listening_between(from, to)?;
         t.listening = crate::listening::Tally::new(
@@ -349,6 +411,8 @@ pub fn summarise(
         days_with_data,
         step_days,
         now_min: None,
+        tz,
+        raw,
     })
 }
 
@@ -457,14 +521,130 @@ pub fn headline(cur: &Summary, prev: &Summary) -> String {
         )
     };
     let t = v(cur, &|t| t.tracked());
+    let sleep = match (cur.sleep_avg(), prev.sleep_avg()) {
+        (Some(c), p) => format!(
+            r#"<span class="sf"><b>{}</b> sleep{} {}</span>"#,
+            short(c.minutes),
+            if per_day { " a night" } else { "" },
+            chip(c.minutes, p.map_or(0, |p| p.minutes))
+        ),
+        _ => String::new(),
+    };
     format!(
-        r#"<section class="figs"><div class="fv">{}</div><div class="fk">tracked{} {}</div><div class="fs">{}{}</div></section>"#,
+        r#"<section class="figs"><div class="fv">{}</div><div class="fk">tracked{} {}</div><div class="fs">{}{}{sleep}</div></section>"#,
         short(t),
         if per_day { " a day" } else { "" },
         chip(t, v(prev, &|t| t.tracked())),
         small("work &amp; study", &|t| t.work()),
         small("phone", &|t| t.phone()),
     )
+}
+
+fn clock_of(m: u32) -> String {
+    format!("{:02}:{:02}", m / 60 % 24, m % 60)
+}
+
+/// Sleep: for a day, the night that ended that morning, with the reason it
+/// was decided so; for a week or month, the average night, bedtime and
+/// wake-up, and each night as a bar.
+pub fn sleep_card(cur: &Summary) -> String {
+    if cur.raw {
+        return String::new();
+    }
+    let tz = cur.tz;
+    let mut out = String::from(r#"<section class="card sleep"><h2>Sleep</h2>"#);
+    let interruptions = |n: &crate::derive::Night| -> String {
+        n.interruptions
+            .iter()
+            .map(|i| format!("{}–{} {}", hm(tz, i.from_ms), hm(tz, i.to_ms), esc(&i.what)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    match cur.period.kind {
+        Kind::Day => {
+            let Some(n) = cur.days.first().and_then(|d| d.sleep.as_ref()) else {
+                out.push_str(r#"<div class="sub">No night's sleep found before this day yet.</div></section>"#);
+                return out;
+            };
+            match (n.fell_asleep_ms, n.woke_up_ms, n.minutes()) {
+                (Some(a), Some(b), Some(m)) => {
+                    let _ = write!(
+                        out,
+                        r#"<div class="stats"><div class="stat"><div class="k">fell asleep</div><div class="v">{}</div></div><div class="stat"><div class="k">woke up</div><div class="v">{}</div></div><div class="stat"><div class="k">asleep</div><div class="v">{}</div></div><div class="stat"><div class="k">interruptions</div><div class="v">{}</div></div></div>"#,
+                        hm(tz, a),
+                        hm(tz, b),
+                        short(m as u32),
+                        n.interruptions.len()
+                    );
+                    if !n.interruptions.is_empty() {
+                        let _ =
+                            write!(out, r#"<div class="sub">Awake: {}</div>"#, interruptions(n));
+                    }
+                }
+                _ => out.push_str(r#"<div class="sub">No sleep found that night.</div>"#),
+            }
+            let who = match (n.source.as_str(), n.confidence) {
+                ("model", Some(c)) => format!("decided by the model, {:.0}% sure", c * 100.0),
+                ("model", None) => "decided by the model".to_owned(),
+                _ => "the rules' estimate, not yet confirmed by the model".to_owned(),
+            };
+            let _ = write!(
+                out,
+                r#"<div class="sub">{} <span class="d">({who}{})</span></div>"#,
+                esc(&n.reason),
+                n.decision_id.map_or(String::new(), |_| format!(
+                    r#" · <a href="/api/decisions?kind=sleep&amp;key={}">what it saw</a>"#,
+                    n.night
+                )),
+            );
+        }
+        _ => {
+            let Some(avg) = cur.sleep_avg() else {
+                out.push_str(
+                    r#"<div class="sub">No nights found in this period yet.</div></section>"#,
+                );
+                return out;
+            };
+            let _ = write!(
+                out,
+                r#"<div class="stats"><div class="stat"><div class="k">asleep a night</div><div class="v">{}</div></div><div class="stat"><div class="k">bedtime</div><div class="v">{}</div></div><div class="stat"><div class="k">up</div><div class="v">{}</div></div><div class="stat"><div class="k">nights</div><div class="v">{}</div></div></div><div class="acts" style="margin-top:.7rem">"#,
+                short(avg.minutes),
+                clock_of(avg.bedtime),
+                clock_of(avg.wake),
+                avg.nights
+            );
+            for d in &cur.days {
+                let (Some(date), Some(n)) = (d.date, d.sleep.as_ref()) else {
+                    continue;
+                };
+                let (Some(a), Some(b), Some(m)) = (n.fell_asleep_ms, n.woke_up_ms, n.minutes())
+                else {
+                    if n.done {
+                        let _ = write!(
+                            out,
+                            r#"<a class="act" href="/day/{date}" style="text-decoration:none;color:inherit" title="{}"><span class="sw"></span><span class="nm">{}</span><span class="n d">no sleep found</span><span class="pc">0h</span></a>"#,
+                            esc(&n.reason),
+                            date.format("%a %-d"),
+                        );
+                    }
+                    continue;
+                };
+                let _ = write!(
+                    out,
+                    r#"<a class="act" href="/day/{date}" style="text-decoration:none;color:inherit" title="{}"><span class="sw aw-sleep"></span><span class="nm">{}</span><span class="n">{}–{}</span><span class="pc">{}</span><span class="bar"><span style="width:{:.0}%;background:#4651a6"></span></span></a>"#,
+                    esc(&n.reason),
+                    date.format("%a %-d"),
+                    hm(tz, a),
+                    hm(tz, b),
+                    short(m as u32),
+                    (m as f64 / 6.0 / 1.2).min(100.0),
+                );
+            }
+            out.push_str("</div>");
+        }
+    }
+    out.push_str("</section>");
+    out
 }
 
 /// A chart slot with a drill-down panel under it, filled when a mark is tapped.
@@ -693,6 +873,7 @@ pub fn chart_data(
 pub fn charts(cur: &Summary, prev: &Summary, goal: u32, day: Option<&crate::day::Day>) -> String {
     let data = chart_data(cur, prev, goal, day);
     let mut out = headline(cur, prev);
+    out.push_str(&sleep_card(cur));
     let per_day = cur.period.kind != Kind::Day;
     let full = cur.total.tracks.active_minutes;
     if data["tracks"]["any"].as_bool() == Some(true) {
@@ -701,7 +882,7 @@ pub fn charts(cur: &Summary, prev: &Summary, goal: u32, day: Option<&crate::day:
             "Every track at once",
             "22rem",
             &format!(
-                r#"<div class="cap">One ring per track, outside in: computer screen and sound, phone screen and sound, keyboard &amp; mouse, voice. A full circle is every minute anything was going on ({}{}). Colours are what filled each ring: hover for the breakdown, tap to open it.</div>"#,
+                r#"<div class="cap">One ring per track, outside in: computer screen and sound, phone screen and sound, keyboard &amp; mouse, voice, and sleep innermost. A full circle is every minute anything was going on or Erik was asleep ({}{} with anything on). Colours are what filled each ring: hover for the breakdown, tap to open it.</div>"#,
                 short(if per_day { full / cur.total.tracks.days.max(1) } else { full }),
                 if per_day { " a day" } else { "" }
             ),
@@ -711,9 +892,9 @@ pub fn charts(cur: &Summary, prev: &Summary, goal: u32, day: Option<&crate::day:
             "Around the clock",
             "25rem",
             if per_day {
-                r#"<div class="cap">The same rings on a 24-hour dial (outside in: computer screen, computer sound, phone screen, phone sound, keyboard &amp; mouse, voice), midnight at the top and noon at the bottom. Each ten minutes is shaded by how often it was filled on these days, coloured by what filled it most.</div>"#
+                r#"<div class="cap">The same rings on a 24-hour dial (outside in: computer screen, computer sound, phone screen, phone sound, keyboard &amp; mouse, voice, sleep), midnight at the top and noon at the bottom. Each ten minutes is shaded by how often it was filled on these days, coloured by what filled it most.</div>"#
             } else {
-                r#"<div class="cap">The same rings on a 24-hour dial (outside in: computer screen, computer sound, phone screen, phone sound, keyboard &amp; mouse, voice), midnight at the top and noon at the bottom: each stretch sits at the hour it happened. Keyboard &amp; mouse is shaded by how much of each ten minutes had input.</div>"#
+                r#"<div class="cap">The same rings on a 24-hour dial (outside in: computer screen, computer sound, phone screen, phone sound, keyboard &amp; mouse, voice, sleep), midnight at the top and noon at the bottom: each stretch sits at the hour it happened. Keyboard &amp; mouse is shaded by how much of each ten minutes had input.</div>"#
             },
         ));
     }
@@ -725,7 +906,7 @@ pub fn charts(cur: &Summary, prev: &Summary, goal: u32, day: Option<&crate::day:
     ));
     if data["tracks"]["any"].as_bool() == Some(true) {
         let when = match cur.period.kind {
-            Kind::Day => ("When, track by track", "Six tracks: what was on each screen (by activity), what could be heard (by source), how much of each ten minutes had keyboard or mouse input (darker: more), and when you dictated or were read to. Filled at the same time means at the same time."),
+            Kind::Day => ("When, track by track", "Seven tracks: what was on each screen (by activity), what could be heard (by source), how much of each ten minutes had keyboard or mouse input (darker: more), when you dictated or were read to, and when you slept. Filled at the same time means at the same time."),
             _ => ("Tracks by day", "Minutes per track each day. Tap a day to open it."),
         };
         out.push_str(&slot(
@@ -852,7 +1033,9 @@ pub fn lanes(
             Place::Computer => !phone,
             Place::Away => {
                 return match m.away_kind() {
-                    Some(k @ (AwayKind::Walking | AwayKind::Out)) if phone => Some(Cell::Away(k)),
+                    Some(k @ (AwayKind::Walking | AwayKind::Out | AwayKind::Sleep)) if phone => {
+                        Some(Cell::Away(k))
+                    }
                     _ => None,
                 }
             }
@@ -976,7 +1159,7 @@ pub fn legend() -> String {
     for a in Activity::ALL {
         let _ = write!(out, r#"<span><span class="sw a-{a}"></span> {a}</span>"#);
     }
-    for k in [AwayKind::Walking, AwayKind::Out] {
+    for k in [AwayKind::Walking, AwayKind::Out, AwayKind::Sleep] {
         let _ = write!(
             out,
             r#"<span><span class="sw aw-{k}"></span> {}</span>"#,
@@ -1104,6 +1287,7 @@ details.card > summary::after { content:" ›"; } details.card[open] > summary::
 .drill { border-top:1px solid var(--line); margin:.4rem .3rem 0; padding-top:.5rem; }
 .drill .dh { display:flex; justify-content:space-between; align-items:center; font-size:.85rem; }
 .drill .dh button { background:none; border:0; color:var(--muted); font-size:1.3rem; line-height:1; cursor:pointer; padding:0 .3rem; }
+.sleep .act { grid-template-columns:1rem minmax(0,1fr) auto 4rem; }
 "#;
 
 /// Most sources drawn on their own; the rest are "Other".
@@ -1360,7 +1544,12 @@ fn rings_chart(cur: &Summary) -> serde_json::Value {
                 "parts": parts})
         })
         .collect();
-    json!({"full": t.active_minutes, "tracks": tracks, "days": t.days.max(1)})
+    // The rest of the day so far was neither: untracked, honestly.
+    let days = t.days.max(1);
+    let span = (days - 1) * 1440 + cur.now_min.unwrap_or(1440);
+    let untracked = span.saturating_sub(t.active_minutes + t.sleep_minutes);
+    json!({"full": t.active_minutes + t.sleep_minutes, "active": t.active_minutes,
+        "sleep": t.sleep_minutes, "untracked": untracked, "tracks": tracks, "days": days})
 }
 
 /// The 24-hour clock: `[track, from, to, key, name, detail, intensity]` in

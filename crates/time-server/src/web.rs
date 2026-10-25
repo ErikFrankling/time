@@ -334,6 +334,7 @@ pub const ACTIVITY_STYLE: &str = r#"
  .a-other{--c:#7d7c76} .a-unknown{--c:#4a4a46}
 .aw-walking, .aw-out { background-color:var(--c); background-image: repeating-linear-gradient(135deg, transparent 0 3px, var(--bg) 3px 5px); }
 .aw-walking{--c:#8fb8a8} .aw-out{--c:#6b6a64}
+.aw-sleep{--c:#4651a6; background-color:var(--c)}
 .sw { display:inline-block; width:.75rem; height:.75rem; border-radius:3px; background-color:var(--c); vertical-align:-.1rem; }
 .ph, .strip > span.ph, .tot .bar > span.ph { background-image: repeating-linear-gradient(45deg, transparent 0 3px, var(--card) 3px 5px); }
 .stats { display:grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap:.8rem; }
@@ -370,6 +371,7 @@ pub fn duration(minutes: u32) -> String {
 
 /// The day view: the period header and donut shared with week and month,
 /// then the day's own detail.
+#[allow(clippy::too_many_arguments)]
 pub fn day_page(
     day: &crate::day::Day,
     tz: chrono_tz::Tz,
@@ -378,10 +380,37 @@ pub fn day_page(
     prev: &crate::views::Summary,
     phones: &[String],
     step_goal: u32,
+    fills: &[time_core::fill::Fill],
 ) -> String {
     use crate::views;
     let is_today = day.date == today;
     let mut body = views::nav(cur.period, today);
+    let filled: i64 = fills.iter().map(|f| (f.end_ms - f.start_ms) / 60_000).sum();
+    let _ = write!(
+        body,
+        r#"<div class="sub" style="text-align:center">{}</div>"#,
+        if cur.raw {
+            format!(
+                r#"Raw minutes: every minute as the rules labelled it, no gaps filled, no sleep. <a href="/day/{}">Back to the filled day</a>"#,
+                day.date
+            )
+        } else {
+            format!(
+                r#"{} of gaps filled ({} by rule, {} by the model) · <a href="/day/{}?raw=1">raw minutes</a> · <a href="/api/spans/{}">spans</a>"#,
+                duration(filled as u32),
+                fills
+                    .iter()
+                    .filter(|f| f.source == time_core::fill::FillSource::Rule)
+                    .count(),
+                fills
+                    .iter()
+                    .filter(|f| f.source == time_core::fill::FillSource::Model)
+                    .count(),
+                day.date,
+                day.date
+            )
+        }
+    );
     body.push_str(&views::charts(cur, prev, step_goal, Some(day)));
     // The detail below folds away: each card opens with a tap.
     let detail_start = body.len();
@@ -398,6 +427,32 @@ pub fn day_page(
             r#"<section><div class="sub">{} unknown: no rule matched. <a href="/inbox">Label them in the inbox</a>.</div></section>"#,
             duration(day.unknown_minutes)
         );
+    }
+
+    // Filled gaps, each with why.
+    if !fills.is_empty() && !cur.raw {
+        let _ = write!(
+            body,
+            r#"<section><h2>Filled gaps</h2><div class="sub">Minutes with no key, pointer or phone use that were really the activity around them: the same window stayed up (rule) or the decision model said so from two hours of context. Gaps of a quarter hour or more stay away.</div><dl>"#
+        );
+        for f in fills {
+            let _ = write!(
+                body,
+                r#"<dt>{}–{}</dt><dd><span class="sw a-{}"></span> {}{} · {} {:.0}% · {}</dd>"#,
+                clock_hm(tz, f.start_ms),
+                clock_hm(tz, f.end_ms),
+                f.activity,
+                f.activity,
+                f.what
+                    .as_deref()
+                    .map(|w| format!(" · {}", esc(w)))
+                    .unwrap_or_default(),
+                f.source.as_str(),
+                f.confidence * 100.0,
+                esc(&f.reason),
+            );
+        }
+        body.push_str("</dl></section>");
     }
 
     // Places and signals: where he was and what the devices were doing.

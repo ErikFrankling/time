@@ -98,3 +98,40 @@ not listed is neutral:
 productive = ["work", "study"]
 unproductive = ["video", "social"]   # games are neutral, by Erik's choice
 ```
+
+## Sleep and gaps: what is derived on top of the minutes
+
+The minutes stay as the rules made them (`?raw=1` on any day, week or month
+shows them). On top, `crates/time-server/src/derive.rs` adds, every five
+minutes:
+
+- **Gaps filled.** A minute with no key, pointer or phone use is away by the
+  presence rule, but reading T3 Code for three minutes between two bursts of
+  typing is still T3 Code. `time_core::fill` fills a gap shorter than the
+  quarter hour of the presence rule when the same window stayed up and Erik
+  came back to a device; ambiguous gaps (window changed, or nothing came
+  after) go to the decision model two hours at a time, as five-minute
+  summaries: "until when was he still doing this, from when the next thing?"
+  Stored in `fill`, shown everywhere by default, listed with reasons under
+  *Filled gaps* on a day, and as spans at `/api/spans/<date>`.
+- **Sleep.** Per night (18:00 to 18:00), `time_core::sleep` finds the longest
+  stretch with no human use of any device, bridged over blips under 10
+  minutes; three hours after he woke, the decision model confirms or adjusts
+  it from ten-minute summaries of every signal (devices, input, idle resets
+  without input, phone unlocks and lit-while-locked, steps, network, sound,
+  agent prompts, alarms) and answers `{fell_asleep, woke_up, interruptions,
+  confidence, reason}`. Stored in `sleep`; on the clock and rings as the
+  Sleep track, on Day, Week and Month, at `/api/sleep`, and in
+  `time_summary`.
+- **Not Erik.** An idle timer reset with no key or pointer counted (agents on
+  the AGENT-1 seat, the 06:00 update waking a screen) is not presence any
+  more; a phone counts only unlocked with the screen on.
+- **Alarms.** The phone app reports the next alarm clock
+  (`alarm.next_ms` on `time.phone.state`); it moving on after its time came
+  is the alarm being turned off.
+
+The decision model is `[decide]` in `config.toml` (default: OpenCode Go,
+`deepseek-v4.1-flash`, `reasoning_effort = "low"`, key in
+`TIME_DECIDE_KEY`). Every question and answer is in the `decision` table and
+at `/api/decisions?kind=sleep|gaps&key=...`; the same question is answered
+from there. `time-server derive <config.toml>` runs it once by hand.

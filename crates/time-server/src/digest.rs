@@ -401,6 +401,7 @@ fn away_name(k: AwayKind) -> &'static str {
         AwayKind::Walking => "away (out, walking)",
         AwayKind::Out => "away (out)",
         AwayKind::Idle => "away",
+        AwayKind::Sleep => "asleep",
         AwayKind::Untracked => "untracked",
     }
 }
@@ -934,6 +935,7 @@ pub fn now(
                 dur(away_run.unwrap_or(0) as u32)
             ),
             Some(AwayKind::Untracked) => "untracked (no device reported this minute)".to_owned(),
+            Some(AwayKind::Sleep) => format!("asleep for {}", dur(away_run.unwrap_or(0) as u32)),
             _ => format!(
                 "away from every device (no input on the computers, phone not in use) for {}",
                 dur(away_run.unwrap_or(0) as u32)

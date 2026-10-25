@@ -29,7 +29,7 @@ pub struct Item {
 
 /// Unknown minutes since `since`, grouped by what was on screen.
 pub fn items(store: &Store, since: Millis, now: Millis) -> anyhow::Result<Vec<Item>> {
-    let labels = store.labels_between(since, now)?;
+    let labels = store.raw_labels_between(since, now)?;
     let mut groups: HashMap<Subject, (u32, Millis)> = HashMap::new();
     for l in labels
         .iter()
