@@ -86,6 +86,9 @@ jobs:
           arch: x86_64
           target: google_apis
           disable-animations: true
+          # Audio on (the default adds -noaudio): the smoke test plays a tone
+          # and checks the phone reports it as audible.
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -no-boot-anim -camera-back none
           script: android/scripts/emulator-smoke.sh apk
       - uses: actions/upload-artifact@v4
         if: always()

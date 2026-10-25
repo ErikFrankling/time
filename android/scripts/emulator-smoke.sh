@@ -55,6 +55,25 @@ if [ -z "$ok" ]; then
   grep -iE "time|sync" logcat.txt | tail -60 || true
   exit 1
 fi
+# Sound: a tone played as media, with notification access granted so the
+# media session names it, must arrive as a phone listening event. The app
+# samples every 15 s; restarting it makes the service sync at once.
+adb shell cmd notification allow_listener "$pkg/se.frankling.time.MediaListener" || true
+adb shell media volume --stream 3 --set 10 >/dev/null 2>&1 || true
+adb shell am start -W -n "$pkg/se.frankling.time.TonePlayerActivity" --ei seconds 50
+sleep 55
+adb shell am force-stop "$pkg"
+adb shell am start -W -n "$pkg/se.frankling.time.MainActivity"
+heard=""
+for _ in $(seq 1 24); do
+  heard=$(curl -sf "$server/api/listening?window=2h" | jq -c '[.data.sources[] | {source, minutes, top}]' || true)
+  if [ -n "$heard" ] && [ "$heard" != "[]" ]; then break; fi
+  sleep 5
+done
+echo "phone listening: $heard"
+echo "$heard" | grep -q "Smoke tone" || { echo "FAIL: the tone did not arrive as phone listening"; adb logcat -d | grep -iE "time|audio" | tail -40; exit 1; }
+echo "phone sound check passed"
+
 # Edge to edge: with a tall display cutout, the native bar must sit below
 # the status bar, and Phone settings must open. Screenshots are uploaded.
 mkdir -p shots
