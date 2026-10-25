@@ -98,10 +98,12 @@ fn run_probe(config: &AgentConfig) -> anyhow::Result<()> {
     match input.problem() {
         Some(p) => println!("input:   ERROR {p}"),
         None => println!(
-            "input:   {} devices; in 3 s: {} keys, {} pointer events; idle {:?} s",
+            "input:   {} devices; in 3 s: {} keys ({} clicks), {} pointer events, {:?} active s; idle {:?} s",
             input.devices(),
             snap.keys,
+            snap.clicks,
             snap.mouse,
+            snap.active_seconds,
             snap.idle_seconds
         ),
     }

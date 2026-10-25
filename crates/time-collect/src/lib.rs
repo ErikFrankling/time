@@ -8,6 +8,7 @@
 
 pub mod git;
 pub mod github;
+pub mod speak;
 pub mod t3;
 
 use serde::Deserialize;
@@ -39,6 +40,10 @@ pub struct CollectConfig {
     /// from it when it exists.
     #[serde(default = "default_t3")]
     pub t3: String,
+    /// The speak daemon's state directory: read-aloud utterances and hotkey
+    /// dictations are read from it when it exists.
+    #[serde(default = "default_speak")]
+    pub speak: String,
 }
 
 fn default_endpoint() -> String {
@@ -51,6 +56,10 @@ fn default_roots() -> Vec<String> {
 
 fn default_t3() -> String {
     "~/.t3/userdata".into()
+}
+
+fn default_speak() -> String {
+    "~/.local/state/speak".into()
 }
 
 fn default_days() -> i64 {

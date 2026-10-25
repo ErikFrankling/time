@@ -22,6 +22,10 @@ struct State {
     last_ms: AtomicU64,
     keys: AtomicU32,
     mouse: AtomicU32,
+    clicks: AtomicU32,
+    /// Seconds with any input since the last take, and the last such second.
+    active: AtomicU32,
+    last_sec: AtomicU64,
     devices: AtomicU32,
 }
 
@@ -34,6 +38,11 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// Mouse, touchpad and stylus buttons: BTN_MISC (0x100) up to KEY_OK (0x160).
+pub fn is_button(code: u16) -> bool {
+    (0x100..0x160).contains(&code)
 }
 
 pub fn is_virtual(name: &str) -> bool {
@@ -72,13 +81,22 @@ impl Evdev {
                         match ev.event_type() {
                             evdev::EventType::KEY if ev.value() == 1 => {
                                 state.keys.fetch_add(1, Relaxed);
+                                // Only whether it was a button; the code is
+                                // dropped here like every key code.
+                                if is_button(ev.code()) {
+                                    state.clicks.fetch_add(1, Relaxed);
+                                }
                             }
                             evdev::EventType::RELATIVE | evdev::EventType::ABSOLUTE => {
                                 state.mouse.fetch_add(1, Relaxed);
                             }
                             _ => continue,
                         }
-                        state.last_ms.store(now_ms(), Relaxed);
+                        let now = now_ms();
+                        state.last_ms.store(now, Relaxed);
+                        if state.last_sec.swap(now / 1000, Relaxed) != now / 1000 {
+                            state.active.fetch_add(1, Relaxed);
+                        }
                     }
                 }
                 state.devices.fetch_sub(1, Relaxed);
@@ -108,6 +126,8 @@ impl Input for Evdev {
             idle_seconds: Some((idle_ms / 1000) as u32),
             keys: self.state.keys.swap(0, Relaxed),
             mouse: self.state.mouse.swap(0, Relaxed),
+            clicks: self.state.clicks.swap(0, Relaxed),
+            active_seconds: Some(self.state.active.swap(0, Relaxed).min(60)),
         }
     }
 }
@@ -118,5 +138,7 @@ mod tests {
     fn virtual_devices_are_recognised() {
         assert!(super::is_virtual("ydotoold virtual device"));
         assert!(!super::is_virtual("Logitech USB Receiver"));
+        assert!(super::is_button(0x110), "BTN_LEFT");
+        assert!(!super::is_button(30), "KEY_A");
     }
 }

@@ -144,6 +144,10 @@ impl Event {
     }
 }
 
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ScreenMinute {
     /// Window class of the focused window; empty when nothing has focus.
@@ -166,8 +170,21 @@ pub struct ScreenMinute {
     /// Key presses this minute. Which keys is never recorded.
     #[serde(default)]
     pub keys: u32,
+    /// Pointer motion events this minute (each axis report counts).
     #[serde(default)]
     pub mouse: u32,
+    /// Mouse and touchpad button presses this minute. Also counted in
+    /// `keys`, which older agents sent without this split.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub clicks: u32,
+    /// Seconds of the minute with any keyboard or pointer input: how much
+    /// of it Erik was actively interacting. Absent from older agents.
+    #[serde(
+        rename = "active.seconds",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub active_seconds: Option<u32>,
     /// Seconds since the last input at the end of the minute; absent when
     /// the agent could not read input devices, which is "unknown", not
     /// "active".
@@ -313,7 +330,7 @@ pub struct FocusSpan {
     pub focused: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ReadAloudPlayed {
     #[serde(rename = "thread.id", default)]
     pub thread_id: String,

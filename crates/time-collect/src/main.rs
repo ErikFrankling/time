@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use time_agent::sender::{Delivery, HttpSender, Sender};
-use time_collect::{git, github, t3, CollectConfig};
+use time_collect::{git, github, speak, t3, CollectConfig};
 
 /// One run: scan, send, exit. A systemd timer runs it every few minutes;
 /// stable event ids make every rerun harmless.
@@ -46,6 +46,12 @@ fn main() -> anyhow::Result<()> {
             }
             Err(e) => eprintln!("collect: t3: {e:#}"),
         }
+    }
+    let speak_dir = expand(&cfg.speak);
+    if speak_dir.is_dir() {
+        let mut e = speak::collect(&speak_dir, &cfg.device, since);
+        eprintln!("collect: {} event(s) from speak", e.len());
+        events.append(&mut e);
     }
     eprintln!(
         "collect: {} event(s) from {} repositories",

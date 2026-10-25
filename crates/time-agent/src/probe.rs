@@ -23,6 +23,9 @@ pub trait Desktop: Send {
 pub struct InputSnapshot {
     pub keys: u32,
     pub mouse: u32,
+    pub clicks: u32,
+    /// Seconds with any input since the previous call; None when unknown.
+    pub active_seconds: Option<u32>,
     /// None when no input device could be read: unknown, not idle.
     pub idle_seconds: Option<u32>,
 }

@@ -43,6 +43,9 @@ impl Input for SimInput {
         InputSnapshot {
             keys,
             mouse,
+            clicks: 0,
+            // A scripted minute with input is a minute of steady interaction.
+            active_seconds: Some(if keys + mouse > 0 { 60 } else { 0 }),
             idle_seconds,
         }
     }

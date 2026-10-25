@@ -210,6 +210,8 @@ impl Agent {
         let mut minute = ScreenMinute {
             keys: input.keys,
             mouse: input.mouse,
+            clicks: input.clicks,
+            active_seconds: input.active_seconds,
             idle_seconds: input.idle_seconds,
             audio_playing,
             locked: sys.locked,
