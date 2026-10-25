@@ -50,7 +50,8 @@ impl Candidate {
 /// The longest quiet stretch in `[from, to)`, bridged across blips.
 /// Minutes with no label count as quiet.
 pub fn candidate(labels: &[MinuteLabel], from: Millis, to: Millis) -> Option<Candidate> {
-    let n = ((to - from) / MINUTE_MS).max(0) as usize;
+    // Up to a minute boundary: `to` is often "now", mid-minute.
+    let n = ((to - from + MINUTE_MS - 1) / MINUTE_MS).max(0) as usize;
     let mut used = vec![false; n];
     for l in labels {
         if l.ts >= from && l.ts < to && human(l) {
@@ -206,5 +207,8 @@ mod tests {
         assert_eq!(c.start_ms, T + 200 * MINUTE_MS);
         assert!(c.interruptions.is_empty());
         assert!(candidate(&day(&[(0, 24 * 60)]), T, T + 24 * 60 * MINUTE_MS).is_none());
+        // A window ending mid-minute, as "now" does.
+        let labels = day(&[(0, 60)]);
+        assert!(candidate(&labels, T, T + 24 * 60 * MINUTE_MS - 30_000).is_some());
     }
 }
