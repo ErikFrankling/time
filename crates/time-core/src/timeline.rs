@@ -40,7 +40,7 @@ use crate::rules::{Facts, RuleSet, Source};
 /// Bump whenever a change here can change a label. Stored labels carry it,
 /// and the server relabels all history when it differs, exactly as it does
 /// when the rules file changes.
-pub const LOGIC_VERSION: u32 = 6;
+pub const LOGIC_VERSION: u32 = 7;
 
 /// Input this recent at the end of a minute means someone was there.
 const RECENT_INPUT_SECS: u32 = 90;
@@ -147,7 +147,10 @@ pub fn label_minutes(
 
         for ((device, _), m) in screens.iter().filter(|((_, t), _)| *t == ts) {
             let source = source_of(device).unwrap_or(Source::Desktop);
-            obs.push(observe_screen(rules, device, source, m));
+            let touched_before = screens
+                .get(&(*device, ts - MINUTE_MS))
+                .is_some_and(|p| p.keys > 0 || p.mouse > 0);
+            obs.push(observe_screen(rules, device, source, m, touched_before));
         }
         if let Some((env, _)) = spans
             .iter()
@@ -278,9 +281,17 @@ fn observe_screen<'e>(
     device: &'e str,
     source: Source,
     m: &'e ScreenMinute,
+    touched_before: bool,
 ) -> Observation<'e> {
     let touched = m.keys > 0 || m.mouse > 0;
-    let recent = m.idle_seconds.is_some_and(|s| s < RECENT_INPUT_SECS);
+    // Recent input only counts when a physical keyboard or pointer counted
+    // it, in this minute or the one before. The compositor's idle timer
+    // also resets for things that are not Erik: agents typing through a
+    // virtual device on the AGENT-1 seat, a screen woken by the 06:00
+    // update. On 2026-10-24 at 06:05 that was a "minute of work" with zero
+    // keys and zero mouse while he slept.
+    let recent =
+        (touched || touched_before) && m.idle_seconds.is_some_and(|s| s < RECENT_INPUT_SECS);
     // A locked screen or a closed lid is nobody at that machine, whatever
     // the input counters and players say; so is one nobody has touched for
     // a quarter of an hour. Agents that do not report idle time are trusted.
@@ -861,6 +872,31 @@ mod tests {
             "x.com"
         );
         assert_eq!(screen_what(&m("webcord", None, "Discord")), "webcord");
+    }
+
+    /// 2026-10-24 06:05: the update woke the screen, Hyprland's idle timer
+    /// said 35 s, and no key or pointer was touched. That is not Erik.
+    #[test]
+    fn an_idle_reset_without_physical_input_is_not_someone_there() {
+        let woken = ScreenMinute {
+            window_class: "com.t3tools.T3Code".into(),
+            idle_seconds: Some(35),
+            ..Default::default()
+        };
+        let l = label(&[screen(T, woken.clone())]);
+        assert_eq!((l.place, l.rule.as_str()), (Place::Away, "presence.away"));
+
+        // Input counted in the minute before: still at the keyboard.
+        let before = ScreenMinute {
+            window_class: "com.t3tools.T3Code".into(),
+            keys: 3,
+            ..Default::default()
+        };
+        let l = label(&[screen(T - MINUTE_MS, before), screen(T, woken)]);
+        assert_eq!(
+            (l.place, l.activity),
+            (Place::Computer, Some(Activity::Work))
+        );
     }
 
     #[test]
