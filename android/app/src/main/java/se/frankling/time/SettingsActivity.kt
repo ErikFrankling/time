@@ -252,6 +252,29 @@ class SettingsActivity : ComponentActivity() {
 
             HorizontalDivider()
 
+            // Track names for what plays on the phone: media sessions are only
+            // handed to an app with notification access.
+            val sessionsOk = remember(key) { PhoneAudio.hasSessionAccess(this@SettingsActivity) }
+            Text(
+                if (sessionsOk) "What is playing: named" else "What is playing: app on screen only",
+                style = MaterialTheme.typography.titleMedium
+            )
+            if (!sessionsOk) {
+                OutlinedButton(
+                    onClick = {
+                        startActivity(Intent(android.provider.Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Name what is playing (Spotify, YouTube)") }
+                Text(
+                    "Turn on \"Time: what is playing\" under notification access. It lets Time see which app " +
+                        "and track are playing while the sound is on. Notifications themselves are never read.",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+
+            HorizontalDivider()
+
             // Steps and distance. Health Connect is filled by what the phone
             // already runs; this app never uses GPS or asks for location.
             val healthMissing = remember(key) { Health.missing(this@SettingsActivity) }

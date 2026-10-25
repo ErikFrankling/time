@@ -64,7 +64,7 @@ class SyncService : Service() {
                     } catch (_: Throwable) {
                     }
                     if (now - lastSync < PERIOD_MS) {
-                        delay(60_000)
+                        listenFor(60_000)
                         continue
                     }
                     lastSync = now
@@ -82,7 +82,7 @@ class SyncService : Service() {
                         }
                     }
                     notifyStatus()
-                    delay(60_000)
+                    listenFor(60_000)
                 }
             }
         }
@@ -90,6 +90,19 @@ class SyncService : Service() {
         // service with a null intent, which lands right back here and
         // restarts the loop.
         return START_STICKY
+    }
+
+    /** Wait [ms], sampling what is audible every [PhoneAudio.EVERY_MS]. */
+    private suspend fun listenFor(ms: Long) {
+        val end = System.currentTimeMillis() + ms
+        while (System.currentTimeMillis() < end) {
+            delay(PhoneAudio.EVERY_MS)
+            try {
+                val now = System.currentTimeMillis()
+                AudioSamples.of(this).add(now / 60_000 * 60_000, (PhoneAudio.EVERY_MS / 1000).toInt(), PhoneAudio.sample(this))
+            } catch (_: Throwable) {
+            }
+        }
     }
 
     override fun onDestroy() {

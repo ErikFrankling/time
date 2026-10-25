@@ -147,6 +147,8 @@ pub struct DayTotals {
     pub distance_m: f64,
     /// Sound that could really be heard, per source.
     pub listening: crate::listening::Tally,
+    /// What each device was doing on screen and in sound.
+    pub tracks: crate::tracks::Tracks,
     /// After today: nothing yet, not nothing.
     pub future: bool,
 }
@@ -195,6 +197,7 @@ impl DayTotals {
         for (k, n) in &o.listening.titles {
             *self.listening.titles.entry(k.clone()).or_default() += n;
         }
+        self.tracks.add(&o.tracks);
     }
 }
 
@@ -292,6 +295,13 @@ pub fn summarise(
             from,
             to,
             3_600_000,
+        );
+        t.tracks = crate::tracks::Tracks::build(
+            &labels,
+            heard.iter().map(|(d, s, l)| (d.as_str(), *s, l)),
+            phones,
+            from,
+            to,
         );
         t.date = Some(date);
         if t.tracked() > 0 {
@@ -634,6 +644,7 @@ pub fn chart_data(
         "projects": projects,
         "calendar": calendar,
         "listening": listening_chart(cur, prev, &labels),
+        "tracks": tracks_chart(cur, &labels),
     })
 }
 
@@ -653,6 +664,24 @@ pub fn charts(cur: &Summary, prev: &Summary, goal: u32, day: Option<&crate::day:
             "Two devices at once",
             "13rem",
             r#"<div class="cap">Each bar: left colour what you were focused on, right colour what the other device (📱 phone, 💻 computer) was doing.</div>"#,
+        ));
+    }
+    if data["tracks"]["any"].as_bool() == Some(true) {
+        let when = match cur.period.kind {
+            Kind::Day => ("Screens and sound over the day", "Four tracks, one per device and kind: what was on each screen (by activity) and what could be heard from it (by source). Filled at the same time means at the same time."),
+            _ => ("Screens and sound by day", "Minutes per track each day. Tap a day to open it."),
+        };
+        out.push_str(&slot(
+            "c-tracks-total",
+            "Screens and sound",
+            "12rem",
+            r#"<div class="cap">Each bar is one track; its colours are what filled it.</div>"#,
+        ));
+        out.push_str(&slot(
+            "c-tracks",
+            when.0,
+            "13rem",
+            &format!(r#"<div class="cap">{}</div>"#, when.1),
         ));
     }
     let over = match cur.period.kind {
@@ -1128,6 +1157,70 @@ fn listening_card(l: &serde_json::Value, kind: Kind) -> String {
     };
     out.push_str(&slot("c-listen-time", when, "11rem", ""));
     out
+}
+
+/// Kinds of thing drawn per track before the rest is "other".
+const TRACK_TOP: usize = 5;
+
+/// The four tracks: totals per track by what filled it, then when (lanes
+/// for a day, a bar per track per day for a week or month).
+fn tracks_chart(cur: &Summary, labels: &[String]) -> serde_json::Value {
+    use crate::tracks::{is_sound, NAMES};
+    use serde_json::json;
+    let t = &cur.total.tracks;
+    let name = |track: usize, key: &str| {
+        if is_sound(track) {
+            crate::listening::name(key)
+        } else {
+            key.to_owned()
+        }
+    };
+    let totals: Vec<serde_json::Value> = (0..4)
+        .map(|track| {
+            let mut v: Vec<(&String, &u32)> = t.seconds[track].iter().collect();
+            v.sort_by_key(|(k, s)| (std::cmp::Reverse(**s), (*k).clone()));
+            let mut parts: Vec<serde_json::Value> = v
+                .iter()
+                .take(TRACK_TOP)
+                .map(|(k, s)| {
+                    json!({"key": k, "name": name(track, k),
+                        "m": crate::listening::minutes(**s)})
+                })
+                .collect();
+            let rest: u32 = v.iter().skip(TRACK_TOP).map(|(_, s)| **s).sum();
+            if rest >= 30 {
+                parts.push(
+                    json!({"key": "", "name": "other", "m": crate::listening::minutes(rest)}),
+                );
+            }
+            json!({"name": NAMES[track], "sound": is_sound(track), "m": t.minutes(track),
+                "parts": parts})
+        })
+        .collect();
+    let (spans, minutes) = match (cur.period.kind, cur.days.first()) {
+        (Kind::Day, Some(d)) => (
+            d.tracks
+                .spans
+                .iter()
+                .map(|s| json!([s.track, s.from, s.to, s.what, name(s.track, &s.what)]))
+                .collect::<Vec<_>>(),
+            // A DST day runs an hour short or long; the axis stays 24 h.
+            24 * 60,
+        ),
+        _ => (vec![], 0),
+    };
+    let per_day: Vec<Vec<u32>> = (0..4)
+        .map(|track| cur.days.iter().map(|d| d.tracks.minutes(track)).collect())
+        .collect();
+    json!({
+        "names": NAMES,
+        "totals": totals,
+        "spans": spans,
+        "minutes": minutes,
+        "labels": labels,
+        "perDay": per_day,
+        "any": (0..4).any(|i| t.minutes(i) > 0),
+    })
 }
 
 #[cfg(test)]

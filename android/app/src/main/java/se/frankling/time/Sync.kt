@@ -230,10 +230,13 @@ object Sync {
             // Phone state sampled each minute by the service.
             val states = StateSamples.of(ctx)
             fresh += StateSamples.toEvents(ctx.device, states.read())
+            val audio = AudioSamples.of(ctx)
+            fresh += AudioSamples.toEvents(ctx.device, audio.read())
 
             // Everything read goes to disk before the network is touched.
             val pending = spool.merge(fresh, now)
             states.clear()
+            audio.clear()
             val heartbeat = Envelope.heartbeat(
                 nowMs = now,
                 // Everything pending rides in this request; what is left
@@ -267,6 +270,9 @@ object Sync {
         if (!Usage.hasAccess(ctx)) add("usage access not granted: no phone app data")
         if (!PhoneStateSampler.ssidPermitted(ctx)) {
             add("wifi name: location permission not granted (places still work by router address)")
+        }
+        if (!PhoneAudio.hasSessionAccess(ctx)) {
+            add("notification access not granted: audible minutes are named by the app on screen, without track names")
         }
         addAll(Health.missing(ctx))
         val pm = ctx.getSystemService(android.os.PowerManager::class.java)

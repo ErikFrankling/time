@@ -18,6 +18,7 @@ pub mod mcp;
 pub mod nudge;
 pub mod status;
 pub mod store;
+pub mod tracks;
 pub mod views;
 pub mod web;
 

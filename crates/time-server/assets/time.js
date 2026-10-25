@@ -45,6 +45,17 @@
     };
     var axisText = { color: mu, fontSize: 10, fontFamily: font };
     var per = D.perDay ? ' a day' : '';
+    // Sound sources: their own colours where they have one, else a cycle.
+    var LC = ['#9085e9', '#3987e5', '#d55181', '#c98500', '#199e70', '#d95926'];
+    var known = { spotify: '#1db954', 'youtube.com': '#e5484d', 'netflix.com': '#b81d24', 'music.youtube.com': '#ff6b6b' };
+    var used = {};
+    function lcol(key) {
+      if (known[key]) return known[key];
+      if (!key) return '#7d7c76';
+      if (!used[key]) used[key] = LC[Object.keys(used).length % LC.length];
+      return used[key];
+    }
+    function hhmm(min) { var h = Math.floor(min / 60), m = min % 60; return (h < 10 ? '0' : '') + h + ':' + (m < 10 ? '0' : '') + m; }
 
     // Where the time went: attention inside, a second device outside.
     var d = D.donut;
@@ -115,6 +126,86 @@
       }]
     });
 
+    // Four tracks: computer and phone, screen and sound.
+    var T = D.tracks;
+    if (T && T.any) {
+      function tcol(sound, key) { return sound ? lcol(key) : (C[key] || C.other); }
+      // Totals: one bar per track, its colours what filled it.
+      var rows = T.totals.slice().reverse();
+      var seen = {}, tseries = [];
+      rows.forEach(function (r, ri) {
+        r.parts.forEach(function (p) {
+          var id = (r.sound ? 's:' : 'a:') + p.key;
+          if (!(id in seen)) {
+            seen[id] = tseries.length;
+            tseries.push({ type: 'bar', stack: 't', barWidth: 14, name: p.name,
+              itemStyle: { color: p.key ? tcol(r.sound, p.key) : '#7d7c76' }, data: rows.map(function () { return 0; }) });
+          }
+          tseries[seen[id]].data[ri] = p.m;
+        });
+      });
+      make('c-tracks-total', {
+        animation: false,
+        grid: { left: 4, right: 12, top: 2, bottom: 2, containLabel: true },
+        tooltip: Object.assign({ trigger: 'axis', axisPointer: { type: 'shadow' }, formatter: function (ps) {
+          var r = rows[ps[0].dataIndex], out = '<b>' + r.name + '</b> · ' + dur(r.m) + per;
+          ps.forEach(function (p) { if (p.value) out += '<br><span style="color:' + p.color + '">●</span> ' + p.seriesName + ' ' + dur(p.value); });
+          return out;
+        } }, tip),
+        xAxis: { type: 'value', show: false },
+        yAxis: { type: 'category', axisTick: { show: false }, axisLine: { show: false },
+          axisLabel: Object.assign({}, axisText, { color: fg, fontSize: 11 }),
+          data: rows.map(function (r) { return r.name + '  ' + hours(r.m); }) },
+        series: tseries
+      });
+      if (D.kind === 'day') {
+        // Lanes: every stretch of a track doing one thing, minute exact.
+        var names = T.names;
+        make('c-tracks', {
+          animation: false,
+          grid: { left: 4, right: 10, top: 4, bottom: 4, containLabel: true },
+          tooltip: Object.assign({ trigger: 'item', formatter: function (p) {
+            var s = p.value;
+            return '<b>' + names[s[0]] + '</b><br>' + s[4] + ' ' + hhmm(s[1]) + '–' + hhmm(s[2]) + ' (' + dur(s[2] - s[1]) + ')';
+          } }, tip),
+          xAxis: { type: 'value', min: 0, max: T.minutes, interval: 360, splitLine: { lineStyle: { color: line, opacity: 0.6 } },
+            axisLabel: Object.assign({}, axisText, { formatter: function (v) { return hhmm(v).slice(0, 2); } }) },
+          yAxis: { type: 'category', inverse: true, data: names, axisTick: { show: false }, axisLine: { show: false },
+            axisLabel: Object.assign({}, axisText, { color: fg, fontSize: 11 }) },
+          series: [{
+            type: 'custom',
+            renderItem: function (params, api) {
+              var a = api.coord([api.value(1), api.value(0)]), b = api.coord([api.value(2), api.value(0)]);
+              var h = api.size([0, 1])[1] * 0.62;
+              return { type: 'rect', shape: { x: a[0], y: a[1] - h / 2, width: Math.max(b[0] - a[0], 1), height: h },
+                style: { fill: tcol(api.value(0) % 2 === 1, T.spans[params.dataIndex][3]) } };
+            },
+            encode: { x: [1, 2], y: 0 },
+            data: T.spans
+          }]
+        });
+      } else {
+        var TC = ['#3987e5', '#9085e9', '#d95926', '#1db954'];
+        var tr = make('c-tracks', {
+          animation: false,
+          grid: { left: 4, right: 4, top: 24, bottom: 4, containLabel: true },
+          legend: { top: 0, itemWidth: 10, itemHeight: 8, textStyle: { color: mu, fontSize: 10, fontFamily: font } },
+          tooltip: Object.assign({ trigger: 'axis', axisPointer: { type: 'shadow' }, formatter: function (ps) {
+            var out = '<b>' + ps[0].axisValue + '</b>';
+            ps.forEach(function (p) { out += '<br><span style="color:' + p.color + '">●</span> ' + p.seriesName + ' ' + dur(p.value); });
+            return out;
+          } }, tip),
+          xAxis: { type: 'category', data: T.labels, axisTick: { show: false }, axisLine: { lineStyle: { color: line } },
+            axisLabel: Object.assign({}, axisText, { interval: D.kind === 'month' ? 4 : 0 }) },
+          yAxis: { type: 'value', splitNumber: 3, splitLine: { lineStyle: { color: line, opacity: 0.6 } },
+            axisLabel: Object.assign({}, axisText, { formatter: function (v) { return hours(v); } }) },
+          series: T.names.map(function (n, i) {
+            return { type: 'bar', name: n, barGap: '10%', barCategoryGap: '25%', itemStyle: { color: TC[i], borderRadius: [2, 2, 0, 0] }, data: T.perDay[i] };
+          })
+        });
+        if (tr && D.time.links.length) tr.on('click', function (p) { link(D.time.links[p.dataIndex]); });
+      }
+    }
     // Over the day / week / month: minutes per activity, stacked.
     var t = D.time;
     var lines = [];
@@ -243,15 +334,6 @@
     // Listening: what could really be heard, per source, then when.
     var L = D.listening;
     if (L && L.total) {
-      var LC = ['#1db954', '#e5484d', '#9085e9', '#c98500', '#3987e5', '#d55181', '#7d7c76'];
-      var known = { spotify: '#1db954', 'youtube.com': '#e5484d', 'netflix.com': '#b81d24', 'music.youtube.com': '#ff6b6b' };
-      var used = {};
-      function lcol(key, i) {
-        if (known[key]) return known[key];
-        if (!key) return '#7d7c76';
-        if (!used[key]) used[key] = LC[2 + (Object.keys(used).length % (LC.length - 3))];
-        return used[key];
-      }
       var src = L.sources.slice().reverse();
       make('c-listen', {
         animation: false,

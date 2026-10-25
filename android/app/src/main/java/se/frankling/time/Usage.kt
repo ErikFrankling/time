@@ -120,6 +120,13 @@ object Usage {
         }
     }
 
+    /** An app's name as the launcher shows it, or the package. */
+    fun label(ctx: Context, pkg: String): String = try {
+        ctx.packageManager.let { it.getApplicationLabel(it.getApplicationInfo(pkg, 0)).toString() }
+    } catch (_: Exception) {
+        pkg
+    }
+
     fun query(ctx: Context, from: Long, to: Long): UsageEvents? =
         ctx.getSystemService(UsageStatsManager::class.java)?.queryEvents(from, to)
 }
