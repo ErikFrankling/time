@@ -326,11 +326,14 @@ pub fn status_page(s: &Status, tz: chrono_tz::Tz) -> String {
 
 /// Activity colours: the validated categorical palette in a fixed order,
 /// one hue per activity forever. `other` and `unknown` are neutral greys;
-/// away is the empty surface.
+/// away is the empty surface, except out (hatched grey) and out walking
+/// (hatched sage), which are not activities and look it.
 pub const ACTIVITY_STYLE: &str = r#"
 .a-work{--c:#3987e5} .a-social{--c:#d95926} .a-study{--c:#199e70} .a-video{--c:#c98500}
  .a-comms{--c:#d55181} .a-browsing{--c:#008300} .a-music{--c:#9085e9} .a-games{--c:#e66767}
  .a-other{--c:#7d7c76} .a-unknown{--c:#4a4a46}
+.aw-walking, .aw-out { background-color:var(--c); background-image: repeating-linear-gradient(135deg, transparent 0 3px, var(--bg) 3px 5px); }
+.aw-walking{--c:#8fb8a8} .aw-out{--c:#6b6a64}
 .sw { display:inline-block; width:.75rem; height:.75rem; border-radius:3px; background-color:var(--c); vertical-align:-.1rem; }
 .ph, .strip > span.ph, .tot .bar > span.ph { background-image: repeating-linear-gradient(45deg, transparent 0 3px, var(--card) 3px 5px); }
 .stats { display:grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap:.8rem; }

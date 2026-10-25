@@ -10,8 +10,20 @@
 //! 1. a computer with typing,
 //! 2. the phone in the foreground,
 //! 3. a computer with pointer movement or very recent input,
-//! 4. a computer playing video or audio nobody is touching (watching),
+//! 4. a computer playing video or audio nobody has touched for less than
+//!    [`PRESENT_IDLE_SECS`] (watching),
 //! 5. otherwise away.
+//!
+//! A phone app only counts while the phone is unlocked with its screen on.
+//! A computer nobody has touched for longer than [`PRESENT_IDLE_SECS`] is
+//! nobody there, whatever it is playing: Netflix left running for four
+//! hours while Erik was out at dinner is not four hours of video.
+//!
+//! An away minute says why when the data does: `presence.moving` when the
+//! phone counted steps (out, walking), `presence.out` when the phone was on
+//! a different network from the computers (see [`locate`]), otherwise
+//! `presence.away` (nobody at any device) or `presence.no-data` (nothing
+//! reported: untracked). Away is never an activity.
 //!
 //! What another device was doing in the same minute becomes the minute's
 //! `background` and `background_device`: video or music playing elsewhere
@@ -28,12 +40,25 @@ use crate::rules::{Facts, RuleSet, Source};
 /// Bump whenever a change here can change a label. Stored labels carry it,
 /// and the server relabels all history when it differs, exactly as it does
 /// when the rules file changes.
-pub const LOGIC_VERSION: u32 = 4;
+pub const LOGIC_VERSION: u32 = 5;
 
 /// Input this recent at the end of a minute means someone was there.
 const RECENT_INPUT_SECS: u32 = 90;
+/// No keyboard or mouse input for this long and nobody is at that computer,
+/// even with a video playing or a window fullscreen. From Erik's data
+/// (2026-10-21..25): of 72 stretches without input while something played
+/// that he ended by touching the machine, 65 ended within 15 minutes and 70
+/// within 30; the only longer ones were 4-5 hours with him out of the house.
+pub const PRESENT_IDLE_SECS: u32 = 15 * 60;
+/// Steps per minute, averaged over a Health Connect bucket, that mean
+/// moving. Erik's hours split cleanly: under 300 steps an hour at home,
+/// over 1000 when out; this is 480 an hour.
+pub const MOVING_STEPS_PER_MIN: f64 = 8.0;
 /// A phone app must hold the foreground this long to own a minute.
 const PHONE_MIN_OVERLAP_MS: Millis = 30_000;
+/// A locked phone reports its state only every few minutes; its last
+/// network stands for this long.
+pub const PHONE_STATE_HOLD_MS: Millis = 15 * MINUTE_MS;
 
 #[derive(Debug, Clone)]
 pub struct DeviceSpec {
@@ -72,6 +97,9 @@ pub fn label_minutes(
     let mut spans: Vec<&Envelope> = Vec::new();
     let mut focus: Vec<&Envelope> = Vec::new();
     let mut prompts: BTreeMap<Millis, &str> = BTreeMap::new();
+    let mut moving: Vec<(Millis, Millis)> = Vec::new();
+    // Per phone and minute: was it ever unlocked with the screen on?
+    let mut phone_usable: HashMap<(&str, Millis), bool> = HashMap::new();
     for e in events {
         match &e.event {
             Event::ScreenMinute(m) => {
@@ -84,6 +112,21 @@ pub fn label_minutes(
                 );
             }
             Event::PhoneApp(_) => spans.push(e),
+            Event::PhoneState(s) => {
+                let usable = !s.locked && s.interactive;
+                *phone_usable
+                    .entry((
+                        e.device.as_str(),
+                        e.start_ms - e.start_ms.rem_euclid(MINUTE_MS),
+                    ))
+                    .or_insert(false) |= usable;
+            }
+            Event::HealthSteps(h) if e.end_ms > e.start_ms => {
+                let per_min = h.steps as f64 * MINUTE_MS as f64 / (e.end_ms - e.start_ms) as f64;
+                if per_min >= MOVING_STEPS_PER_MIN {
+                    moving.push((e.start_ms, e.end_ms));
+                }
+            }
             Event::FocusSpan(f) if f.focused && f.project.is_some() => focus.push(e),
             Event::PromptSent(p) if p.origin == Origin::Human => {
                 if let Some(project) = &p.project {
@@ -106,6 +149,9 @@ pub fn label_minutes(
         }
         if let Some((env, _)) = spans
             .iter()
+            // A locked phone or a dark screen is in a pocket, whatever
+            // app it last showed.
+            .filter(|e| phone_usable.get(&(e.device.as_str(), ts)) != Some(&false))
             .map(|e| (*e, e.end_ms.min(end) - e.start_ms.max(ts)))
             .filter(|(_, o)| *o >= PHONE_MIN_OVERLAP_MS)
             .max_by_key(|(_, o)| *o)
@@ -148,7 +194,9 @@ pub fn label_minutes(
                 project: None,
                 background: None,
                 background_device: None,
-                rule: if obs.is_empty() {
+                rule: if moving.iter().any(|(a, b)| *a < end && *b > ts) {
+                    "presence.moving".into()
+                } else if obs.is_empty() {
                     "presence.no-data".into()
                 } else {
                     "presence.away".into()
@@ -220,11 +268,15 @@ fn observe_screen<'e>(
     source: Source,
     m: &'e ScreenMinute,
 ) -> Observation<'e> {
+    let touched = m.keys > 0 || m.mouse > 0;
     let recent = m.idle_seconds.is_some_and(|s| s < RECENT_INPUT_SECS);
     // A locked screen or a closed lid is nobody at that machine, whatever
-    // the input counters and players say.
-    let away = m.locked == Some(true) || m.lid_closed == Some(true);
-    let active = !away && (m.keys > 0 || m.mouse > 0 || recent);
+    // the input counters and players say; so is one nobody has touched for
+    // a quarter of an hour. Agents that do not report idle time are trusted.
+    let away = m.locked == Some(true)
+        || m.lid_closed == Some(true)
+        || (!touched && m.idle_seconds.is_some_and(|s| s >= PRESENT_IDLE_SECS));
+    let active = !away && (touched || recent);
     let passive = !away && (m.audio_playing || m.fullscreen);
     let (activity, rule, project) = if m.blocked {
         (Activity::Other, "blocked".to_owned(), None)
@@ -281,25 +333,94 @@ fn pick<'a, 'e>(obs: &'a [Observation<'e>]) -> Option<&'a Observation<'e>> {
 
 /// Set each label's `location` from the network its devices reported: the
 /// device in use first, then the phone, then any computer.
+///
+/// An away minute goes where the phone is, since Erik is where his phone
+/// is, not where his idle pc is. When the phone reported a network that is
+/// not the computers' place (mobile data, another Wi-Fi), the minute is
+/// `presence.out` unless steps already made it `presence.moving`.
 pub fn locate(
     places: &[crate::places::PlaceSpec],
     labels: &mut [MinuteLabel],
     events: &[Envelope],
 ) {
     use crate::event::Network;
+    let known = |n: &Network| n.ssid.is_some() || n.gateway.is_some() || n.domain.is_some();
     let mut nets: HashMap<(Millis, &str), &Network> = HashMap::new();
+    // The phone's network per minute, even an empty one: on mobile data the
+    // phone reports no Wi-Fi, router or domain, and that is the signal.
+    let mut phone_nets: BTreeMap<Millis, &Network> = BTreeMap::new();
     for e in events {
         let ts = e.start_ms - e.start_ms.rem_euclid(MINUTE_MS);
         let net = match &e.event {
             Event::ScreenMinute(m) => &m.network,
-            Event::PhoneState(s) => &s.network,
+            Event::PhoneState(s) => {
+                phone_nets.insert(ts, &s.network);
+                &s.network
+            }
             _ => continue,
         };
-        if net.ssid.is_some() || net.gateway.is_some() || net.domain.is_some() {
+        if known(net) {
             nets.insert((ts, e.device.as_str()), net);
         }
     }
+    let computers: HashMap<(Millis, &str), &Network> = events
+        .iter()
+        .filter_map(|e| match &e.event {
+            Event::ScreenMinute(m) if known(&m.network) => Some((
+                (
+                    e.start_ms - e.start_ms.rem_euclid(MINUTE_MS),
+                    e.device.as_str(),
+                ),
+                &m.network,
+            )),
+            _ => None,
+        })
+        .collect();
     for l in labels.iter_mut() {
+        if l.place == Place::Away {
+            let computer_places: Vec<Option<String>> = computers
+                .iter()
+                .filter(|((t, _), _)| *t == l.ts)
+                .map(|(_, n)| crate::places::resolve(places, n))
+                .collect();
+            // The phone's latest state: this minute's, or one held over from
+            // the last few minutes, which only ever says "out" (it does not
+            // stretch a place past the phone's last word).
+            let phone = phone_nets
+                .range(l.ts - PHONE_STATE_HOLD_MS + MINUTE_MS..=l.ts)
+                .next_back()
+                .and_then(|(t, n)| {
+                    let here = crate::places::resolve(places, n);
+                    let elsewhere = match &here {
+                        None => true,
+                        Some(p) => {
+                            !computer_places.is_empty()
+                                && !computer_places.iter().any(|c| c.as_deref() == Some(p))
+                        }
+                    };
+                    (*t == l.ts || elsewhere).then_some((here, elsewhere))
+                });
+            match phone {
+                Some((here, elsewhere)) => {
+                    if elsewhere && l.rule != "presence.moving" {
+                        l.rule = "presence.out".into();
+                    }
+                    l.location = here;
+                }
+                // No word from the phone: fall back to the computers.
+                None => {
+                    if let Some(n) = nets
+                        .iter()
+                        .filter(|((t, _), _)| *t == l.ts)
+                        .map(|(_, n)| *n)
+                        .find(|n| crate::places::resolve(places, n).is_some())
+                    {
+                        l.location = crate::places::resolve(places, n);
+                    }
+                }
+            }
+            continue;
+        }
         let in_use = l.device.as_deref().and_then(|d| nets.get(&(l.ts, d)));
         let any = || {
             nets.iter()
@@ -316,13 +437,18 @@ pub fn locate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::{FocusSpan, PhoneApp};
+    use crate::event::{FocusSpan, HealthSteps, Network, PhoneApp, PhoneState};
+    use crate::label::AwayKind;
 
     const RULES: &str = r#"
         [[rule]]
         id = "video.youtube"
         activity = "video"
         host = ["youtube.com"]
+        [[rule]]
+        id = "video.netflix"
+        activity = "video"
+        host = ["netflix.com"]
         [[rule]]
         id = "phone.x"
         activity = "social"
@@ -505,5 +631,181 @@ mod tests {
         );
         let l = label(&[screen(T, typing), focus]);
         assert_eq!(l.project.as_deref(), Some("husk"));
+    }
+
+    /// Netflix fullscreen and playing, last touched 25 minutes ago: the
+    /// evening Erik was out at dinner (2026-10-25).
+    fn netflix_left_running(idle: u32) -> ScreenMinute {
+        ScreenMinute {
+            window_class: "zen-beta".into(),
+            window_title: "Netflix — Zen Browser".into(),
+            browser_host: Some("netflix.com".into()),
+            fullscreen: true,
+            audio_playing: true,
+            idle_seconds: Some(idle),
+            network: Network {
+                gateway: Some("192.168.50.1".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn steps(per_hour: u32) -> Envelope {
+        let hour = T - T.rem_euclid(60 * MINUTE_MS);
+        Envelope::new(
+            "phone",
+            "time-android",
+            hour,
+            hour + 60 * MINUTE_MS,
+            Event::HealthSteps(HealthSteps {
+                steps: per_hour,
+                distance_m: per_hour as f64 * 0.7,
+            }),
+        )
+    }
+
+    fn phone_state(locked: bool, network: Network) -> Envelope {
+        Envelope::new(
+            "phone",
+            "time-android",
+            T + 10_000,
+            T + 10_000,
+            Event::PhoneState(PhoneState {
+                locked,
+                interactive: !locked,
+                network,
+                ..Default::default()
+            }),
+        )
+    }
+
+    #[test]
+    fn media_playing_with_no_input_for_a_quarter_hour_is_away_not_video() {
+        let l = label(&[screen(T, netflix_left_running(25 * 60))]);
+        assert_eq!(
+            (l.place, l.activity, l.rule.as_str()),
+            (Place::Away, None, "presence.away")
+        );
+        assert_eq!(l.away_kind(), Some(AwayKind::Idle));
+        // ...but ten minutes into an episode without touching is watching.
+        let l = label(&[screen(T, netflix_left_running(10 * 60))]);
+        assert_eq!(
+            (l.place, l.activity),
+            (Place::Computer, Some(Activity::Video))
+        );
+    }
+
+    #[test]
+    fn a_video_left_playing_is_not_parallel_time_either() {
+        let phone = Envelope::new(
+            "phone",
+            "time-android",
+            T - 5 * MINUTE_MS,
+            T + 2 * MINUTE_MS,
+            Event::PhoneApp(PhoneApp {
+                package: "com.twitter.android".into(),
+                ..Default::default()
+            }),
+        );
+        let l = label(&[screen(T, netflix_left_running(3 * 3600)), phone]);
+        assert_eq!(l.place, Place::Phone);
+        assert_eq!(l.background, None);
+    }
+
+    #[test]
+    fn no_input_and_steps_on_the_phone_is_out_walking() {
+        let l = label(&[screen(T, netflix_left_running(2 * 3600)), steps(2107)]);
+        assert_eq!(
+            (l.place, l.activity, l.rule.as_str()),
+            (Place::Away, None, "presence.moving")
+        );
+        assert_eq!(l.away_kind(), Some(AwayKind::Walking));
+        // Pottering about at home is not walking.
+        let l = label(&[screen(T, netflix_left_running(2 * 3600)), steps(134)]);
+        assert_eq!(l.away_kind(), Some(AwayKind::Idle));
+        // Steps say nothing about a minute someone is typing in.
+        let typing = ScreenMinute {
+            window_class: "com.t3tools.T3Code".into(),
+            keys: 40,
+            ..Default::default()
+        };
+        let l = label(&[screen(T, typing), steps(2107)]);
+        assert_eq!(l.activity, Some(Activity::Work));
+    }
+
+    #[test]
+    fn a_locked_phone_does_not_own_a_minute_whatever_app_it_last_showed() {
+        let app = Envelope::new(
+            "phone",
+            "time-android",
+            T - 5 * MINUTE_MS,
+            T + 2 * MINUTE_MS,
+            Event::PhoneApp(PhoneApp {
+                package: "com.twitter.android".into(),
+                ..Default::default()
+            }),
+        );
+        let l = label(&[app.clone(), phone_state(true, Network::default())]);
+        assert_eq!(l.place, Place::Away);
+        let l = label(&[app, phone_state(false, Network::default())]);
+        assert_eq!(l.place, Place::Phone);
+    }
+
+    #[test]
+    fn away_with_the_phone_on_mobile_data_is_out_and_located_by_the_phone() {
+        let events = [
+            screen(T, netflix_left_running(2 * 3600)),
+            phone_state(true, Network::default()),
+        ];
+        let mut labels = vec![label(&events)];
+        locate(&crate::places::defaults(), &mut labels, &events);
+        assert_eq!(
+            (labels[0].rule.as_str(), labels[0].location.as_deref()),
+            ("presence.out", None)
+        );
+        assert_eq!(labels[0].away_kind(), Some(AwayKind::Out));
+
+        // Phone on the home Wi-Fi beside the idle pc: just away, at home.
+        let home = Network {
+            gateway: Some("192.168.50.1".into()),
+            ..Default::default()
+        };
+        let events = [
+            screen(T, netflix_left_running(2 * 3600)),
+            phone_state(true, home),
+        ];
+        let mut labels = vec![label(&events)];
+        locate(&crate::places::defaults(), &mut labels, &events);
+        assert_eq!(
+            (labels[0].rule.as_str(), labels[0].location.as_deref()),
+            ("presence.away", Some("home"))
+        );
+
+        // A locked phone reports every few minutes; its last word holds.
+        let earlier = Envelope::new(
+            "phone",
+            "time-android",
+            T - 6 * MINUTE_MS,
+            T - 6 * MINUTE_MS,
+            Event::PhoneState(PhoneState {
+                locked: true,
+                ..Default::default()
+            }),
+        );
+        let events = [screen(T, netflix_left_running(2 * 3600)), earlier];
+        let mut labels = vec![label(&events)];
+        locate(&crate::places::defaults(), &mut labels, &events);
+        assert_eq!(labels[0].away_kind(), Some(AwayKind::Out));
+
+        // Walking beats out.
+        let events = [
+            screen(T, netflix_left_running(2 * 3600)),
+            phone_state(true, Network::default()),
+            steps(3000),
+        ];
+        let mut labels = vec![label(&events)];
+        locate(&crate::places::defaults(), &mut labels, &events);
+        assert_eq!(labels[0].away_kind(), Some(AwayKind::Walking));
     }
 }

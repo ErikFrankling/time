@@ -16,7 +16,7 @@ use std::fmt::Write;
 
 use chrono::{Datelike, Days, Months, NaiveDate, TimeZone};
 use time_core::clock::{Millis, MINUTE_MS};
-use time_core::label::{Activity, MinuteLabel, Place};
+use time_core::label::{Activity, AwayKind, MinuteLabel, Place};
 
 use crate::store::Store;
 use crate::web::esc;
@@ -713,22 +713,29 @@ pub fn lanes(
 ) -> String {
     use std::collections::HashMap;
     let by_ts: HashMap<Millis, &MinuteLabel> = minutes.iter().map(|m| (m.ts, m)).collect();
-    let lane = |m: Option<&&MinuteLabel>, phone: bool| -> Option<Activity> {
+    // Out or walking shows in the phone's lane: the phone is how we know,
+    // and it is where Erik was. Other away minutes stay empty.
+    let lane = |m: Option<&&MinuteLabel>, phone: bool| -> Option<Cell> {
         let m = m?;
         let primary_here = match m.place {
             Place::Phone => phone,
             Place::Computer => !phone,
-            Place::Away => return None,
+            Place::Away => {
+                return match m.away_kind() {
+                    Some(k @ (AwayKind::Walking | AwayKind::Out)) if phone => Some(Cell::Away(k)),
+                    _ => None,
+                }
+            }
         };
         if primary_here {
-            return m.activity;
+            return m.activity.map(Cell::A);
         }
         let bg_phone = match &m.background_device {
             Some(d) => phones.contains(d),
             None => m.place == Place::Computer,
         };
         if bg_phone == phone {
-            m.background
+            m.background.map(Cell::A)
         } else {
             None
         }
@@ -758,7 +765,7 @@ pub fn lanes(
     };
     for h in 0..hours {
         let hour_start = start_ms + h as i64 * 3_600_000;
-        let lanes_of: Vec<[Option<Activity>; 2]> = (0..60)
+        let lanes_of: Vec<[Option<Cell>; 2]> = (0..60)
             .map(|i| {
                 let m = by_ts.get(&(hour_start + i * MINUTE_MS));
                 [lane(m, false), lane(m, true)]
@@ -771,12 +778,13 @@ pub fn lanes(
         flush(&mut out, empty_from.take(), hour_start);
         let mut strips = String::new();
         for (k, place) in [(0usize, "computer"), (2, "both"), (1, "phone")] {
-            let mut runs: Vec<(Option<Activity>, usize, Millis)> = Vec::new();
+            let mut runs: Vec<(Option<Cell>, usize, Millis)> = Vec::new();
             for (i, l) in lanes_of.iter().enumerate() {
                 let ts = hour_start + i as i64 * MINUTE_MS;
                 // The middle line marks minutes with both lanes filled.
                 let a = if k == 2 {
-                    (l[0].is_some() && l[1].is_some()).then_some(Activity::Other)
+                    matches!(l, [Some(Cell::A(_)), Some(Cell::A(_))])
+                        .then_some(Cell::A(Activity::Other))
                 } else {
                     l[k]
                 };
@@ -794,11 +802,19 @@ pub fn lanes(
                         hm(tz, *ts),
                         hm(tz, ts + *n as i64 * MINUTE_MS)
                     ),
-                    Some(a) => {
+                    Some(Cell::A(a)) => {
                         let from = hm(tz, *ts);
                         let to = hm(tz, ts + *n as i64 * MINUTE_MS);
                         format!(
                             r#"<span class="a-{a}" style="flex:{n}" title="{from}–{to} · {a} on the {place}"></span>"#
+                        )
+                    }
+                    Some(Cell::Away(w)) => {
+                        let from = hm(tz, *ts);
+                        let to = hm(tz, ts + *n as i64 * MINUTE_MS);
+                        format!(
+                            r#"<span class="aw-{w}" style="flex:{n}" title="{from}–{to} · {}"></span>"#,
+                            w.describe()
                         )
                     }
                 })
@@ -818,10 +834,24 @@ pub fn lanes(
     out
 }
 
+/// One minute in a lane: an activity, or why Erik was away.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Cell {
+    A(Activity),
+    Away(AwayKind),
+}
+
 pub fn legend() -> String {
     let mut out = String::from(r#"<div class="legend">"#);
     for a in Activity::ALL {
         let _ = write!(out, r#"<span><span class="sw a-{a}"></span> {a}</span>"#);
+    }
+    for k in [AwayKind::Walking, AwayKind::Out] {
+        let _ = write!(
+            out,
+            r#"<span><span class="sw aw-{k}"></span> {}</span>"#,
+            k.describe()
+        );
     }
     out.push_str("</div>");
     out

@@ -28,8 +28,9 @@ const RECHECK_INCOMPLETE_MS: Millis = 48 * 60 * MINUTE_MS;
 /// Minutes per pass. Rules label tens of thousands of minutes a second; this
 /// bounds how long a pass holds the database.
 pub const PASS_LIMIT: usize = 5_000;
-/// A prompt names the project of the minutes up to this long after it.
-const LOOKBACK_MS: Millis = 10 * MINUTE_MS;
+/// Events this long before a minute still bear on it: a prompt names the
+/// project of the next 10 minutes, a phone's state places the next 15.
+const LOOKBACK_MS: Millis = time_core::timeline::PHONE_STATE_HOLD_MS;
 
 /// Rules Erik adds from the inbox, kept in the data directory beside the
 /// database. They come first, so they win over the shipped rules.

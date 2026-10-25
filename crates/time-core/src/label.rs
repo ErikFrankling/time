@@ -134,6 +134,70 @@ pub struct MinuteLabel {
     pub location: Option<String>,
 }
 
+/// Why an away minute was away. Never an activity: it is what the data
+/// says about Erik when no device had him.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AwayKind {
+    /// The phone counted steps: out, walking.
+    Walking,
+    /// The phone was on another network than the computers: out.
+    Out,
+    /// Devices reported and nobody was at any of them.
+    Idle,
+    /// Nothing reported at all.
+    Untracked,
+}
+
+impl AwayKind {
+    pub const ALL: [AwayKind; 4] = [
+        AwayKind::Walking,
+        AwayKind::Out,
+        AwayKind::Idle,
+        AwayKind::Untracked,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AwayKind::Walking => "walking",
+            AwayKind::Out => "out",
+            AwayKind::Idle => "idle",
+            AwayKind::Untracked => "untracked",
+        }
+    }
+
+    /// For people: "away: out, walking".
+    pub fn describe(self) -> &'static str {
+        match self {
+            AwayKind::Walking => "away: out, walking",
+            AwayKind::Out => "away: out",
+            AwayKind::Idle => "away: not at any device",
+            AwayKind::Untracked => "untracked",
+        }
+    }
+}
+
+impl fmt::Display for AwayKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl MinuteLabel {
+    /// Why this minute was away; None when a device was in use.
+    pub fn away_kind(&self) -> Option<AwayKind> {
+        if self.place != Place::Away {
+            return None;
+        }
+        Some(match self.rule.as_str() {
+            "presence.moving" => AwayKind::Walking,
+            "presence.out" => AwayKind::Out,
+            "presence.no-data" => AwayKind::Untracked,
+            _ => AwayKind::Idle,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

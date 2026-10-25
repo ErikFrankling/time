@@ -151,7 +151,17 @@ impl Store {
                 out.new += 1;
                 seen.execute(params![env.device, env.end_ms])?;
                 if !matches!(env.event, Event::Heartbeat(_)) {
-                    for ts in minutes_touched(env.start_ms, env.end_ms) {
+                    // A phone's state places the minutes after it too (the
+                    // ones that have happened: never label the future).
+                    let end = match env.event {
+                        Event::PhoneState(_) => (env.end_ms.max(env.start_ms)
+                            + time_core::timeline::PHONE_STATE_HOLD_MS
+                            - MINUTE_MS)
+                            .min(received_ms)
+                            .max(env.end_ms),
+                        _ => env.end_ms,
+                    };
+                    for ts in minutes_touched(env.start_ms, end) {
                         dirty.execute([ts])?;
                     }
                 }

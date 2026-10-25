@@ -16,7 +16,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use time_core::clock::{Millis, MINUTE_MS};
 use time_core::event::{Envelope, Event, ScreenMinute};
-use time_core::label::{Activity, MinuteLabel, Place};
+use time_core::label::{Activity, AwayKind, MinuteLabel, Place};
 
 use crate::config::McpConfig;
 use crate::store::Store;
@@ -289,6 +289,8 @@ struct Stats {
     /// Minutes per activity, computer and phone.
     by_activity: BTreeMap<Activity, (u32, u32)>,
     away: u32,
+    /// `away` by why: walking, out, idle, untracked.
+    away_by: BTreeMap<AwayKind, u32>,
     productive: u32,
     unproductive: u32,
     neutral: u32,
@@ -304,6 +306,7 @@ impl Stats {
         let mut s = Stats {
             by_activity: BTreeMap::new(),
             away: 0,
+            away_by: BTreeMap::new(),
             productive: 0,
             unproductive: 0,
             neutral: 0,
@@ -315,6 +318,9 @@ impl Stats {
         for l in labels {
             let Some(a) = l.activity else {
                 s.away += 1;
+                *s.away_by
+                    .entry(l.away_kind().unwrap_or(AwayKind::Idle))
+                    .or_default() += 1;
                 continue;
             };
             let slot = s.by_activity.entry(a).or_default();
@@ -367,17 +373,42 @@ impl Stats {
             .collect()
     }
 
-    /// "work 38m, video 12m, away 10m"
+    /// "work 38m, video 12m, away (walking) 40m, away 10m"
     fn breakdown(&self) -> String {
         let mut parts: Vec<(String, u32)> = self
             .categories()
             .into_iter()
             .map(|(a, t, ..)| (a.to_string(), t))
             .collect();
-        if self.away > 0 {
-            parts.push(("away".into(), self.away));
+        for (k, n) in &self.away_by {
+            parts.push((away_name(*k).into(), *n));
         }
         items(&parts)
+    }
+
+    fn away_json(&self) -> Value {
+        json!(self
+            .away_by
+            .iter()
+            .map(|(k, n)| (k.as_str(), *n))
+            .collect::<BTreeMap<_, _>>())
+    }
+}
+
+/// Away in a list of activities: never an activity itself.
+fn away_name(k: AwayKind) -> &'static str {
+    match k {
+        AwayKind::Walking => "away (out, walking)",
+        AwayKind::Out => "away (out)",
+        AwayKind::Idle => "away",
+        AwayKind::Untracked => "untracked",
+    }
+}
+
+fn label_name(l: &MinuteLabel) -> String {
+    match (l.activity, l.away_kind()) {
+        (Some(a), _) => a.to_string(),
+        (None, k) => away_name(k.unwrap_or(AwayKind::Idle)).to_owned(),
     }
 }
 
@@ -448,6 +479,7 @@ pub fn summary(
         },
         "tracked_minutes": s.tracked(),
         "away_minutes": s.away,
+        "away": s.away_json(),
         "unlabelled_minutes": missing,
         "totals": {
             "productive": s.productive,
@@ -528,6 +560,7 @@ struct Block {
     from: Millis,
     to: Millis,
     activity: Option<Activity>,
+    away: Option<AwayKind>,
     device: Option<String>,
     apps: Tally,
     sites: Tally,
@@ -540,7 +573,10 @@ impl Block {
     }
 
     fn describe(&self, cfg: &McpConfig, tz: chrono_tz::Tz) -> String {
-        let what = self.activity.map_or("away".to_owned(), |a| a.to_string());
+        let what = match (self.activity, self.away) {
+            (Some(a), _) => a.to_string(),
+            (None, k) => k.unwrap_or(AwayKind::Idle).describe().to_owned(),
+        };
         let on = self
             .device
             .as_deref()
@@ -567,14 +603,18 @@ pub fn timeline(
     let idx = Index::new(events);
     let mut blocks: Vec<Block> = Vec::new();
     for l in labels {
-        let joins = blocks
-            .last()
-            .is_some_and(|b| b.to == l.ts && b.activity == l.activity && b.device == l.device);
+        let joins = blocks.last().is_some_and(|b| {
+            b.to == l.ts
+                && b.activity == l.activity
+                && b.away == l.away_kind()
+                && b.device == l.device
+        });
         if !joins {
             blocks.push(Block {
                 from: l.ts,
                 to: l.ts,
                 activity: l.activity,
+                away: l.away_kind(),
                 device: l.device.clone(),
                 apps: Tally::default(),
                 sites: Tally::default(),
@@ -616,6 +656,7 @@ pub fn timeline(
                 "to": hhmm(tz, b.to),
                 "minutes": b.minutes(),
                 "activity": b.activity.map_or("away".to_owned(), |a| a.to_string()),
+                "away": b.away,
                 "group": b.activity.map(|a| Group::of(cfg, a)),
                 "device": b.device,
                 "apps": b.apps.top(3).into_iter().map(|(n, ..)| n).collect::<Vec<_>>(),
@@ -736,8 +777,7 @@ pub fn now(
     let last5: Vec<&MinuteLabel> = labels.iter().filter(|l| l.ts >= last5_from).collect();
     let mut by5: BTreeMap<String, u32> = BTreeMap::new();
     for l in &last5 {
-        *by5.entry(l.activity.map_or("away".into(), |a| a.to_string()))
-            .or_default() += 1;
+        *by5.entry(label_name(l)).or_default() += 1;
     }
 
     let newest_event = events.iter().map(|e| e.end_ms.max(e.start_ms)).max();
@@ -751,6 +791,14 @@ pub fn now(
             .iter()
             .rev()
             .take_while(|l| l.activity == c.activity && l.device == c.device)
+            .count()
+    });
+    // How long the latest away stretch of the same kind has run.
+    let away_run = latest.and_then(|l| l.away_kind()).map(|k| {
+        labels
+            .iter()
+            .rev()
+            .take_while(|l| l.away_kind() == Some(k))
             .count()
     });
     let attr = current.and_then(|l| idx.attribute(l));
@@ -807,7 +855,10 @@ pub fn now(
             "unproductive": hour.unproductive,
             "neutral": hour.neutral,
             "away": hour.away,
+            "away_by": hour.away_json(),
         },
+        "away": latest.and_then(|l| l.away_kind()),
+        "away_for_minutes": away_run,
         "unproductive_streak_minutes": streak,
         "devices": device_rows,
     });
@@ -866,8 +917,23 @@ pub fn now(
         ));
         t
     } else {
+        let why = match latest.and_then(|l| l.away_kind()) {
+            Some(AwayKind::Walking) => format!(
+                "out and walking (steps on the phone, no device in use) for {}",
+                dur(away_run.unwrap_or(0) as u32)
+            ),
+            Some(AwayKind::Out) => format!(
+                "out (the phone is away from the computers' network, no device in use) for {}",
+                dur(away_run.unwrap_or(0) as u32)
+            ),
+            Some(AwayKind::Untracked) => "untracked (no device reported this minute)".to_owned(),
+            _ => format!(
+                "away from every device (no input on the computers, phone not in use) for {}",
+                dur(away_run.unwrap_or(0) as u32)
+            ),
+        };
         format!(
-            "At {} Erik is away from every device (idle or not at the computer). Last hour: {} productive, {} unproductive, {} neutral, {} away.",
+            "At {} Erik is {why}. Last hour: {} productive, {} unproductive, {} neutral, {} away.",
             hhmm(tz, now_ms),
             dur(hour.productive),
             dur(hour.unproductive),
@@ -927,7 +993,12 @@ pub fn line(
                     dur(current["for_minutes"].as_u64().unwrap_or(0) as u32)
                 )
             }
-            _ => " Now: away.".to_owned(),
+            _ => match n["away"].as_str() {
+                Some("walking") => " Now: out, walking.".to_owned(),
+                Some("out") => " Now: out.".to_owned(),
+                Some("untracked") => " Now: untracked.".to_owned(),
+                _ => " Now: away.".to_owned(),
+            },
         },
     );
     out
@@ -1202,5 +1273,67 @@ mod tests {
             "{l}"
         );
         assert!(line(&cfg(), TZ, T0, &[], &[]).ends_with("no data."));
+    }
+
+    #[test]
+    fn walking_and_out_are_away_never_an_activity() {
+        // 20 minutes of video, then out: 30 minutes walking, 10 just out.
+        let mut labels = Vec::new();
+        let mut events = Vec::new();
+        for i in 0..20 {
+            labels.push(label(i, Some(Activity::Video), "pc"));
+            events.push(screen(i, "firefox", Some("youtube.com"), "Cats - YouTube"));
+        }
+        for i in 20..60 {
+            let mut l = label(i, None, "pc");
+            l.rule = if i < 50 {
+                "presence.moving"
+            } else {
+                "presence.out"
+            }
+            .into();
+            labels.push(l);
+            // The phone keeps reporting its state while he is out.
+            events.push(Envelope::new(
+                "phone",
+                "time-android",
+                T0 + i * MINUTE_MS,
+                T0 + i * MINUTE_MS,
+                Event::PhoneState(Default::default()),
+            ));
+        }
+        let now_ms = T0 + 60 * MINUTE_MS + 20_000;
+        let w = Window {
+            label: "last hour".into(),
+            from_ms: T0,
+            to_ms: now_ms,
+        };
+        let d = summary(&cfg(), TZ, &w, &labels, &events);
+        assert_eq!(d.json["away_minutes"], 40);
+        assert_eq!(d.json["away"]["walking"], 30);
+        assert_eq!(d.json["away"]["out"], 10);
+        assert!(
+            d.text
+                .contains("video 20m, away (out, walking) 30m, away (out) 10m"),
+            "{}",
+            d.text
+        );
+
+        let n = now(&cfg(), TZ, now_ms, &labels, &events);
+        assert_eq!(n.json["away"], "out");
+        assert_eq!(n.json["away_for_minutes"], 10);
+        assert!(n.text.contains("Erik is out"), "{}", n.text);
+
+        let l = line(&cfg(), TZ, now_ms, &labels, &events);
+        assert!(l.ends_with("Now: out."), "{l}");
+
+        let t = timeline(&cfg(), TZ, &w, &labels, &events, 5, 10);
+        let away: Vec<_> = t.json["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["away"].clone())
+            .collect();
+        assert_eq!(away, [Value::Null, json!("walking"), json!("out")]);
     }
 }
