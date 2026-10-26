@@ -18,6 +18,9 @@ const GENERATED_FILE_LINES: usize = 3_000;
 /// tree, a thousand generated pages): a commit, but no lines of work.
 pub const BULK_COMMIT_LINES: u32 = 30_000;
 
+/// Commits looked at per repository, newest first.
+const MAX_WALK: usize = 15_000;
+
 /// Folders whose files are someone else's output: dependencies, build output,
 /// generated code. Matched anywhere in the path.
 const GENERATED_DIRS: [&str; 9] = [
@@ -255,11 +258,15 @@ pub fn scan(
     let mut walk = repo.revwalk()?;
     // Every local branch: a day on a feature branch is still a day's work.
     walk.push_glob("refs/heads/*")?;
-    walk.set_sorting(git2::Sort::TIME)?;
+    // Unsorted: libgit2 walks from the tips as it goes. Sorting by time
+    // first reads the whole history (seconds and 200 MB for nixpkgs).
+    walk.set_sorting(git2::Sort::NONE)?;
     let mut out = Vec::new();
     let mut stale = 0;
-    for oid in walk.flatten() {
-        if stale > 500 {
+    // A fork of a huge project (nixpkgs): Erik's own commits are near the
+    // top, and walking all of its history takes most of a gigabyte.
+    for oid in walk.flatten().take(MAX_WALK) {
+        if stale > 5_000 {
             break;
         }
         let Ok(commit) = repo.find_commit(oid) else {
@@ -295,9 +302,13 @@ pub fn scan(
             opts.max_size(1 << 20);
             let mut diff = repo.diff_tree_to_tree(parent.as_ref(), Some(&tree), Some(&mut opts))?;
             // A moved file is a rename, not its every line removed and added.
-            let mut find = git2::DiffFindOptions::new();
-            find.renames(true).rename_limit(2_000);
-            diff.find_similar(Some(&mut find))?;
+            // Past a few hundred files it is an import or a mass move, and
+            // comparing every blob would take a lot of memory for nothing.
+            if diff.deltas().len() <= 300 {
+                let mut find = git2::DiffFindOptions::new();
+                find.renames(true).rename_limit(300);
+                diff.find_similar(Some(&mut find))?;
+            }
             Ok(diff)
         });
         let (added, removed, files) = diff.map(|d| commit_lines(&d)).unwrap_or_default();

@@ -29,9 +29,32 @@ fn main() -> anyhow::Result<()> {
     let cfg: CollectConfig = toml::from_str(&text).with_context(|| path.display().to_string())?;
     let now = chrono::Utc::now().timestamp_millis();
     let t0 = std::time::Instant::now();
-    let lap = |what: &str| eprintln!("collect: {what} at {:.1}s", t0.elapsed().as_secs_f64());
+    let lap = |what: &str| {
+        let hwm = std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|s| {
+                s.lines()
+                    .find(|l| l.starts_with("VmHWM"))
+                    .map(|l| l.split_whitespace().nth(1).unwrap_or("").to_owned())
+            })
+            .unwrap_or_default();
+        eprintln!(
+            "collect: {what} at {:.1}s, peak {hwm} kB",
+            t0.elapsed().as_secs_f64()
+        )
+    };
     let since = now - days.unwrap_or(cfg.days) * 86_400_000;
 
+    // libgit2 maps pack files and caches objects by the gigabyte by default;
+    // a background tally keeps to a few hundred megabytes, so the pc's lag
+    // guard never has a reason to stop it.
+    // SAFETY: set once, before any repository is opened.
+    unsafe {
+        let _ = git2::opts::set_mwindow_size(32 << 20);
+        let _ = git2::opts::set_mwindow_mapped_limit(128 << 20);
+        let _ = git2::opts::set_mwindow_file_limit(64);
+        let _ = git2::opts::set_cache_max_size(64 << 20);
+    }
     let mut events = Vec::new();
     let mut repos = Vec::new();
     for root in &cfg.roots {
@@ -54,6 +77,7 @@ fn main() -> anyhow::Result<()> {
         Ok(mut c) => calls.append(&mut c),
         Err(e) => eprintln!("collect: opencode: {e:#}"),
     }
+    lap("usage calls read");
     let home = expand("~/");
     let places = Places::build(&home, &repos, &t3_projects);
     let activity = Activity::build(&calls, &places);
