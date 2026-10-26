@@ -13,7 +13,8 @@ questions and the go-live runbook: [PROPOSAL.md](PROPOSAL.md).
 
 ```
 pc / laptop: time-agent (screen, input, audio, browser tab)
-             time-collect (git commits, GitHub PRs and reviews)
+             time-collect (git commits, GitHub commits, PRs and reviews)
+             time-collect (every agent's tokens per hour, from T3 Code's usage scan and OpenCode)
              time-collect (T3 Code; speak read-aloud and hotkey dictation)   phone: Android app
         │ OTLP/HTTP JSON, one event per fact                │
         └───────────► gateway Alloy (homelab) ◄─────────────┘
@@ -21,7 +22,8 @@ pc / laptop: time-agent (screen, input, audio, browser tab)
                          ▼
                time-server: events (SQLite) → rules → one label a minute
                website: /  /week  /month  /inbox  /status  /app ; /metrics, /healthz
-               api: /api/day/<date>, /api/interactivity/<date> (keyboard and mouse per 10 min)
+               api: /api/day/<date>, /api/interactivity/<date> (keyboard and mouse per 10 min),
+                    /api/work (commits, lines, tokens and their API-price equivalent)
 ```
 
 Everything stored is an event with a stable id; minutes are derived and
@@ -34,7 +36,7 @@ recomputed whenever the rules (or the labelling code) change.
 | `time-core` | event types (their serde names are the OTel attribute keys), the OTLP JSON codec, label enums, the rule table, the cross-device timeline, the nudge rule |
 | `time-server` | ingest, store, classifier loop, website, status, `/metrics`, nudges, APK serving, v1 import |
 | `time-agent` | the desktop agent: Hyprland IPC, evdev, MPRIS, aw-watcher-web; spool on disk; `--probe` |
-| `time-collect` | commits from local clones, PRs and reviews from GitHub |
+| `time-collect` | commits from local clones and GitHub (Erik's own or an agent's), PRs and reviews, T3 Code activity, every agent's tokens per hour priced at API list prices |
 | `time-sim` | the simulated world for end-to-end tests: scripted days, fake Hyprland, simulated phone |
 
 `config/rules.toml` is the rule table. Answers in `/inbox` are added to
@@ -47,6 +49,7 @@ time-server serve server.toml          # data_dir, devices, [nudge]
 time-agent agent.toml                  # device, endpoint, spool_dir
 time-agent --probe agent.toml          # what the agent can see right now
 time-collect collect.toml              # once; a timer runs it every 15 min
+time-collect collect.toml --days 4000 # backfill; --dry prints the events instead
 time-sim serve crates/time-sim/scenarios/morning.toml   # a scripted day to look at
 time-server import-v1 server.toml /path/to/v1/time.db   # bring v1's history in
 ```
@@ -89,6 +92,31 @@ lan-only on top of that. Live at `https://time.erikfrankling.duckdns.org/mcp`.
 The same data as plain HTTP for scripts (open, like `/api/day`):
 `/api/now`, `/api/summary?window=3h`, `/api/timeline?window=3h`, and
 `/api/summary/line`, the last hour in one text line with what he is doing now, for the hourly review.
+
+## Code and AI
+
+Day, Week and Month show what was shipped and what the agents used, per hour
+of a day or per day of a week or month, under a line like "312 commits ·
++18k/−6k lines · 42M tokens ≈ $310 this week":
+
+- **Commits and lines** (`github.commit`): Erik's commits in every clone under
+  `~/projects` and `~/.dotfiles`, and the ones only GitHub has (commit
+  search). A commit is an agent's when a `Co-Authored-By` trailer names one,
+  or an agent session was working in the same repository from 5 minutes
+  before to 2 minutes after it; else it is Erik's own. One commit across
+  clones and rebases (identity: repository, author time and e-mail, subject).
+  Lines leave out lockfiles, generated, vendored and data files, files over
+  10k lines and commits over 50k lines; renames are not rewrites.
+- **Tokens** (`llm.usage.hour`, one per agent session, model and hour):
+  input, cache reads and writes, and output, from T3 Code's usage scan of the
+  Claude (both accounts), Codex and Grok transcripts and from OpenCode's
+  database, priced at LiteLLM list prices as T3's usage page does: an
+  equivalent at API prices, since most of it is on subscriptions. Per
+  account, model, project and T3 thread.
+
+Both are replaced when the collector sends them again (an hour of usage
+grows; a commit learns whose it is). `/api/work?period=week&date=YYYY-MM-DD`
+has the same as JSON, and `time_summary` has it as `code_and_ai`.
 
 Which activities count as unproductive is `[mcp]` in `config.toml`; everything
 not listed is neutral:

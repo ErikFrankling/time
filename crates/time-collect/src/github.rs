@@ -1,9 +1,12 @@
-//! Pull requests and reviews from GitHub: things that leave no trace in a
-//! clone. One GraphQL request per run.
+//! From GitHub: pull requests and reviews (one GraphQL request per run), and
+//! commits no local clone has.
 
 use anyhow::{bail, Context, Result};
-use time_core::event::{Envelope, Event, PullRequest, Review};
+use std::collections::HashSet;
 
+use time_core::event::{Commit, Envelope, Event, PullRequest, Review};
+
+use crate::usage::Activity;
 use crate::{stable_id, SERVICE};
 
 const QUERY: &str = r#"
@@ -146,6 +149,163 @@ pub fn parse(device: &str, v: &serde_json::Value) -> Vec<Envelope> {
         }
     }
     out
+}
+
+/// Erik's commits that only GitHub has (no clone on this machine has their
+/// sha): found with the commit search, counted from each commit's file list
+/// with the same generated-file rules as local ones. At most `max_detail`
+/// commits are looked up one by one per run.
+pub fn commits(
+    device: &str,
+    from_ms: i64,
+    to_ms: i64,
+    local: &HashSet<String>,
+    activity: &Activity,
+    max_detail: usize,
+) -> Result<Vec<Envelope>> {
+    let Some(token) = token() else {
+        bail!("no GitHub token (set TIME_GITHUB_TOKEN, or run `gh auth login`)")
+    };
+    let client = reqwest::blocking::Client::new();
+    let get = |url: &str| -> Result<serde_json::Value> {
+        let resp = client
+            .get(url)
+            .bearer_auth(&token)
+            .header("User-Agent", "time-collect")
+            .header("Accept", "application/vnd.github+json")
+            .send()
+            .with_context(|| url.to_owned())?;
+        let status = resp.status();
+        let v: serde_json::Value = resp.json().with_context(|| url.to_owned())?;
+        if !status.is_success() {
+            bail!("github {status}: {url}: {v}");
+        }
+        Ok(v)
+    };
+    let login = get("https://api.github.com/user")?["login"]
+        .as_str()
+        .context("no login")?
+        .to_owned();
+    let day = |ms: i64| {
+        chrono::DateTime::from_timestamp_millis(ms)
+            .unwrap_or_default()
+            .format("%Y-%m-%d")
+            .to_string()
+    };
+    // The search returns at most 1000 hits per query: a month at a time,
+    // halved while a window is fuller than that.
+    let mut windows = Vec::new();
+    let mut t = from_ms;
+    while t < to_ms {
+        windows.push((t, (t + 30 * 86_400_000).min(to_ms)));
+        t += 30 * 86_400_000;
+    }
+    let mut found: Vec<serde_json::Value> = Vec::new();
+    let mut searches = 0;
+    while let Some((a, b)) = windows.pop() {
+        let mut page = 1;
+        loop {
+            // 30 searches a minute.
+            if searches > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(2_100));
+            }
+            searches += 1;
+            let url = format!(
+                "https://api.github.com/search/commits?q=author:{login}+author-date:{}..{}&sort=author-date&per_page=100&page={page}",
+                day(a),
+                day(b)
+            );
+            let v = get(&url)?;
+            let total = v["total_count"].as_u64().unwrap_or(0);
+            if total > 1000 && b - a > 86_400_000 {
+                let mid = a + (b - a) / 2;
+                windows.push((a, mid));
+                windows.push((mid, b));
+                break;
+            }
+            let items = v["items"].as_array().cloned().unwrap_or_default();
+            let n = items.len();
+            found.extend(items);
+            if n < 100 || page * 100 >= total as usize {
+                break;
+            }
+            page += 1;
+        }
+    }
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for item in found {
+        let Some(sha) = item["sha"].as_str().map(str::to_owned) else {
+            continue;
+        };
+        if item["parents"].as_array().is_some_and(|p| p.len() > 1) {
+            continue;
+        }
+        let Some(ms) = at(item["commit"]["author"]["date"].as_str()) else {
+            continue;
+        };
+        if ms < from_ms || ms >= to_ms {
+            continue;
+        }
+        let full = item["repository"]["full_name"].as_str().unwrap_or_default();
+        let repo = full.rsplit('/').next().unwrap_or(full).to_owned();
+        let message = item["commit"]["message"].as_str().unwrap_or_default();
+        let key = crate::git::identity(
+            &repo,
+            ms / 1000,
+            item["commit"]["author"]["email"]
+                .as_str()
+                .unwrap_or_default(),
+            message,
+        );
+        // Known from a clone (by hash, or rebased there), or found twice.
+        if local.contains(&sha) || local.contains(&key) || !seen.insert(key.clone()) {
+            continue;
+        }
+        if out.len() >= max_detail {
+            break;
+        }
+        let detail = get(&format!(
+            "https://api.github.com/repos/{full}/commits/{sha}"
+        ))?;
+        let (mut added, mut removed, mut files) = (0u32, 0u32, 0u32);
+        for f in detail["files"].as_array().map(Vec::as_slice).unwrap_or(&[]) {
+            let a = f["additions"].as_u64().unwrap_or(0) as u32;
+            let r = f["deletions"].as_u64().unwrap_or(0) as u32;
+            if crate::git::is_generated(
+                f["filename"].as_str().unwrap_or_default(),
+                (a + r) as usize,
+            ) {
+                continue;
+            }
+            added += a;
+            removed += r;
+            files += 1;
+        }
+        if added + removed > crate::git::BULK_COMMIT_LINES {
+            (added, removed) = (0, 0);
+        }
+        let (agent, agent_evidence) = crate::git::agent_of(message, &repo, ms, activity);
+        out.push(Envelope {
+            id: stable_id(&key),
+            device: device.to_owned(),
+            service: SERVICE.to_owned(),
+            start_ms: ms,
+            end_ms: ms,
+            event: Event::Commit(Commit {
+                repo,
+                sha,
+                path: None,
+                lines_added: added,
+                lines_removed: removed,
+                files,
+                agent,
+                agent_evidence,
+                source: Some("github".into()),
+            }),
+        });
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

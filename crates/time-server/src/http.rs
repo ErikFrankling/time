@@ -54,6 +54,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/timeline", get(api_timeline))
         .route("/api/listening", get(api_listening))
         .route("/api/sleep", get(api_sleep))
+        .route("/api/work", get(api_work))
         .route("/api/spans/{date}", get(api_spans))
         .route("/api/decisions", get(api_decisions))
         .route(
@@ -729,6 +730,58 @@ fn date_param(q: &HashMap<String, String>, k: &str) -> Result<Option<chrono::Nai
 /// Nights `?from=YYYY-MM-DD&to=YYYY-MM-DD` (by the date they start on;
 /// default the last seven), each with when he fell asleep and woke, the
 /// interruptions, and why.
+/// `/api/work?period=day|week|month&date=YYYY-MM-DD`: commits and lines
+/// (Erik's own and his agents'), and every agent's tokens with their cost at
+/// API list prices, per hour of a day or per day of a week or month, with the
+/// period before for comparison. Defaults: this week.
+async fn api_work(State(state): State<Arc<AppState>>, q: Q) -> Response {
+    use crate::views::{Kind, Period};
+    let tz = state.tz;
+    let today = crate::day::today(tz, state.clock.now_ms());
+    let kind = match q.get("period").map(String::as_str).unwrap_or("week") {
+        "day" => Kind::Day,
+        "week" => Kind::Week,
+        "month" => Kind::Month,
+        p => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("period {p:?}: use day, week or month"),
+            )
+                .into_response()
+        }
+    };
+    let date = match date_param(&q, "date") {
+        Ok(d) => d.unwrap_or(today),
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
+    let period = Period::containing(kind, date);
+    let r = tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
+        let cur = crate::views::work_of(&state.store, tz, period)?;
+        let prev = crate::views::work_of(&state.store, tz, period.prev())?;
+        let mut v = cur.json(&prev.totals());
+        let (labels, links) = crate::views::bucket_labels(period, cur.buckets);
+        v["period"] = serde_json::json!({"kind": q.get("period").cloned().unwrap_or("week".into()),
+            "start": period.start, "end": period.end, "tz": tz.name()});
+        v["labels"] = labels.into();
+        v["links"] = links.into();
+        v["cost_note"] = "cost is the equivalent at API list prices; most of it is on subscriptions".into();
+        v["sources"] = serde_json::json!({
+            "commits": "github.commit events: local clones under ~/projects and ~/.dotfiles, and GitHub's commit search for commits no clone has (time-collect)",
+            "agent": "a Co-Authored-By trailer naming an agent, or an agent session working in the same repository within 5 minutes before or 2 after the commit",
+            "lines": "git diffs with renames detected; lockfiles, generated, vendored and data files, files over 10k lines and commits over 50k lines left out",
+            "tokens": "llm.usage.hour events: T3 Code's usage scan of the Claude, Codex and Grok transcripts, and OpenCode's database",
+            "cost": "LiteLLM list prices (T3 Code's usage-model-rates.json); OpenCode's own cost where it reports one",
+        });
+        Ok(v)
+    })
+    .await;
+    match r {
+        Ok(Ok(v)) => Json(v).into_response(),
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
 async fn api_sleep(State(state): State<Arc<AppState>>, q: Q) -> Response {
     let today = crate::day::today(state.tz, state.clock.now_ms());
     let to = match date_param(&q, "to") {

@@ -1,5 +1,6 @@
-//! What Erik shipped: commits from the local clones, pull requests and
-//! reviews from GitHub, as Time events.
+//! What Erik shipped and what his agents used: commits from the local clones
+//! and GitHub (Erik's own or an agent's), pull requests and reviews, T3
+//! Code activity, and every agent's tokens per hour, as Time events.
 //!
 //! Every event's id is derived from what it describes (a commit hash, a PR
 //! number and action), so the collector can rescan the same window every run
@@ -8,8 +9,10 @@
 
 pub mod git;
 pub mod github;
+pub mod pricing;
 pub mod speak;
 pub mod t3;
+pub mod usage;
 
 use serde::Deserialize;
 
@@ -44,6 +47,13 @@ pub struct CollectConfig {
     /// dictations are read from it when it exists.
     #[serde(default = "default_speak")]
     pub speak: String,
+    /// OpenCode's data directory: tokens per model call.
+    #[serde(default = "default_opencode")]
+    pub opencode: String,
+    /// Commits only GitHub has: how many to look up one by one per run.
+    /// 0 skips the commit search.
+    #[serde(default = "default_github_commits")]
+    pub github_commits: usize,
 }
 
 fn default_endpoint() -> String {
@@ -51,7 +61,15 @@ fn default_endpoint() -> String {
 }
 
 fn default_roots() -> Vec<String> {
-    vec!["~/projects".into()]
+    vec!["~/projects".into(), "~/.dotfiles".into()]
+}
+
+fn default_opencode() -> String {
+    "~/.local/share/opencode".into()
+}
+
+fn default_github_commits() -> usize {
+    200
 }
 
 fn default_t3() -> String {

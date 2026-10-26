@@ -156,10 +156,13 @@ in
     };
 
     collect = {
-      enable = lib.mkEnableOption "commit and pull-request collection (time-collect), every 15 minutes";
+      enable = lib.mkEnableOption "commits, pull requests, T3 Code activity and every agent's token use (time-collect), every 15 minutes";
       roots = lib.mkOption {
         type = lib.types.listOf lib.types.str;
-        default = [ "~/projects" ];
+        default = [
+          "~/projects"
+          "~/.dotfiles"
+        ];
         description = "Directories walked for git repositories.";
       };
       authors = lib.mkOption {

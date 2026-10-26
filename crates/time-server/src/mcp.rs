@@ -28,13 +28,14 @@ const SUPPORTED_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"]
 const INSTRUCTIONS: &str = "Time records what Erik does on his devices (computers and phone) and labels every minute. \
 Use time_now to see what he is doing right now and whether it is unproductive (video, feeds like X and Reddit; gaming counts as neutral), \
 time_summary for minutes per category over today or the last N hours, time_timeline for the blocks, time_listening for what he listened to (Spotify, YouTube, ...) by audible minutes. \
+time_summary also has his commits, lines of code and AI token use with its API-price equivalent (window 'week' for this week). \
 Every result starts with a one-paragraph summary followed by the JSON. Minutes of 'away' mean no device was in use.";
 
 pub fn tools() -> Value {
     let window = |default: &str| {
         json!({
             "type": "string",
-            "description": format!("today, yesterday, or a length like 30m, 3h, 2d (up to 7 days). Default {default}."),
+            "description": format!("today, yesterday, week (Monday until now), or a length like 30m, 3h, 2d (up to 7 days). Default {default}."),
         })
     };
     json!([
@@ -48,7 +49,7 @@ pub fn tools() -> Value {
         {
             "name": "time_summary",
             "title": "Time summary for a window",
-            "description": "Minutes per category for a window (today so far, the last N hours), the top apps and sites, projects, productive vs unproductive vs neutral totals, and sleep (when Erik fell asleep and woke up, hours asleep, averages for longer windows). Which categories are unproductive is configured on the server (video and feeds by default; gaming is neutral).",
+            "description": "Minutes per category for a window (today so far, the last N hours), the top apps and sites, projects, productive vs unproductive vs neutral totals, sleep (when Erik fell asleep and woke up, hours asleep, averages for longer windows), and code and AI (code_and_ai: commits and lines added/removed, split into Erik's own and his agents', per repository; every agent's tokens (input, cache read, cache write, output) and their cost at API list prices, per model, account, project and T3 thread). Which categories are unproductive is configured on the server (video and feeds by default; gaming is neutral).",
             "inputSchema": {
                 "type": "object",
                 "properties": {"window": window("today")},

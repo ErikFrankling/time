@@ -108,6 +108,11 @@ const MIGRATIONS: &[&str] = &[
         final              INTEGER NOT NULL,
         computed_ms        INTEGER NOT NULL
      );",
+    // 7: commits are identified by what survives a rebase (repository, author
+    // time and e-mail, subject), not by hash, and say whose they are: the
+    // collector sends them all again. Code and usage are read by name and day.
+    "DELETE FROM event WHERE name = 'github.commit';
+     CREATE INDEX event_name_start ON event(name, start_ms);",
 ];
 
 /// One computer minute of input counts (never which keys).
@@ -126,6 +131,17 @@ pub struct InputMinute {
 pub struct Store {
     conn: Mutex<Connection>,
 }
+
+/// Events stored by replacing the one with the same id.
+pub const REPLACEABLE: [&str; 2] = ["github.commit", "llm.usage.hour"];
+
+/// Events no minute's label depends on: storing one queues no relabelling.
+const UNLABELLED: [&str; 4] = [
+    "github.commit",
+    "github.pr",
+    "github.review",
+    "llm.usage.hour",
+];
 
 /// What one insert did, for the ingest response and the counters.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -183,6 +199,17 @@ impl Store {
                 "INSERT INTO event (id, name, device, service, start_ms, end_ms, received_ms, body)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) ON CONFLICT(id) DO NOTHING",
             )?;
+            // A replaceable event sent again with something new in it (an
+            // hour of usage that grew, a commit now known to be an agent's)
+            // takes the stored one's place; sent unchanged, it is a duplicate.
+            let mut replace = tx.prepare_cached(
+                "INSERT INTO event (id, name, device, service, start_ms, end_ms, received_ms, body)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(id) DO UPDATE SET device = excluded.device, service = excluded.service,
+                    start_ms = excluded.start_ms, end_ms = excluded.end_ms,
+                    received_ms = excluded.received_ms, body = excluded.body
+                 WHERE event.body IS NOT excluded.body",
+            )?;
             let mut seen = tx.prepare_cached(
                 "INSERT INTO device (name, last_event_ms) VALUES (?1, ?2)
                  ON CONFLICT(name) DO UPDATE SET last_event_ms = max(coalesce(last_event_ms, 0), excluded.last_event_ms)",
@@ -195,7 +222,12 @@ impl Store {
             )?;
             for env in envelopes {
                 let body = serde_json::to_string(&env.event)?;
-                let n = ins.execute(params![
+                let stmt = if REPLACEABLE.contains(&env.event.name()) {
+                    &mut replace
+                } else {
+                    &mut ins
+                };
+                let n = stmt.execute(params![
                     env.id,
                     env.event.name(),
                     env.device,
@@ -211,7 +243,9 @@ impl Store {
                 }
                 out.new += 1;
                 seen.execute(params![env.device, env.end_ms])?;
-                if !matches!(env.event, Event::Heartbeat(_)) {
+                if !matches!(env.event, Event::Heartbeat(_))
+                    && !UNLABELLED.contains(&env.event.name())
+                {
                     // A phone's state places the minutes after it too (the
                     // ones that have happened: never label the future).
                     let end = match env.event {
@@ -882,6 +916,34 @@ mod tests {
             }
         );
         assert_eq!(s.event_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn usage_hours_and_commits_are_replaced_and_queue_no_relabelling() {
+        use time_core::event::UsageHour;
+        let s = Store::open_in_memory().unwrap();
+        let hour = |requests| {
+            let mut e = Envelope::new(
+                "pc",
+                "agent-usage",
+                0,
+                3_599_999,
+                Event::UsageHour(UsageHour {
+                    provider: "claude".into(),
+                    requests,
+                    ..Default::default()
+                }),
+            );
+            e.id = "usage-1".into();
+            e
+        };
+        assert_eq!(s.insert(&[hour(1)], 1).unwrap().new, 1);
+        assert_eq!(s.insert(&[hour(1)], 2).unwrap().duplicate, 1);
+        assert_eq!(s.insert(&[hour(4)], 3).unwrap().new, 1);
+        assert_eq!(s.event_count().unwrap(), 1);
+        let stored = s.named_between(&["llm.usage.hour"], 0, 1).unwrap();
+        assert!(matches!(&stored[0].event, Event::UsageHour(u) if u.requests == 4));
+        assert_eq!(s.dirty_stats().unwrap().0, 0, "no minute depends on usage");
     }
 
     #[test]

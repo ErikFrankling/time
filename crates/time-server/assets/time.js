@@ -535,19 +535,161 @@
         label: { show: true, position: 'right', color: mu, fontSize: 10, fontFamily: font, formatter: function (p) { return hours(p.value); } },
         data: pr.map(function (x) { return x.m; }) }]
     });
-    // Code: commits per repository.
-    var cd = D.code && D.code.repos ? D.code.repos.slice().reverse() : [];
+    // Code: commits per repository, yours and your agents'.
+    var W = D.work || {};
+    var cd = (W.repos && W.repos.length ? W.repos.slice(0, 8) : (D.code && D.code.repos ? D.code.repos.map(function (x) { return { name: x.name, commits: x.n, erik: 0, added: 0, removed: 0 }; }) : [])).slice().reverse();
+    var ERIK = '#f2c14e', ADD = '#3fb27f', DEL = '#e66767';
     make('c-code', cd.length ? {
       animation: false,
-      grid: { left: 4, right: 30, top: 2, bottom: 2, containLabel: true },
-      tooltip: Object.assign({ trigger: 'item', formatter: function (p) { return '<b>' + esc(cd[p.dataIndex].name) + '</b> ' + p.value + ' commits'; } }, tip),
+      grid: { left: 4, right: 70, top: 2, bottom: 2, containLabel: true },
+      tooltip: Object.assign({ trigger: 'item', formatter: function (p) {
+        var x = cd[p.dataIndex];
+        return '<b>' + esc(x.name) + '</b><br>' + x.commits + ' commits · ' + x.erik + ' by you, ' + (x.commits - x.erik) + ' by agents' +
+          '<br>+' + thou(x.added) + ' −' + thou(x.removed) + ' lines' + (x.erik ? ' (yours +' + thou(x.erikAdded) + ' −' + thou(x.erikRemoved) + ')' : '');
+      } }, tip),
       xAxis: { type: 'value', show: false },
       yAxis: { type: 'category', axisTick: { show: false }, axisLine: { show: false },
-        axisLabel: Object.assign({}, axisText, { color: fg, fontSize: 11 }), data: cd.map(function (x) { return x.name; }) },
-      series: [{ type: 'bar', barWidth: 10, itemStyle: { color: '#199e70', borderRadius: 3 },
-        label: { show: true, position: 'right', color: mu, fontSize: 10, fontFamily: font },
-        data: cd.map(function (x) { return x.n; }) }]
+        axisLabel: Object.assign({}, axisText, { color: fg, fontSize: 11, width: 110, overflow: 'truncate' }), data: cd.map(function (x) { return x.name; }) },
+      series: [
+        { type: 'bar', stack: 'c', barWidth: 10, name: 'you', itemStyle: { color: ERIK, borderRadius: [3, 0, 0, 3] }, data: cd.map(function (x) { return x.erik; }) },
+        { type: 'bar', stack: 'c', barWidth: 10, name: 'agents', itemStyle: { color: '#199e70', borderRadius: [0, 3, 3, 0] },
+          label: { show: true, position: 'right', color: mu, fontSize: 10, fontFamily: font, formatter: function (p) { var x = cd[p.dataIndex]; return x.commits + (x.added ? ' · +' + kn(x.added) : ''); } },
+          data: cd.map(function (x) { return x.commits - x.erik; }) }
+      ]
     } : { graphic: [{ type: 'text', left: 'center', top: 'middle', style: { text: 'no commits', fill: mu, fontSize: 12, fontFamily: font } }] });
+
+    function kn(n) {
+      n = +n || 0;
+      var a = Math.abs(n), u = a >= 1e9 ? [1e9, 'B'] : a >= 1e6 ? [1e6, 'M'] : a >= 1e3 ? [1e3, 'k'] : null;
+      if (!u) return String(Math.round(n));
+      var v = n / u[0];
+      return (Math.abs(v) < 10 ? v.toFixed(1).replace(/\.0$/, '') : Math.round(v)) + u[1];
+    }
+    function usd(x) { return x >= 1000 ? '$' + thou(x).replace(/ /g, ',') : x >= 10 ? '$' + Math.round(x) : '$' + (x || 0).toFixed(2); }
+    if (!W.any) return;
+    var wl = W.labels || [], links = W.links || [];
+    var RC = ['#3987e5', '#199e70', '#d55181', '#c98500', '#9085e9', '#d95926', '#4fb3bf', '#7d7c76'];
+    var xAxis = { type: 'category', data: wl, axisTick: { show: false }, axisLine: { lineStyle: { color: line } },
+      axisLabel: Object.assign({}, axisText, { interval: D.kind === 'day' ? 2 : D.kind === 'week' ? 0 : 'auto' }) };
+    function click(c) { if (c && links.length) c.on('click', function (p) { link(links[p.dataIndex]); }); }
+    function shade(data) {
+      return data.map(function (v, i) { return W.future && W.future[i] ? { value: v, itemStyle: { opacity: 0.25 } } : v; });
+    }
+
+    // Commits over time: stacked by repository, your own as a line.
+    var cs = W.commits.repos.map(function (s, i) {
+      return { type: 'bar', stack: 'r', name: s.name, barMaxWidth: 26, data: shade(s.data),
+        itemStyle: { color: s.name === 'other' ? RC[7] : RC[i % 7] } };
+    });
+    cs.push({ type: 'line', name: 'by you', data: W.commits.erik, symbol: 'circle', symbolSize: 5, z: 5,
+      lineStyle: { color: ERIK, width: 2 }, itemStyle: { color: ERIK }, showSymbol: true });
+    click(make('c-commits', {
+      animation: false,
+      grid: { left: 4, right: 8, top: 26, bottom: 2, containLabel: true },
+      legend: { top: 0, type: 'scroll', itemWidth: 10, itemHeight: 10, textStyle: { color: mu, fontSize: 10, fontFamily: font }, pageTextStyle: { color: mu } },
+      tooltip: Object.assign({ trigger: 'axis', axisPointer: { type: 'shadow' }, formatter: function (ps) {
+        var i = ps[0].dataIndex, tot = 0, rows = '';
+        ps.forEach(function (p) { if (p.seriesType === 'bar' && p.value) { tot += +p.value || (p.value && p.value.value) || 0; rows += '<br><span style="color:' + p.color + '">●</span> ' + esc(p.seriesName) + ' ' + (+p.value || p.data.value); } });
+        var L = W.lines;
+        return '<b>' + esc(wl[i]) + (D.kind === 'day' ? ':00' : '') + '</b> · ' + tot + ' commits<br><span style="color:' + ERIK + '">●</span> by you ' + W.commits.erik[i] + ' · by agents ' + W.commits.agents[i] +
+          rows + '<br>+' + thou(L.erikAdd[i] + L.agentAdd[i]) + ' −' + thou(L.erikDel[i] + L.agentDel[i]) + ' lines (yours +' + thou(L.erikAdd[i]) + ' −' + thou(L.erikDel[i]) + ')';
+      } }, tip),
+      xAxis: xAxis,
+      yAxis: { type: 'value', minInterval: 1, splitLine: { lineStyle: { color: line } }, axisLabel: axisText },
+      series: cs
+    }));
+
+    // Lines added (up) and removed (down): yours solid, agents' light.
+    var L = W.lines, neg = function (a) { return a.map(function (v) { return -v; }); };
+    click(make('c-lines', {
+      animation: false,
+      grid: { left: 4, right: 8, top: 6, bottom: 2, containLabel: true },
+      tooltip: Object.assign({ trigger: 'axis', axisPointer: { type: 'shadow' }, formatter: function (ps) {
+        var i = ps[0].dataIndex;
+        return '<b>' + esc(wl[i]) + (D.kind === 'day' ? ':00' : '') + '</b><br>yours +' + thou(L.erikAdd[i]) + ' −' + thou(L.erikDel[i]) +
+          '<br>agents +' + thou(L.agentAdd[i]) + ' −' + thou(L.agentDel[i]);
+      } }, tip),
+      xAxis: Object.assign({}, xAxis, { axisLabel: { show: false } }),
+      yAxis: { type: 'value', splitLine: { lineStyle: { color: line } }, axisLabel: Object.assign({}, axisText, { formatter: function (v) { return kn(Math.abs(v)); } }) },
+      series: [
+        { type: 'bar', stack: 'a', name: 'yours added', barMaxWidth: 26, itemStyle: { color: ADD }, data: L.erikAdd },
+        { type: 'bar', stack: 'a', name: 'agents added', itemStyle: { color: ADD, opacity: 0.4 }, data: L.agentAdd },
+        { type: 'bar', stack: 'd', name: 'yours removed', barMaxWidth: 26, barGap: '-100%', itemStyle: { color: DEL }, data: neg(L.erikDel) },
+        { type: 'bar', stack: 'd', name: 'agents removed', itemStyle: { color: DEL, opacity: 0.4 }, data: neg(L.agentDel) }
+      ]
+    }));
+
+    // AI: cost or tokens per bucket, stacked by model, coloured by agent.
+    var PC = { claude: '#d97757', codex: '#c9c9c4', grok: '#8a8a86', opencode: '#5b9bbd', pi: '#4d9f8a', cursor: '#8b8b8b', other: '#4a4a46' };
+    var seen = {};
+    function mcol(m) {
+      var k = seen[m.provider] = (seen[m.provider] || 0) + 1;
+      return { color: PC[m.provider] || PC.other, opacity: [1, 0.72, 0.5, 0.36, 0.26][Math.min(k - 1, 4)] };
+    }
+    var MS = W.models.map(function (m) { return Object.assign({ style: mcol(m) }, m); });
+    var metric = 'cost';
+    function aiChart() {
+      var isCost = metric === 'cost';
+      click(make('c-ai', {
+        animation: false,
+        grid: { left: 4, right: 8, top: 26, bottom: 2, containLabel: true },
+        legend: { top: 0, type: 'scroll', itemWidth: 10, itemHeight: 10, textStyle: { color: mu, fontSize: 10, fontFamily: font }, pageTextStyle: { color: mu } },
+        tooltip: Object.assign({ trigger: 'axis', axisPointer: { type: 'shadow' }, formatter: function (ps) {
+          var i = ps[0].dataIndex, cost = 0, tok = 0, rows = '';
+          MS.forEach(function (m) {
+            var c = m.cost[i], t = m.tokens[i], pt = m.parts[i];
+            if (!t && !c) return;
+            cost += c; tok += t;
+            rows += '<br><span style="color:' + m.style.color + ';opacity:' + m.style.opacity + '">●</span> ' + esc(m.name) + ' <b>' + usd(c) + '</b> · ' + kn(t) +
+              ' <span style="opacity:.7">(in ' + kn(pt[0]) + ', cache ' + kn(pt[1]) + ' read / ' + kn(pt[2]) + ' write, out ' + kn(pt[3]) + ')</span>';
+          });
+          return '<b>' + esc(wl[i]) + (D.kind === 'day' ? ':00' : '') + '</b> · ' + kn(tok) + ' tokens ≈ ' + usd(cost) + rows +
+            '<br><i style="opacity:.7">equivalent at API list prices</i>';
+        } }, tip),
+        xAxis: xAxis,
+        yAxis: { type: 'value', splitLine: { lineStyle: { color: line } },
+          axisLabel: Object.assign({}, axisText, { formatter: function (v) { return isCost ? usd(v) : kn(v); } }) },
+        series: MS.map(function (m) {
+          return { type: 'bar', stack: 'm', name: m.name, barMaxWidth: 26, itemStyle: m.style,
+            data: shade(isCost ? m.cost : m.tokens) };
+        })
+      }));
+    }
+    aiChart();
+    var seg = document.getElementById('c-ai-metric');
+    if (seg) seg.querySelectorAll('button').forEach(function (b) {
+      b.classList.toggle('on', b.getAttribute('data-m') === metric);
+      b.onclick = function () {
+        metric = b.getAttribute('data-m');
+        seg.querySelectorAll('button').forEach(function (x) { x.classList.toggle('on', x === b); });
+        aiChart();
+      };
+    });
+
+    // Where it went: by account and model, by project, by thread.
+    function shareBars(id, title, rows, color) {
+      var r = rows.slice().reverse();
+      make(id, r.length ? {
+        animation: false,
+        title: { text: title, left: 4, top: 0, textStyle: { color: mu, fontSize: 11, fontWeight: 'normal', fontFamily: font } },
+        grid: { left: 4, right: 60, top: 22, bottom: 2, containLabel: true },
+        tooltip: Object.assign({ trigger: 'item', formatter: function (p) {
+          var x = r[p.dataIndex];
+          return '<b>' + esc(x.name) + '</b>' + (x.project ? ' <span style="opacity:.7">' + esc(x.project) + '</span>' : '') + '<br>' + kn(x.tokens) + ' tokens ≈ ' + usd(x.cost);
+        } }, tip),
+        xAxis: { type: 'value', show: false },
+        yAxis: { type: 'category', axisTick: { show: false }, axisLine: { show: false },
+          axisLabel: Object.assign({}, axisText, { color: fg, fontSize: 11, width: 150, overflow: 'truncate' }), data: r.map(function (x) { return x.name; }) },
+        series: [{ type: 'bar', barWidth: 10,
+          label: { show: true, position: 'right', color: mu, fontSize: 10, fontFamily: font, formatter: function (p) { return usd(r[p.dataIndex].cost); } },
+          data: r.map(function (x) { return { value: x.cost, itemStyle: { color: typeof color === 'function' ? color(x) : color, borderRadius: 3 } }; }) }]
+      } : { graphic: [{ type: 'text', left: 'center', top: 'middle', style: { text: 'nothing recorded', fill: mu, fontSize: 12, fontFamily: font } }] });
+    }
+    var acct = { claude: 'claude (main)', claude_2: 'claude (second)' };
+    shareBars('c-ai-by', 'By account', W.accounts.map(function (a) { return Object.assign({}, a, { name: acct[a.name] || a.name, key: a.name }); }),
+      function (x) { return PC[(x.key || '').indexOf('claude') === 0 ? 'claude' : x.key] || PC.other; });
+    shareBars('c-ai-projects', 'By project', W.projects, '#3987e5');
+    shareBars('c-ai-threads', 'Top T3 threads', W.threads, '#9085e9');
   }
 
   draw();

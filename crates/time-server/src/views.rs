@@ -281,6 +281,8 @@ pub struct Summary {
     pub tz: chrono_tz::Tz,
     /// Built from the raw minutes (`?raw=1`), without gaps filled or sleep.
     pub raw: bool,
+    /// Commits and AI usage: per hour for a day, per day otherwise.
+    pub work: crate::work::Work,
 }
 
 impl Summary {
@@ -334,6 +336,40 @@ impl Summary {
             return 0;
         }
         self.total.steps / self.step_days
+    }
+}
+
+/// A period's commits and AI usage, in one read: an hour a bucket for a
+/// day, else a day.
+pub fn work_of(
+    store: &Store,
+    tz: chrono_tz::Tz,
+    period: Period,
+) -> anyhow::Result<crate::work::Work> {
+    let (from, _) = crate::day::bounds(tz, period.start)?;
+    let (_, to) = crate::day::bounds(tz, period.end - Days::new(1))?;
+    let starts: Vec<Millis> = match period.kind {
+        Kind::Day => (from..to).step_by(3_600_000).collect(),
+        _ => period
+            .days()
+            .map(|d| crate::day::bounds(tz, d).map(|b| b.0))
+            .collect::<anyhow::Result<_>>()?,
+    };
+    Ok(crate::work::Work::between(
+        &store.named_between(&crate::work::EVENTS, from, to)?,
+        &starts,
+        to,
+    ))
+}
+
+/// Bucket labels and links for a period, as the charts show them.
+pub fn bucket_labels(period: Period, buckets: usize) -> (Vec<String>, Vec<String>) {
+    match period.kind {
+        Kind::Day => ((0..buckets).map(|h| format!("{h:02}")).collect(), vec![]),
+        _ => (
+            period.days().map(|d| d.to_string()).collect(),
+            period.days().map(|d| format!("/day/{d}")).collect(),
+        ),
     }
 }
 
@@ -404,6 +440,7 @@ pub fn summarise(
         total.add(&t);
         days.push(t);
     }
+    let work = work_of(store, tz, period)?;
     Ok(Summary {
         period,
         days,
@@ -413,6 +450,7 @@ pub fn summarise(
         now_min: None,
         tz,
         raw,
+        work,
     })
 }
 
@@ -866,6 +904,7 @@ pub fn chart_data(
         "clock": clock_chart(cur),
         "drill": cur.total.whats.iter().map(|(a, by)| (a.as_str().to_owned(), serde_json::Value::from(drill(by, 60)))).collect::<serde_json::Map<_, _>>(),
         "code": code_chart(&cur.total.code),
+        "work": work_chart(cur, prev, &labels, &links, &future),
     })
 }
 
@@ -873,6 +912,7 @@ pub fn chart_data(
 pub fn charts(cur: &Summary, prev: &Summary, goal: u32, day: Option<&crate::day::Day>) -> String {
     let data = chart_data(cur, prev, goal, day);
     let mut out = headline(cur, prev);
+    out.push_str(&work_line(cur));
     out.push_str(&sleep_card(cur));
     let per_day = cur.period.kind != Kind::Day;
     let full = cur.total.tracks.active_minutes;
@@ -939,9 +979,12 @@ pub fn charts(cur: &Summary, prev: &Summary, goal: u32, day: Option<&crate::day:
             .max(c.commits_by_repo.len().min(8));
         let _ = write!(
             out,
-            r#"<section class="chartcard"><h2>Projects and code</h2><div class="cap">Left: time on each project. Right: commits per repository. {code}.</div><div class="two"><div class="chart" id="c-projects" style="height:{h:.1}rem"></div><div class="chart" id="c-code" style="height:{h:.1}rem"></div></div></section>"#,
+            r#"<section class="chartcard"><h2>Projects and code</h2><div class="cap">Left: time on each project. Right: commits per repository, yours in gold and your agents' in green. {code}.</div><div class="two"><div class="chart" id="c-projects" style="height:{h:.1}rem"></div><div class="chart" id="c-code" style="height:{h:.1}rem"></div></div></section>"#,
             h = 2.0 + 1.6 * n as f64
         );
+    }
+    if !cur.work.is_empty() {
+        out.push_str(&work_cards(cur.period.kind));
     }
     if cur.total.parallel() > 0 {
         out.push_str(&slot(
@@ -1209,6 +1252,11 @@ pub const STYLE: &str = r#"
 .figs .fs b { color:var(--fg); font-variant-numeric:tabular-nums; }
 .figs .fv { font-size:2.6rem; line-height:1.1; font-weight:750; font-variant-numeric:tabular-nums; letter-spacing:-.02em; white-space:nowrap; }
 .figs .fk { color:var(--muted); font-size:.75rem; line-height:1.3; }
+.workline { margin-top:-.4rem; }
+.workline .wl { font-size:1rem; font-weight:650; font-variant-numeric:tabular-nums; }
+.seg { display:inline-flex; border:1px solid var(--line); border-radius:.5rem; overflow:hidden; margin:.1rem 0 .3rem; }
+.seg button { background:none; border:0; color:var(--muted); font:inherit; font-size:.8rem; padding:.2rem .7rem; cursor:pointer; }
+.seg button.on { background:var(--line); color:var(--fg); }
 .chip { display:inline-block; font-size:.7rem; font-weight:700; padding:0 .3rem; border-radius:99px; background:var(--line); color:var(--fg); white-space:nowrap; }
 .chartcard { padding:.8rem .7rem .6rem; }
 .chartcard h2 { margin-left:.3rem; }
@@ -1629,6 +1677,67 @@ fn clock_chart(cur: &Summary) -> serde_json::Value {
         }
     }
     json!({"items": items, "now": cur.now_min, "names": crate::tracks::NAMES})
+}
+
+/// The Code and AI cards: commits and lines over time, then tokens and
+/// their API-price equivalent, then where they went.
+fn work_cards(kind: Kind) -> String {
+    let per = if kind == Kind::Day { "hour" } else { "day" };
+    let mut out = String::new();
+    let _ = write!(
+        out,
+        r#"<section class="chartcard"><h2>Code</h2><div class="cap">Commits each {per}, by repository; the line is yours, the rest your agents' (a Co-Authored-By trailer, or an agent session working in that repository when it was committed). Under it, lines added and removed: yours solid, agents' light. Lockfiles, generated, vendored and data files are left out. Hover for the breakdown.</div><div class="chart" id="c-commits" style="height:14rem"></div><div class="chart" id="c-lines" style="height:9rem"></div></section>"#
+    );
+    let _ = write!(
+        out,
+        r#"<section class="chartcard"><h2>AI usage</h2><div class="cap">Every agent's tokens each {per} (Claude on both accounts, Codex, Grok, OpenCode), by model, from their own transcripts. Cost is the equivalent at API list prices: most of it is on subscriptions. Hover for input, cache and output.</div><div class="seg" id="c-ai-metric" role="group" aria-label="Metric"><button type="button" data-m="cost" class="on">Cost</button><button type="button" data-m="tokens">Tokens</button></div><div class="chart" id="c-ai" style="height:15rem"></div><div class="two"><div class="chart" id="c-ai-by" style="height:13rem"></div><div class="chart" id="c-ai-projects" style="height:13rem"></div></div><div class="chart" id="c-ai-threads" style="height:13rem"></div></section>"#
+    );
+    out
+}
+
+/// Code and AI over the period: the same buckets as the time chart.
+fn work_chart(
+    cur: &Summary,
+    prev: &Summary,
+    labels: &[String],
+    links: &[String],
+    future: &[bool],
+) -> serde_json::Value {
+    let mut v = cur.work.json(&prev.work.totals());
+    v["labels"] = labels.into();
+    v["links"] = links.into();
+    v["future"] = future.into();
+    v
+}
+
+/// "312 commits · +18k/−6k lines · 42M tokens ≈ $310 this week", with
+/// Erik's own share under it.
+pub fn work_line(cur: &Summary) -> String {
+    let t = cur.work.totals();
+    if cur.work.is_empty() {
+        return String::new();
+    }
+    let when = match cur.period.kind {
+        Kind::Day => "this day",
+        Kind::Week => "this week",
+        Kind::Month => "this month",
+    };
+    let mine = if t.commits == 0 {
+        String::new()
+    } else {
+        format!(
+            r#"<span class="sf"><b>{}</b> by you, +{}/−{}</span><span class="sf"><b>{}</b> by agents</span>"#,
+            t.erik_commits,
+            crate::work::compact(t.erik_added),
+            crate::work::compact(t.erik_removed),
+            t.commits - t.erik_commits
+        )
+    };
+    format!(
+        r#"<section class="figs workline"><div class="wl">{} {when}</div><div class="fs">{mine}<span class="sf">tokens ≈ {} equivalent at API prices</span></div></section>"#,
+        esc(&crate::work::line(&t)),
+        esc(&crate::work::usd(t.cost)),
+    )
 }
 
 /// Code in the main view: totals and commits per repository.

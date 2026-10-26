@@ -94,6 +94,16 @@ pub fn parse_window(spec: &str, tz: chrono_tz::Tz, now: Millis) -> Result<Window
                 to_ms: now,
             })
         }
+        "week" | "thisweek" => {
+            use chrono::Datelike;
+            let monday =
+                today - chrono::Days::new(u64::from(today.weekday().num_days_from_monday()));
+            return Ok(Window {
+                label: "this week so far".into(),
+                from_ms: day_start(monday)?,
+                to_ms: now,
+            });
+        }
         "yesterday" => {
             let y = today.pred_opt().unwrap_or(today);
             let (from_ms, to_ms) = crate::day::bounds(tz, y)?;
@@ -108,7 +118,7 @@ pub fn parse_window(spec: &str, tz: chrono_tz::Tz, now: Millis) -> Result<Window
     let digits: String = s.chars().take_while(|c| c.is_ascii_digit()).collect();
     let unit = &s[digits.len()..];
     let Ok(n) = digits.parse::<i64>() else {
-        bail!("window {spec:?}: use today, yesterday, or a length like 30m, 3h, 2d");
+        bail!("window {spec:?}: use today, yesterday, week, or a length like 30m, 3h, 2d");
     };
     let minutes = match unit {
         "" | "h" | "hr" | "hrs" | "hour" | "hours" => n * 60,
@@ -548,6 +558,20 @@ pub fn summary(
     let listening =
         crate::listening::Tally::from_events(events, labels, w.from_ms, w.to_ms, 3_600_000);
     let mut json = json;
+    // Code and AI: commits (Erik's own and his agents'), lines, tokens and
+    // their API-price equivalent. Usage is per hour, so a window cut
+    // mid-hour counts that hour from its start.
+    let hour_from = w.from_ms - w.from_ms.rem_euclid(3_600_000);
+    let work = crate::work::Work::between(events, &[hour_from], w.to_ms);
+    if !work.is_empty() {
+        let t = work.totals();
+        text.push_str(&format!(
+            " Code and AI: {} ({} of the commits by Erik himself, the rest by agents; cost is the API-price equivalent).",
+            crate::work::line(&t),
+            t.erik_commits
+        ));
+    }
+    json["code_and_ai"] = crate::work::digest_json(&work);
     json["listening"] = listening.json(3);
     if listening.total().minutes() > 0 {
         text.push_str(&format!(" Audible: {}.", listening.sentence(4)));

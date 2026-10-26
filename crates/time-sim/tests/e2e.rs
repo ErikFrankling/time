@@ -581,6 +581,7 @@ fn commits_and_pull_requests_show_on_the_day() {
                 lines_added: 1200,
                 lines_removed: 40,
                 files: 9,
+                ..Default::default()
             })),
             ev(Event::PullRequest(PullRequest {
                 repo: "time".into(),

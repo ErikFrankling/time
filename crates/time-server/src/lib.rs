@@ -23,6 +23,7 @@ pub mod store;
 pub mod tracks;
 pub mod views;
 pub mod web;
+pub mod work;
 
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;

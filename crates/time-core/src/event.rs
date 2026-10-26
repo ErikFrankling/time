@@ -106,6 +106,11 @@ pub enum Event {
     DictationFinished(DictationFinished),
     #[serde(rename = "llm.tokens.used")]
     TokensUsed(TokensUsed),
+    /// Tokens and their list-price cost for one hour of one agent session
+    /// and model, from the providers' own transcripts. Replaced when sent
+    /// again: the hour fills up as the session goes on.
+    #[serde(rename = "llm.usage.hour")]
+    UsageHour(UsageHour),
     #[serde(rename = "github.commit")]
     Commit(Commit),
     #[serde(rename = "github.pr")]
@@ -135,6 +140,7 @@ impl Event {
             Event::VoiceModeSpan(_) => "t3.voicemode.span",
             Event::DictationFinished(_) => "stt.dictation.finished",
             Event::TokensUsed(_) => "llm.tokens.used",
+            Event::UsageHour(_) => "llm.usage.hour",
             Event::Commit(_) => "github.commit",
             Event::PullRequest(_) => "github.pr",
             Event::Review(_) => "github.review",
@@ -388,7 +394,7 @@ pub struct TokensUsed {
     pub origin: Origin,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Commit {
     pub repo: String,
     /// Full hash; the event id is derived from it, so rescans dedupe.
@@ -403,6 +409,76 @@ pub struct Commit {
     pub lines_removed: u32,
     #[serde(default)]
     pub files: u32,
+    /// The agent that wrote it ("claude-opus-5-5", "codex"), from a
+    /// Co-Authored-By trailer or an agent session working in the same
+    /// repository at the time; None when Erik committed it himself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// "trailer" or "session": how `agent` was found.
+    #[serde(
+        rename = "agent.evidence",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub agent_evidence: Option<String>,
+    /// "local" (a clone on this machine) or "github" (only on GitHub).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+/// One hour of one agent session on one model: what the provider's own
+/// transcript says was sent and received, priced at API list prices.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct UsageHour {
+    /// Which agent: claude, codex, grok, opencode, pi.
+    #[serde(rename = "gen_ai.provider.name")]
+    pub provider: String,
+    #[serde(rename = "gen_ai.request.model")]
+    pub model: String,
+    /// The T3 provider instance (Claude account) when T3 ran the session.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub account: String,
+    #[serde(rename = "session.id", default)]
+    pub session_id: String,
+    /// The repository or folder the session worked in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    #[serde(rename = "thread.id", default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(
+        rename = "thread.title",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub thread_title: Option<String>,
+    /// Model calls in the hour.
+    #[serde(default)]
+    pub requests: u32,
+    /// Input not read from a cache.
+    #[serde(rename = "gen_ai.usage.input_tokens", default)]
+    pub input_tokens: u64,
+    #[serde(rename = "gen_ai.usage.cache_read_tokens", default)]
+    pub cache_read_tokens: u64,
+    #[serde(rename = "gen_ai.usage.cache_write_tokens", default)]
+    pub cache_write_tokens: u64,
+    /// Reasoning included.
+    #[serde(rename = "gen_ai.usage.output_tokens", default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub reasoning_tokens: u64,
+    /// What it would have cost at API list prices (most of it is on a
+    /// subscription), or what the provider reported.
+    #[serde(rename = "cost.usd", default)]
+    pub cost_usd: f64,
+    /// Calls with no known price (counted in tokens, not in `cost_usd`).
+    #[serde(default)]
+    pub unpriced: u32,
+}
+
+impl UsageHour {
+    pub fn tokens(&self) -> u64 {
+        self.input_tokens + self.cache_read_tokens + self.cache_write_tokens + self.output_tokens
+    }
 }
 
 /// A focus nudge went out (or was attempted).
