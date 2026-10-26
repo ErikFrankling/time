@@ -107,13 +107,14 @@ fn trailer_agent(message: &str) -> Option<String> {
 pub fn agent_of(
     message: &str,
     repo: &str,
+    path: Option<&Path>,
     at: i64,
     activity: &Activity,
 ) -> (Option<String>, Option<String>) {
     if let Some(a) = trailer_agent(message) {
         return (Some(a), Some("trailer".into()));
     }
-    match activity.agent_at(repo, at) {
+    match activity.agent_at(repo, path, at) {
         Some(m) => (Some(m.to_owned()), Some("session".into())),
         None => (None, None),
     }
@@ -302,7 +303,13 @@ pub fn scan(
         let (added, removed, files) = diff.map(|d| commit_lines(&d)).unwrap_or_default();
         // When it was written: a rebase keeps the author's time.
         let at = author.when().seconds() * 1000;
-        let (agent, agent_evidence) = agent_of(commit.message().unwrap_or(""), &name, at, activity);
+        let (agent, agent_evidence) = agent_of(
+            commit.message().unwrap_or(""),
+            &name,
+            Some(repo_path),
+            at,
+            activity,
+        );
         out.push(Envelope {
             id: stable_id(&key),
             device: device.to_owned(),

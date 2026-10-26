@@ -310,7 +310,7 @@ pub fn commits(
         if added + removed > crate::git::BULK_COMMIT_LINES {
             (added, removed) = (0, 0);
         }
-        let (agent, agent_evidence) = crate::git::agent_of(message, &repo, ms, activity);
+        let (agent, agent_evidence) = crate::git::agent_of(message, &repo, None, ms, activity);
         out.push(Envelope {
             id: stable_id(&key),
             device: device.to_owned(),

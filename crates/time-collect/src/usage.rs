@@ -189,9 +189,79 @@ struct Cache {
 struct CacheFile {
     p: String,
     #[serde(default)]
-    r: Vec<Vec<serde_json::Value>>,
+    r: Vec<Row>,
     #[serde(default)]
-    t: Vec<Vec<serde_json::Value>>,
+    t: Vec<Row>,
+}
+
+/// One cached call: `[time, model, session, uncached, cache read, cache
+/// write, output, reasoning, dedupe key, reported cost, speed, rate model,
+/// ...]`, read straight into numbers (the cache is a few hundred thousand
+/// rows; a generic JSON tree of it costs hundreds of megabytes).
+#[derive(Default)]
+struct Row {
+    at: f64,
+    model: Option<usize>,
+    session: Option<usize>,
+    n: [f64; 5],
+    dedupe: Option<String>,
+    reported: Option<f64>,
+    speed: u8,
+    rate_model: Option<usize>,
+    valid: bool,
+}
+
+impl<'de> Deserialize<'de> for Row {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = Row;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a usage row")
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut s: A,
+            ) -> std::result::Result<Row, A::Error> {
+                type N = Option<f64>;
+                let mut r = Row::default();
+                let idx = |v: N| v.filter(|x| *x >= 0.0).map(|x| x as usize);
+                let Some(Some(at)) = s.next_element::<N>()? else {
+                    while s.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+                    return Ok(r);
+                };
+                r.at = at;
+                r.model = idx(s.next_element::<N>()?.flatten());
+                r.session = idx(s.next_element::<N>()?.flatten());
+                let mut count = 3;
+                for i in 0..5 {
+                    if let Some(v) = s.next_element::<N>()? {
+                        r.n[i] = v.unwrap_or(0.0).max(0.0);
+                        count += 1;
+                    }
+                }
+                if let Some(k) = s.next_element::<Option<String>>()? {
+                    r.dedupe = k;
+                    count += 1;
+                }
+                if let Some(c) = s.next_element::<N>()? {
+                    r.reported = c;
+                    count += 1;
+                }
+                if let Some(sp) = s.next_element::<N>()? {
+                    r.speed = sp.unwrap_or(0.0).clamp(0.0, 2.0) as u8;
+                    count += 1;
+                }
+                if let Some(m) = s.next_element::<N>()? {
+                    r.rate_model = idx(m);
+                }
+                while s.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+                r.valid = count >= 11;
+                Ok(r)
+            }
+        }
+        d.deserialize_seq(V)
+    }
 }
 
 /// The newest `usage-scan-cache*.json` in T3's state folder.
@@ -216,22 +286,16 @@ fn newest_cache(userdata: &Path) -> Option<PathBuf> {
     best.map(|(_, p)| p)
 }
 
-/// The first `max` bytes of a file.
-fn head(path: &Path, max: u64) -> Option<String> {
-    let mut s = String::new();
-    std::fs::File::open(path)
-        .ok()?
-        .take(max)
-        .read_to_string(&mut s)
-        .ok()?;
-    Some(s)
-}
-
 /// The `"cwd":"..."` a transcript records in its first lines.
 fn cwd_in(path: &Path) -> Option<String> {
-    let text = head(path, 256 * 1024)?;
-    for line in text.lines() {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+    use std::io::BufRead;
+    let file = std::fs::File::open(path).ok()?;
+    // The first lines say where the session ran; never more than 64 KB.
+    for line in std::io::BufReader::new(file.take(64 * 1024)).lines() {
+        let Ok(line) = line else {
+            break;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
         for c in [&v["cwd"], &v["payload"]["cwd"]] {
@@ -297,7 +361,8 @@ pub fn t3_calls(userdata: &Path) -> Result<Vec<Call>> {
     let first = |f: &CacheFile| {
         f.r.iter()
             .chain(&f.t)
-            .filter_map(|r| r.first().and_then(serde_json::Value::as_f64))
+            .filter(|r| r.valid)
+            .map(|r| r.at)
             .fold(f64::INFINITY, f64::min)
     };
     let mut files: Vec<(&String, &CacheFile)> = cache.files.iter().collect();
@@ -307,47 +372,39 @@ pub fn t3_calls(userdata: &Path) -> Result<Vec<Call>> {
     for (file, f) in files {
         let cwd = cwd_of(&f.p, Path::new(file));
         for row in f.r.iter().chain(&f.t) {
-            if row.len() < 11 {
+            if !row.valid {
                 continue;
             }
-            if let Some(k) = row[8].as_str() {
-                if !seen.insert(k.to_owned()) {
+            if let Some(k) = &row.dedupe {
+                if !seen.insert(k.clone()) {
                     continue;
                 }
             }
-            let n = |i: usize| row[i].as_f64().unwrap_or(0.0).max(0.0) as u64;
-            let idx = |i: usize| {
-                row.get(i)
-                    .and_then(serde_json::Value::as_u64)
-                    .map(|x| x as usize)
-            };
-            let Some(model) = idx(1).and_then(|i| cache.models.get(i)) else {
+            let Some(model) = row.model.and_then(|i| cache.models.get(i)) else {
                 continue;
             };
             if model == "<synthetic>" {
                 continue;
             }
-            let Some(at) = row[0].as_f64() else {
-                continue;
-            };
             out.push(Call {
                 provider: f.p.clone(),
                 model: model.clone(),
-                rate_model: idx(11).and_then(|i| cache.models.get(i)).cloned(),
-                session: idx(2)
+                rate_model: row.rate_model.and_then(|i| cache.models.get(i)).cloned(),
+                session: row
+                    .session
                     .and_then(|i| cache.sessions.get(i))
                     .cloned()
                     .unwrap_or_default(),
-                at: at as Millis,
+                at: row.at as Millis,
                 tokens: Tokens {
-                    uncached: n(3),
-                    cache_read: n(4),
-                    cache_write: n(5),
-                    output: n(6),
+                    uncached: row.n[0] as u64,
+                    cache_read: row.n[1] as u64,
+                    cache_write: row.n[2] as u64,
+                    output: row.n[3] as u64,
                 },
-                reasoning: n(7),
-                reported_usd: row[9].as_f64(),
-                speed: row[10].as_u64().unwrap_or(0).min(2) as u8,
+                reasoning: row.n[4] as u64,
+                reported_usd: row.reported,
+                speed: row.speed,
                 cwd: cwd.clone(),
             });
         }
@@ -623,7 +680,12 @@ pub fn hours(
 /// When agents were working, per repository: a commit made while one was is
 /// the agent's.
 #[derive(Debug, Default)]
-pub struct Activity(HashMap<String, Vec<(Millis, String)>>);
+pub struct Activity {
+    by_repo: HashMap<String, Vec<(Millis, String)>>,
+    /// By the folder the agent ran in (encoded as Claude does): an agent in
+    /// `~/projects/work` commits in the repositories under it.
+    by_dir: Vec<(String, Vec<(Millis, String)>)>,
+}
 
 /// A commit this long after an agent's last call is still its own (hooks
 /// and tests run between the call that asked for it and the commit).
@@ -631,33 +693,65 @@ const BEFORE_MS: Millis = 5 * 60_000;
 /// Or this long before its next call (the one that reads the result).
 const AFTER_MS: Millis = 2 * 60_000;
 
+/// The call in `v` (sorted by time) nearest to `at` within the window.
+fn nearest(v: &[(Millis, String)], at: Millis) -> Option<(Millis, &str)> {
+    let i = v.partition_point(|(t, _)| *t < at - BEFORE_MS);
+    v[i..]
+        .iter()
+        .take_while(|(t, _)| *t <= at + AFTER_MS)
+        .min_by_key(|(t, _)| (t - at).abs())
+        .map(|(t, m)| ((t - at).abs(), m.as_str()))
+}
+
 impl Activity {
     pub fn build(calls: &[Call], places: &Places) -> Self {
         let mut names: HashMap<&Cwd, Option<String>> = HashMap::new();
-        let mut by: HashMap<String, Vec<(Millis, String)>> = HashMap::new();
+        let mut by_repo: HashMap<String, Vec<(Millis, String)>> = HashMap::new();
+        let mut by_dir: HashMap<String, Vec<(Millis, String)>> = HashMap::new();
+        let home = encode(&places.home);
         for c in calls {
-            let Some(name) = names.entry(&c.cwd).or_insert_with(|| places.name(&c.cwd)) else {
-                continue;
+            let dir = match &c.cwd {
+                Cwd::Path(p) => Some(encode(p)),
+                Cwd::Encoded(e) => Some(e.clone()),
+                Cwd::Unknown => None,
             };
-            by.entry(name.clone())
-                .or_default()
-                .push((c.at, c.model.clone()));
+            // Home is where everything is under: no evidence for any one
+            // repository.
+            if let Some(d) = dir.filter(|d| *d != home) {
+                by_dir.entry(d).or_default().push((c.at, c.model.clone()));
+            }
+            if let Some(name) = names.entry(&c.cwd).or_insert_with(|| places.name(&c.cwd)) {
+                by_repo
+                    .entry(name.clone())
+                    .or_default()
+                    .push((c.at, c.model.clone()));
+            }
         }
-        for v in by.values_mut() {
+        for v in by_repo.values_mut().chain(by_dir.values_mut()) {
             v.sort_unstable();
         }
-        Self(by)
+        Self {
+            by_repo,
+            by_dir: by_dir.into_iter().collect(),
+        }
     }
 
-    /// The model working in `repo` around `at`, the nearest call first.
-    pub fn agent_at(&self, repo: &str, at: Millis) -> Option<&str> {
-        let v = self.0.get(repo)?;
-        let i = v.partition_point(|(t, _)| *t < at - BEFORE_MS);
-        v[i..]
+    /// The model working in `repo` around `at` (or in a folder holding the
+    /// clone at `path`), the nearest call first.
+    pub fn agent_at(&self, repo: &str, path: Option<&Path>, at: Millis) -> Option<&str> {
+        if let Some((_, m)) = self.by_repo.get(repo).and_then(|v| nearest(v, at)) {
+            return Some(m);
+        }
+        let enc = encode(&path?.display().to_string());
+        self.by_dir
             .iter()
-            .take_while(|(t, _)| *t <= at + AFTER_MS)
-            .min_by_key(|(t, _)| (t - at).abs())
-            .map(|(_, m)| m.as_str())
+            .filter(|(d, _)| {
+                enc.strip_prefix(d.as_str())
+                    .is_some_and(|r| r.starts_with('-'))
+            })
+            .filter_map(|(_, v)| nearest(v, at))
+            .min_by_key(|(d, _)| *d)
+            .map(|(_, m)| m)
     }
 }
 
@@ -741,9 +835,39 @@ mod tests {
         assert_eq!(ev[0].id, again[0].id, "ids are stable");
 
         let a = Activity::build(&calls, &p);
-        assert_eq!(a.agent_at("time", h + 60_000), Some("m"));
-        assert_eq!(a.agent_at("time", h + 30 * 60_000), None);
-        assert_eq!(a.agent_at("other", h), None);
+        assert_eq!(a.agent_at("time", None, h + 60_000), Some("m"));
+        assert_eq!(a.agent_at("time", None, h + 30 * 60_000), None);
+        assert_eq!(a.agent_at("other", None, h), None);
+        // An agent in a folder above the clone.
+        let up = vec![call(h + 1_000, "m2", "/home/e/projects/work", 1)];
+        let b = Activity::build(&up, &p);
+        assert_eq!(
+            b.agent_at(
+                "naiaclaw",
+                Some(Path::new("/home/e/projects/work/naiaclaw")),
+                h
+            ),
+            Some("m2")
+        );
+        assert_eq!(
+            b.agent_at("naiaclaw", Some(Path::new("/home/e/projects/workshop")), h),
+            None
+        );
+    }
+
+    #[test]
+    fn cache_rows_decode_without_a_json_tree() {
+        let f: CacheFile = serde_json::from_str(
+            r#"{"p":"claude","r":[[1792000000000.5,1,0,2,11506,8484,548,0,"msg:req",null,1,null],[1,0]],"t":[[5,0,0,1,1,1,1,0,null,0.25,0,2,"turn"]]}"#,
+        )
+        .unwrap();
+        let r = &f.r[0];
+        assert!(r.valid);
+        assert_eq!((r.model, r.session, r.speed), (Some(1), Some(0), 1));
+        assert_eq!(r.n, [2.0, 11506.0, 8484.0, 548.0, 0.0]);
+        assert_eq!(r.dedupe.as_deref(), Some("msg:req"));
+        assert!(!f.r[1].valid, "short rows are skipped");
+        assert_eq!((f.t[0].reported, f.t[0].rate_model), (Some(0.25), Some(2)));
     }
 
     #[test]
