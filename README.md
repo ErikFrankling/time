@@ -152,6 +152,19 @@ minutes:
   confidence, reason}`. Stored in `sleep`; on the clock and rings as the
   Sleep track, on Day, Week and Month, at `/api/sleep`, and in
   `time_summary`.
+- **Browser tabs.** In a browser Erik is nearly always working or studying, so
+  "browsing" is only for what nothing says anything about. The rules know his
+  projects and sites (Naia Works, Neptune, NaiaClaw, Teams, Outlook and Azure
+  are work; KTH, Canvas, TimeEdit, course codes and arXiv are study; the
+  homelab, Time, T3 Code, x-graph and the dotfiles are work tagged with the
+  project). A tab no rule settles is caught by an `ask_model = true` rule
+  and put to the decision model (`tabs.rs`), 40 tabs at a time, once per
+  distinct title, with the `[profile]` and the `[[project]]` descriptions in
+  `rules.toml` as its knowledge. Verdicts are in `tab_verdict`, appear as
+  rule `model.tab`, and relabel history when they arrive; questions are at
+  `/api/decisions?kind=tabs`. To teach it something, edit `[profile]` or a
+  project's `about` in `rules.toml` (or add rules and projects in the data
+  directory's `rules.local.toml`); a tab it got wrong is fixed with a rule.
 - **Not Erik.** An idle timer reset with no key or pointer counted (agents on
   the AGENT-1 seat, the 06:00 update waking a screen) is not presence any
   more; a phone counts only unlocked with the screen on.

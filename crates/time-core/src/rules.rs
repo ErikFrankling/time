@@ -22,6 +22,8 @@
 //! paths = ["/home/erikf/projects/husk/"] # working directories (T3, terminals)
 //! ```
 
+use std::collections::HashMap;
+
 use regex::Regex;
 use serde::Deserialize;
 
@@ -52,6 +54,22 @@ struct RawRules {
     rules: Vec<RawRule>,
     #[serde(default, rename = "project")]
     projects: Vec<RawProject>,
+    #[serde(default)]
+    profile: Option<Profile>,
+}
+
+/// Who Erik is and how he works, for the decision model that labels the
+/// browser tabs the rules cannot (`crate::tabs` in the server). Kept with
+/// the rules so extending it is a config edit.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Profile {
+    /// A few sentences about Erik and his week.
+    #[serde(default)]
+    pub about: String,
+    /// How he behaves in a browser, in the model's terms.
+    #[serde(default)]
+    pub habits: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -71,6 +89,10 @@ struct RawRule {
     host: Vec<String>,
     #[serde(default)]
     package: Vec<String>,
+    /// A last resort the decision model may overrule for a tab it has
+    /// looked at (see [`TabVerdict`]).
+    #[serde(default)]
+    ask_model: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -81,6 +103,13 @@ struct RawProject {
     title: Option<String>,
     #[serde(default)]
     paths: Vec<String>,
+    /// `work`, `study` or `own`: what time on it counts as.
+    #[serde(default)]
+    kind: Option<String>,
+    /// What it is and where it lives (sites, repos, tab titles), in a
+    /// sentence or two, for the decision model.
+    #[serde(default)]
+    about: Option<String>,
 }
 
 #[derive(Debug)]
@@ -93,6 +122,7 @@ pub struct Rule {
     title: Option<Regex>,
     host: Vec<String>,
     package: Vec<Glob>,
+    ask_model: bool,
 }
 
 #[derive(Debug)]
@@ -100,15 +130,68 @@ pub struct Project {
     pub name: String,
     title: Option<Regex>,
     paths: Vec<String>,
+    pub kind: Option<String>,
+    pub about: Option<String>,
 }
 
 #[derive(Debug)]
 pub struct RuleSet {
     pub rules: Vec<Rule>,
     pub projects: Vec<Project>,
+    pub profile: Profile,
+    /// What the decision model said about tabs the rules left to it, by
+    /// [`tab_key`]. Empty until the server loads them.
+    pub tab_verdicts: HashMap<String, TabVerdict>,
     /// Changes whenever the file's content does, so stored labels can be
     /// recomputed when the rules they came from are edited.
     pub version: String,
+}
+
+/// What the decision model decided a tab is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TabVerdict {
+    pub activity: Activity,
+    pub project: Option<String>,
+}
+
+/// A browser tab by its title without the browser's own name or an unread
+/// count, lower case: "(2) Chat | Kaan Koska | Microsoft Teams - Helium"
+/// and the same chat later in the day are one tab.
+pub fn tab_key(title: &str) -> String {
+    tab_core(title).to_lowercase()
+}
+
+/// A tab title without the browser's name and profile ("Article — Original
+/// profile — Mozilla Firefox" is "Article") and without a leading "(2) ".
+pub fn tab_core(title: &str) -> &str {
+    let mut t = title.trim();
+    if let Some((n, rest)) = t.strip_prefix('(').and_then(|r| r.split_once(") ")) {
+        if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) {
+            t = rest.trim();
+        }
+    }
+    let mut again = true;
+    while again {
+        again = false;
+        for sep in [" — ", " - "] {
+            if let Some((head, tail)) = t.rsplit_once(sep) {
+                let tail = tail.to_ascii_lowercase();
+                // Only a bare browser or profile name is the browser's: a tail with
+                // the other separator in it is part of the page's title.
+                if !tail.contains(" — ")
+                    && !tail.contains(" - ")
+                    && ["firefox", "zen", "chrom", "brave", "helium", "profile"]
+                        .iter()
+                        .any(|b| tail.contains(b))
+                {
+                    t = head.trim();
+                    again = true;
+                    break;
+                }
+            }
+        }
+    }
+    t
 }
 
 /// The decision a rule made.
@@ -154,6 +237,7 @@ impl RuleSet {
                 title,
                 host: r.host.iter().map(|h| h.to_ascii_lowercase()).collect(),
                 package: r.package.iter().map(|p| Glob::new(p)).collect(),
+                ask_model: r.ask_model,
             });
         }
         let mut projects = Vec::new();
@@ -168,22 +252,90 @@ impl RuleSet {
                 name: p.name,
                 title,
                 paths: p.paths,
+                kind: p.kind,
+                about: p.about,
             });
         }
         Ok(Self {
             rules,
             projects,
+            profile: raw.profile.unwrap_or_default(),
+            tab_verdicts: HashMap::new(),
             version: format!("{:016x}", fnv1a(text.as_bytes())),
         })
     }
 
     /// The first rule that matches, if any.
     pub fn classify(&self, f: &Facts) -> Option<Match<'_>> {
-        self.rules.iter().find(|r| r.matches(f)).map(|r| Match {
+        let r = self.rules.iter().find(|r| r.matches(f))?;
+        if r.ask_model {
+            if let Some(v) = self.tab_verdicts.get(&tab_key(f.title)) {
+                return Some(Match {
+                    rule: "model.tab",
+                    activity: v.activity,
+                    project: v.project.as_deref(),
+                });
+            }
+        }
+        Some(Match {
             rule: &r.id,
             activity: r.activity,
             project: r.project.as_deref(),
         })
+    }
+
+    /// The key to ask the decision model about this tab under, when the
+    /// rule that catches it leaves it to the model.
+    pub fn asks_model(&self, f: &Facts) -> Option<String> {
+        let r = self.rules.iter().find(|r| r.matches(f))?;
+        r.ask_model.then(|| tab_key(f.title))
+    }
+
+    /// The same rules, with the model's verdicts on tabs. The version
+    /// changes with them, so labels are recomputed when they do.
+    pub fn with_tab_verdicts(mut self, verdicts: HashMap<String, TabVerdict>) -> Self {
+        let mut sorted: Vec<_> = verdicts.iter().collect();
+        sorted.sort_by(|a, b| a.0.cmp(b.0));
+        let mut text = self.version.clone();
+        for (k, v) in sorted {
+            text.push_str(&format!(
+                "\n{k}\t{}\t{}",
+                v.activity,
+                v.project.as_deref().unwrap_or("")
+            ));
+        }
+        self.version = format!("{:016x}", fnv1a(text.as_bytes()));
+        self.tab_verdicts = verdicts;
+        self
+    }
+
+    /// What the decision model is told about Erik and his projects.
+    pub fn profile_prompt(&self) -> String {
+        let mut out = String::new();
+        if !self.profile.about.trim().is_empty() {
+            out.push_str(self.profile.about.trim());
+            out.push_str("\n\n");
+        }
+        out.push_str("His projects, and what time on each counts as:\n");
+        for p in self.projects.iter().filter(|p| p.about.is_some()) {
+            out.push_str(&format!(
+                "- {} ({}): {}\n",
+                p.name,
+                p.kind.as_deref().unwrap_or("work"),
+                p.about.as_deref().unwrap_or("").trim()
+            ));
+        }
+        if !self.profile.habits.trim().is_empty() {
+            out.push('\n');
+            out.push_str(self.profile.habits.trim());
+            out.push('\n');
+        }
+        out
+    }
+
+    /// The project names, for the model's answer.
+    pub fn project_names(&self) -> Vec<&str> {
+        self.projects.iter().map(|p| p.name.as_str()).collect()
     }
 
     /// A project named by the window title.

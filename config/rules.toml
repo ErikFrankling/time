@@ -7,7 +7,15 @@
 #
 # Conditions in one rule must all hold; the patterns in one list are
 # alternatives. `class` and `package` take `*` wildcards; `host` also matches
-# subdomains; `title` is a regex.
+# subdomains; `title` is a regex. In a browser the rules mostly see the tab
+# title: the extension reports the host on some browsers only.
+#
+# `ask_model = true` marks a last resort the decision model may overrule. It
+# is asked about the tabs those rules caught, with the [profile] and the
+# [[project]] descriptions at the end of this file, and its verdict
+# (`model.tab`) wins over such a rule. Every other rule is final. In a browser
+# Erik is almost always working or studying, so "browsing" is only for what
+# nothing says anything about.
 
 # ---------------------------------------------------------------- study
 # Course codes and course tools come first, so a Claude chat or a Google Doc
@@ -17,19 +25,146 @@
 id = "study.course-title"
 activity = "study"
 project = "kth"
-title = "(?i)\\b(IK2218|EP2120|SF1688|DD2440|DA2210|homework|hw ?\\d|ladok|canvas|exam|quiz|seminari|lab ?\\d|kth\\b|tentamen|grafteori|overleaf)"
+title = "(?i)\\b(IK2218|EP2120|SF1688|DD2440|DA2210|DD2395|DD2300|homework|hw[ _]?\\d|ladok|canvas|timeedit|exam|quiz|seminari|lab ?\\d|kth\\b|tentamen|grafteori|overleaf)"
 
 [[rule]]
 id = "study.course-sites"
 activity = "study"
 project = "kth"
-host = ["kth.se", "canvas.kth.se", "ladok.se", "overleaf.com"]
+host = ["kth.se", "canvas.kth.se", "ladok.se", "overleaf.com", "timeedit.net"]
+
+# The school calendar site's tab is called "School".
+[[rule]]
+id = "study.school-tab"
+activity = "study"
+project = "kth"
+class = ["firefox", "zen*", "helium", "google-chrome", "chromium*", "brave-browser"]
+title = "(?i)^school( —|$)"
+
+[[rule]]
+id = "study.papers"
+activity = "study"
+project = "kth"
+host = [
+  "arxiv.org", "openreview.net", "semanticscholar.org", "scholar.google.com", "aclanthology.org",
+  "paperswithcode.com", "ieeexplore.ieee.org", "dl.acm.org", "biorxiv.org", "researchgate.net",
+  "jstor.org", "link.springer.com", "sciencedirect.com",
+]
+
+[[rule]]
+id = "study.papers-title"
+activity = "study"
+project = "kth"
+class = ["firefox", "zen*", "helium", "google-chrome", "chromium*", "brave-browser"]
+title = "(?i)(\\barxiv\\b|\\[\\d{4}\\.\\d{4,5}(v\\d+)?\\]|openreview)"
 
 [[rule]]
 id = "study.phone-canvas"
 activity = "study"
 project = "kth"
 package = ["com.instructure.candroid"]
+
+# ---------------------------------------------------------------- work, first
+# What Erik does for his job is work wherever it shows up, so these come
+# before the video, feeds and messaging rules that would otherwise catch it.
+# Teams is work (Erik, 2026-10-26: "Teams is not a channel I would use for
+# personal messaging; that's Discord"), in a browser tab, the PWA, the
+# desktop app and on the phone. So is the Neptune mail (Outlook), Azure and
+# Naia Works. Discord, Messenger, Signal and WhatsApp stay messaging.
+
+[[rule]]
+id = "work.teams-class"
+activity = "work"
+project = "neptune"
+class = [
+  "teams*", "*teams-for-linux*", "msteams*", "microsoft-teams*", "microsoft teams*",
+  "chrome-teams.*", "chromium-teams.*", "brave-teams.*", "chrome-*teams.microsoft.com*",
+  "chrome-*teams.cloud.microsoft*",
+]
+
+[[rule]]
+id = "work.teams-title"
+activity = "work"
+project = "neptune"
+title = "(?i)microsoft teams"
+
+[[rule]]
+id = "work.teams-site"
+activity = "work"
+project = "neptune"
+host = ["teams.microsoft.com", "teams.cloud.microsoft", "teams.office.com", "teams.live.com"]
+
+[[rule]]
+id = "work.teams-phone"
+activity = "work"
+project = "neptune"
+package = ["com.microsoft.teams"]
+
+# Outlook is the Neptune work mail; his own mail is Gmail.
+[[rule]]
+id = "work.outlook-site"
+activity = "work"
+project = "neptune"
+host = ["outlook.office.com", "outlook.office365.com", "outlook.cloud.microsoft"]
+
+[[rule]]
+id = "work.outlook-title"
+activity = "work"
+project = "neptune"
+class = ["firefox", "zen*", "helium", "google-chrome", "chromium*", "brave-browser", "chrome-outlook*"]
+title = "(?i)\\boutlook\\b"
+
+[[rule]]
+id = "work.outlook-phone"
+activity = "work"
+project = "neptune"
+package = ["com.microsoft.office.outlook"]
+
+# Mail and chat apps stay messaging, unless the window is about Neptune.
+[[rule]]
+id = "work.neptune-apps"
+activity = "work"
+project = "neptune"
+class = ["thunderbird", "Slack", "slack", "webcord", "discord", "vesktop"]
+title = "(?i)(naia ?works|naia ?claw|naia bot|neptune)"
+
+# Azure and Microsoft 365: DevOps, the portal, Entra, the agents playground.
+[[rule]]
+id = "work.azure-sites"
+activity = "work"
+project = "neptune"
+host = [
+  "portal.azure.com", "dev.azure.com", "azure.com", "visualstudio.com", "entra.microsoft.com",
+  "admin.microsoft.com", "portal.office.com", "m365.cloud.microsoft", "copilotstudio.microsoft.com",
+  "make.powerapps.com", "sharepoint.com",
+]
+
+[[rule]]
+id = "work.azure-titles"
+activity = "work"
+project = "neptune"
+class = ["firefox", "zen*", "helium", "google-chrome", "chromium*", "brave-browser"]
+title = "(?i)(\\bazure\\b|microsoft 365|\\bm365\\b|agents playground|microsoft entra|copilot studio|sharepoint)"
+
+# Naia Works (the Neptune product, *.naiaworks.neptune-software.com) and
+# NaiaClaw (the agent, its repo, its Grafana).
+[[rule]]
+id = "work.naia-sites"
+activity = "work"
+project = "neptune"
+host = ["naiaworks.neptune-software.com", "neptune-software.com", "naiaworks.com"]
+
+[[rule]]
+id = "work.neptune-titles"
+activity = "work"
+project = "neptune"
+title = "(?i)(naia ?works|naia ?claw|naia bot|naia agent|neptune)"
+
+[[rule]]
+id = "work.husk-sites"
+activity = "work"
+project = "husk"
+host = ["husksecurity.dev"]
 
 # ---------------------------------------------------------------- video
 
@@ -65,6 +200,16 @@ package = [
 
 # ---------------------------------------------------------------- feeds
 # Content made for scrolling: consumption, not conversation.
+
+# A post he opened shows what it is about in its title, which the model can
+# judge (AI and developer news he follows for the job is research); the
+# home feed and the phone apps are scrolling and stay feeds.
+[[rule]]
+id = "feeds.x-posts"
+activity = "feeds"
+ask_model = true
+class = ["firefox", "zen*", "helium", "google-chrome", "chromium*", "brave-browser"]
+title = "(?i) on x: "
 
 [[rule]]
 id = "feeds.sites"
@@ -103,14 +248,14 @@ class = ["webcord", "discord", "vesktop", "thunderbird", "Slack", "signal", "org
 id = "messaging.titles"
 activity = "messaging"
 class = ["firefox", "zen*", "helium", "google-chrome", "chromium*", "brave-browser"]
-title = "(?i)(microsoft teams|\\bmail -|outlook|gmail|whatsapp|messenger|meet –|google meet|discord)"
+title = "(?i)(\\bmail -|gmail|whatsapp|messenger|meet –|google meet|discord)"
 
 [[rule]]
 id = "messaging.phone"
 activity = "messaging"
 package = [
   "com.snapchat.android", "com.discord", "com.whatsapp", "com.google.android.apps.messaging",
-  "com.google.android.dialer", "com.microsoft.teams", "com.microsoft.office.outlook", "com.Slack", "com.facebook.orca",
+  "com.google.android.dialer", "com.Slack", "com.facebook.orca",
   "com.google.android.gm", "org.thoughtcrime.securesms", "org.telegram.messenger",
 ]
 
@@ -149,12 +294,6 @@ package = ["com.fingersoft.hcr2", "br.com.tapps.cowevolution", "com.halfbrick.je
 # belongs to comes from the focused thread (t3.focus.span), not from here.
 
 [[rule]]
-id = "work.neptune-titles"
-activity = "work"
-project = "neptune"
-title = "(?i)(naiaclaw|naia bot|naia agent|neptune)"
-
-[[rule]]
 id = "work.husk-titles"
 activity = "work"
 project = "husk"
@@ -170,6 +309,57 @@ class = [
   "Vncviewer", "org.remmina.Remmina", "com.obsproject.Studio",
 ]
 
+# Erik's own projects: productive time, tagged with the project. The homelab
+# is everything under erikfrankling.duckdns.org, so the named services come
+# first. GitHub, localhost and the AI tools below are work with no project.
+[[rule]]
+id = "work.time-app"
+activity = "work"
+project = "time"
+host = ["time.erikfrankling.duckdns.org"]
+
+[[rule]]
+id = "work.time-title"
+activity = "work"
+project = "time"
+title = "(?i)(^time [·—] |time — today|\\btime-server\\b|erikfrankling/time\\b)"
+
+[[rule]]
+id = "work.x-graph-app"
+activity = "work"
+project = "x-graph"
+host = ["x.erikfrankling.duckdns.org"]
+
+[[rule]]
+id = "work.x-graph-title"
+activity = "work"
+project = "x-graph"
+title = "(?i)\\bx-graph\\b"
+
+[[rule]]
+id = "work.t3code-title"
+activity = "work"
+project = "t3code"
+title = "(?i)\\bt3 code\\b"
+
+[[rule]]
+id = "work.dotfiles-title"
+activity = "work"
+project = "dotfiles"
+title = "(?i)(dotfiles|nixos|home-manager|nix flake|nixpkgs)"
+
+[[rule]]
+id = "work.homelab-sites"
+activity = "work"
+project = "homelab"
+host = ["erikfrankling.duckdns.org", "duckdns.org"]
+
+[[rule]]
+id = "work.homelab-title"
+activity = "work"
+project = "homelab"
+title = "(?i)(homelab|\\bk3s\\b|\\bflux\\b|traefik|grafana|\\bexecutor\\b|erikfrankling\\.duckdns)"
+
 [[rule]]
 id = "work.browser-tools"
 activity = "work"
@@ -179,7 +369,7 @@ title = "(?i)(t3 code|github|pull requests?|issues? ·|new issue|grafana|claude|
 [[rule]]
 id = "work.sites"
 activity = "work"
-host = ["github.com", "gitlab.com", "claude.ai", "chatgpt.com", "openrouter.ai", "docs.google.com", "localhost", "duckdns.org"]
+host = ["github.com", "gitlab.com", "claude.ai", "chatgpt.com", "openrouter.ai", "docs.google.com", "localhost"]
 
 [[rule]]
 id = "work.phone"
@@ -205,12 +395,14 @@ package = ["md.obsidian"]
 [[rule]]
 id = "browsing.news-titles"
 activity = "browsing"
+ask_model = true
 class = ["firefox", "zen*", "helium", "google-chrome", "chromium*", "brave-browser"]
 title = "(?i)(dagens nyheter|svenska dagbladet|\\bdn\\b|the economist|aftonbladet|expressen|wikipedia|google maps|hemnet|booli)"
 
 [[rule]]
 id = "browsing.sites"
 activity = "browsing"
+ask_model = true
 host = ["dn.se", "svd.se", "economist.com", "aftonbladet.se", "expressen.se", "wikipedia.org", "nytimes.com", "hemnet.se", "booli.se"]
 
 [[rule]]
@@ -270,6 +462,7 @@ class = [
 [[rule]]
 id = "fallback.browser-tab"
 activity = "browsing"
+ask_model = true
 class = ["firefox", "zen*", "helium", "google-chrome", "chromium*", "brave-browser"]
 
 [[rule]]
@@ -278,31 +471,66 @@ activity = "other"
 package = ["com.google.android.*"]
 
 # ---------------------------------------------------------------- projects
-# Named by title or by working directory (T3 threads, terminals).
+# Named by title or by working directory (T3 threads, terminals). `kind` is
+# what time on it counts as (work, study, or own: his own projects, which are
+# productive too) and `about` is what the decision model is told about it
+# when it labels a browser tab the rules cannot. Extend both freely; local
+# additions go in rules.local.toml in the data directory.
 
 [[project]]
 name = "neptune"
-title = "(?i)(naiaclaw|naia bot|naia agent|neptune)"
+kind = "work"
+about = """Erik's job. Neptune Software's Naia Works (tab title "Naia Works", "Naia Works Admin", sites under *.naiaworks.neptune-software.com) and NaiaClaw, the personal-agent product (repo neptune-software/naiaclaw on GitHub, Grafana dashboards, Teams chats such as "NaiaClaw Infrastructure"). Everything in Microsoft Teams, Outlook (his work mail), Azure, Azure DevOps, Microsoft 365 and the agents playground is this job. So are MCP, agent-gateway, authorization and agent-platform docs, Entra and OAuth pages he reads to build it."""
+title = "(?i)(naia ?works|naia ?claw|naia bot|naia agent|neptune)"
 paths = ["/home/erikf/projects/neptune/", "/home/erikf/projects/work/neptune/"]
 
 [[project]]
 name = "husk"
+kind = "work"
+about = """Husk Security, his company: the product, brand hub, Cloudflare, connect.husksecurity.dev, company brain, pitch and investor material, startup-community and VC sites he reads for it."""
 title = "(?i)\\bhusk\\b"
 paths = ["/home/erikf/projects/husk/"]
 
 [[project]]
 name = "kth"
-title = "(?i)\\b(IK2218|EP2120|SF1688|DD2440|DA2210|kth)\\b"
+kind = "study"
+about = """His degree at KTH. Courses DD2395, IK2218, DA2210, DD2440, DD2300 and SF1688 (and EP2120): lecture notes, homework PDFs (hw_1, hw_2 ...), Canvas, Ladok, TimeEdit, Overleaf, the school calendar (a tab called "School"), study visits and programme pages (e.g. "Study visit ... DD2300"), and research papers and arXiv for course reading."""
+title = "(?i)\\b(IK2218|EP2120|SF1688|DD2440|DA2210|DD2395|DD2300|kth)\\b"
 paths = ["/home/erikf/projects/kth/", "/home/erikf/kth/"]
 
 [[project]]
 name = "dotfiles"
+kind = "own"
+about = """His NixOS and Home Manager configuration (~/.dotfiles): NixOS options and package search, nixpkgs, home-manager docs, Hyprland, anything about how his machines are set up."""
 paths = ["/home/erikf/.dotfiles"]
 
 [[project]]
+name = "homelab"
+kind = "own"
+about = """His home lab: a k3s cluster with Flux and Traefik, services under erikfrankling.duckdns.org (brain, executor, time, x-graph, Grafana, Syncthing ...), Tailscale, backups, Cloudflare and DNS."""
+title = "(?i)(homelab|\\bk3s\\b|traefik)"
+
+[[project]]
 name = "time"
+kind = "own"
+about = """This app: Time, which measures what he does (time.erikfrankling.duckdns.org, tabs titled "Time · ..." such as "Time · Week 43", "Time · October 2026", its GitHub repo ErikFrankling/time)."""
 paths = ["/home/erikf/projects/personal/time"]
 
 [[project]]
 name = "t3code"
+kind = "own"
+about = """T3 Code, the coding-agent app he works in all day and develops (tab title "T3 Code", its repo and pull requests)."""
 paths = ["/home/erikf/projects/personal/t3code"]
+
+[[project]]
+name = "x-graph"
+kind = "own"
+about = """x-graph: his phone-first archive and graph of X (Twitter) posts (x.erikfrankling.duckdns.org, tab title "x-graph"). Using the x-graph app itself is work; reading the X feed is not."""
+
+# ---------------------------------------------------------------- profile
+# For the decision model that labels browser tabs no rule settles
+# (`crate::tabs` in the server). Plain sentences; keep them true.
+
+[profile]
+about = """Erik Frankling is a student at KTH in Stockholm who also works for Neptune Software on Naia Works and NaiaClaw, and runs his own company, Husk Security. Besides that he builds his own tools (a home lab, Time, T3 Code, x-graph, his NixOS dotfiles). He spends most of his waking day at the computer."""
+habits = """How he uses a browser: almost everything he does in it is work or study. He researches for his job and his company (agent platforms, MCP, AI tooling and infrastructure, startups, VC and founder communities, product and docs sites, competitors, tools he might use), reads documentation, papers and homework PDFs, and uses cloud consoles. Random browsing is rare: Swedish news (DN, SvD, Aftonbladet), Wikipedia, maps, shopping, and scrolling the X home feed are the usual non-work tabs. An X post he opened is work when it is about AI, agents, developer tooling or infrastructure, startups, security, or one of his projects, because he follows that field for his job; politics, entertainment and personal posts are feeds. So when a tab could plausibly serve his job, his company, his courses or his own projects, call it work (or study for course material) with the project that fits; use browsing only for news, shopping, entertainment and pages that clearly have nothing to do with any project; use video for watching, feeds for social feeds."""

@@ -20,6 +20,7 @@ pub mod mcp;
 pub mod nudge;
 pub mod status;
 pub mod store;
+pub mod tabs;
 pub mod tracks;
 pub mod views;
 pub mod web;
@@ -70,6 +71,7 @@ impl AppState {
     pub fn new(config: Config, store: Store, clock: Arc<dyn Clock>) -> anyhow::Result<Arc<Self>> {
         let classifier = Classifier::from_config(&config)?;
         let decider = decide::Decider::new(config.decide.clone());
+        classifier.set_tab_verdicts(tabs::load(&store)?);
         if let Some(n) = classifier.requeue_if_rules_changed(&store)? {
             eprintln!(
                 "classifier: rules are new ({}), {n} minute(s) queued",

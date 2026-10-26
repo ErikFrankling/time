@@ -387,26 +387,7 @@ fn site_of_title(t: &str) -> Option<&'static str> {
 
 /// A tab title without the browser's own name, kept short.
 fn tab_title(title: &str) -> String {
-    let mut t = title.trim();
-    // "Article — Original profile — Mozilla Firefox": the browser, then
-    // its profile.
-    let mut again = true;
-    while again {
-        again = false;
-        for sep in [" — ", " - "] {
-            if let Some((head, tail)) = t.rsplit_once(sep) {
-                let tail = tail.to_ascii_lowercase();
-                if ["firefox", "zen", "chrom", "brave", "helium", "profile"]
-                    .iter()
-                    .any(|b| tail.contains(b))
-                {
-                    t = head.trim();
-                    again = true;
-                    break;
-                }
-            }
-        }
-    }
+    let t = crate::rules::tab_core(title);
     if let Some(site) = site_of_title(t) {
         return site.to_owned();
     }

@@ -6,14 +6,14 @@
 //! seconds on the CPU and there is no switch to turn it off: v1's switch
 //! was how classification stopped for two months without anyone noticing.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex, RwLock};
 
 use anyhow::Result;
 use time_core::clock::{Millis, MINUTE_MS};
-use time_core::rules::{RuleSet, Source};
+use time_core::rules::{RuleSet, Source, TabVerdict};
 use time_core::timeline::{label_minutes, DeviceSpec, LOGIC_VERSION};
 
 use crate::config::{Config, DeviceKind};
@@ -47,6 +47,8 @@ pub struct Classifier {
     loaded: RwLock<Arc<Loaded>>,
     places: Vec<time_core::places::PlaceSpec>,
     base_rules: String,
+    /// What the decision model made of the tabs the rules leave to it.
+    tab_verdicts: RwLock<HashMap<String, TabVerdict>>,
     local_path: PathBuf,
     pub devices: Vec<DeviceSpec>,
     pub every_ms: Millis,
@@ -75,11 +77,12 @@ impl Classifier {
                 },
             })
             .collect();
-        let loaded = Self::load(&base_rules, &local_path)?;
+        let loaded = Self::load(&base_rules, &local_path, &HashMap::new())?;
         Ok(Self {
             loaded: RwLock::new(Arc::new(loaded)),
             places: config.places.clone(),
             base_rules,
+            tab_verdicts: RwLock::new(HashMap::new()),
             local_path,
             devices,
             every_ms: (config.classify_every_secs.max(1) * 1000) as Millis,
@@ -90,13 +93,17 @@ impl Classifier {
         })
     }
 
-    fn load(base: &str, local_path: &std::path::Path) -> Result<Loaded> {
+    fn load(
+        base: &str,
+        local_path: &std::path::Path,
+        verdicts: &HashMap<String, TabVerdict>,
+    ) -> Result<Loaded> {
         let local = match std::fs::read_to_string(local_path) {
             Ok(t) => t,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(e) => anyhow::bail!("reading {}: {e}", local_path.display()),
         };
-        Self::load_text(base, &local)
+        Self::load_text(base, &local, verdicts)
     }
 
     /// The rules in force now.
@@ -111,12 +118,40 @@ impl Classifier {
         self.current().version.clone()
     }
 
+    /// Switch to the decision model's verdicts on tabs. Returns whether
+    /// they differ from the ones in force; the caller requeues history with
+    /// [`Self::requeue_if_rules_changed`].
+    pub fn set_tab_verdicts(&self, verdicts: HashMap<String, TabVerdict>) -> bool {
+        {
+            let mut cur = self.tab_verdicts.write().unwrap_or_else(|e| e.into_inner());
+            if *cur == verdicts {
+                return false;
+            }
+            *cur = verdicts.clone();
+        }
+        match Self::load(&self.base_rules, &self.local_path, &verdicts) {
+            Ok(loaded) => {
+                *self.loaded.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(loaded);
+                true
+            }
+            Err(e) => {
+                eprintln!("classifier: tab verdicts not applied: {e:#}");
+                false
+            }
+        }
+    }
+
     /// Add one rule to the local file, prove the result parses, and switch
     /// to it. History is relabelled by [`Self::requeue_if_rules_changed`].
     pub fn add_local_rule(&self, rule_toml: &str) -> Result<()> {
         let mut local = std::fs::read_to_string(&self.local_path).unwrap_or_default();
         local.push_str(rule_toml);
-        let candidate = Self::load_text(&self.base_rules, &local)?;
+        let verdicts = self
+            .tab_verdicts
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let candidate = Self::load_text(&self.base_rules, &local, &verdicts)?;
         let tmp = self.local_path.with_extension("toml.tmp");
         std::fs::write(&tmp, &local)?;
         std::fs::rename(&tmp, &self.local_path)?;
@@ -124,10 +159,15 @@ impl Classifier {
         Ok(())
     }
 
-    fn load_text(base: &str, local: &str) -> Result<Loaded> {
+    fn load_text(
+        base: &str,
+        local: &str,
+        verdicts: &HashMap<String, TabVerdict>,
+    ) -> Result<Loaded> {
         // TOML arrays of tables concatenate, so local rules simply come first.
         let rules = RuleSet::parse(&format!("{local}\n{base}"))
-            .map_err(|e| anyhow::anyhow!("rules: {e:#}"))?;
+            .map_err(|e| anyhow::anyhow!("rules: {e:#}"))?
+            .with_tab_verdicts(verdicts.clone());
         Ok(Loaded {
             version: format!("{}.{LOGIC_VERSION}", rules.version),
             rules,

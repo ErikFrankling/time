@@ -113,6 +113,19 @@ const MIGRATIONS: &[&str] = &[
     // collector sends them all again. Code and usage are read by name and day.
     "DELETE FROM event WHERE name = 'github.commit';
      CREATE INDEX event_name_start ON event(name, start_ms);",
+    // 8: what the decision model made of the browser tabs the rules leave to
+    // it, by the tab's title (`time_core::rules::tab_key`). The question and
+    // answer are in `decision`; this is the answer, one row per tab.
+    "CREATE TABLE tab_verdict (
+        key         TEXT PRIMARY KEY,
+        title       TEXT NOT NULL,
+        activity    TEXT NOT NULL,
+        project     TEXT,
+        confidence  REAL NOT NULL,
+        reason      TEXT NOT NULL,
+        decision_id INTEGER,
+        computed_ms INTEGER NOT NULL
+     );",
 ];
 
 /// One computer minute of input counts (never which keys).
