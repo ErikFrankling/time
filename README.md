@@ -106,7 +106,7 @@ of a day or per day of a week or month, under a line like "312 commits ·
   before to 2 minutes after it; else it is Erik's own. One commit across
   clones and rebases (identity: repository, author time and e-mail, subject).
   Lines leave out lockfiles, generated, vendored and data files, files over
-  10k lines and commits over 50k lines; renames are not rewrites.
+  3k lines and commits over 30k lines; renames are not rewrites.
 - **Tokens** (`llm.usage.hour`, one per agent session, model and hour):
   input, cache reads and writes, and output, from T3 Code's usage scan of the
   Claude (both accounts), Codex and Grok transcripts and from OpenCode's

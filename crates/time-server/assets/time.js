@@ -603,7 +603,7 @@
     var L = W.lines, neg = function (a) { return a.map(function (v) { return -v; }); };
     click(make('c-lines', {
       animation: false,
-      grid: { left: 4, right: 8, top: 6, bottom: 2, containLabel: true },
+      grid: { left: 4, right: 8, top: 6, bottom: 10, containLabel: true },
       tooltip: Object.assign({ trigger: 'axis', axisPointer: { type: 'shadow' }, formatter: function (ps) {
         var i = ps[0].dataIndex;
         return '<b>' + esc(wl[i]) + (D.kind === 'day' ? ':00' : '') + '</b><br>yours +' + thou(L.erikAdd[i]) + ' −' + thou(L.erikDel[i]) +
@@ -667,7 +667,7 @@
     });
 
     // Where it went: by account and model, by project, by thread.
-    function shareBars(id, title, rows, color) {
+    function shareBars(id, title, rows, color, lw) {
       var r = rows.slice().reverse();
       make(id, r.length ? {
         animation: false,
@@ -679,7 +679,7 @@
         } }, tip),
         xAxis: { type: 'value', show: false },
         yAxis: { type: 'category', axisTick: { show: false }, axisLine: { show: false },
-          axisLabel: Object.assign({}, axisText, { color: fg, fontSize: 11, width: 150, overflow: 'truncate' }), data: r.map(function (x) { return x.name; }) },
+          axisLabel: Object.assign({}, axisText, { color: fg, fontSize: 11, width: lw || 150, overflow: 'truncate' }), data: r.map(function (x) { return x.name; }) },
         series: [{ type: 'bar', barWidth: 10,
           label: { show: true, position: 'right', color: mu, fontSize: 10, fontFamily: font, formatter: function (p) { return usd(r[p.dataIndex].cost); } },
           data: r.map(function (x) { return { value: x.cost, itemStyle: { color: typeof color === 'function' ? color(x) : color, borderRadius: 3 } }; }) }]
@@ -689,7 +689,7 @@
     shareBars('c-ai-by', 'By account', W.accounts.map(function (a) { return Object.assign({}, a, { name: acct[a.name] || a.name, key: a.name }); }),
       function (x) { return PC[(x.key || '').indexOf('claude') === 0 ? 'claude' : x.key] || PC.other; });
     shareBars('c-ai-projects', 'By project', W.projects, '#3987e5');
-    shareBars('c-ai-threads', 'Top T3 threads', W.threads, '#9085e9');
+    shareBars('c-ai-threads', 'Top T3 threads', W.threads, '#9085e9', 380);
   }
 
   draw();

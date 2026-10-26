@@ -87,7 +87,8 @@ fn main() -> anyhow::Result<()> {
     }
     lap("git scanned");
     if cfg.github {
-        match github::fetch(&cfg.device, since, now) {
+        // GitHub answers for a year at most.
+        match github::fetch(&cfg.device, since.max(now - 365 * 86_400_000), now) {
             Ok(mut e) => events.append(&mut e),
             Err(e) => eprintln!("collect: github: {e:#}"),
         }

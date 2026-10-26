@@ -1254,9 +1254,9 @@ pub const STYLE: &str = r#"
 .figs .fk { color:var(--muted); font-size:.75rem; line-height:1.3; }
 .workline { margin-top:-.4rem; }
 .workline .wl { font-size:1rem; font-weight:650; font-variant-numeric:tabular-nums; }
-.seg { display:inline-flex; border:1px solid var(--line); border-radius:.5rem; overflow:hidden; margin:.1rem 0 .3rem; }
-.seg button { background:none; border:0; color:var(--muted); font:inherit; font-size:.8rem; padding:.2rem .7rem; cursor:pointer; }
-.seg button.on { background:var(--line); color:var(--fg); }
+.metric { display:flex; width:max-content; max-width:100%; border:1px solid var(--line); border-radius:.5rem; overflow:hidden; margin:.1rem 0 .3rem; }
+.metric button { flex:none; width:auto; background:none; border:0; color:var(--muted); font:inherit; font-size:.8rem; padding:.2rem .7rem; cursor:pointer; }
+.metric button.on { background:var(--line); color:var(--fg); }
 .chip { display:inline-block; font-size:.7rem; font-weight:700; padding:0 .3rem; border-radius:99px; background:var(--line); color:var(--fg); white-space:nowrap; }
 .chartcard { padding:.8rem .7rem .6rem; }
 .chartcard h2 { margin-left:.3rem; }
@@ -1686,11 +1686,11 @@ fn work_cards(kind: Kind) -> String {
     let mut out = String::new();
     let _ = write!(
         out,
-        r#"<section class="chartcard"><h2>Code</h2><div class="cap">Commits each {per}, by repository; the line is yours, the rest your agents' (a Co-Authored-By trailer, or an agent session working in that repository when it was committed). Under it, lines added and removed: yours solid, agents' light. Lockfiles, generated, vendored and data files are left out. Hover for the breakdown.</div><div class="chart" id="c-commits" style="height:14rem"></div><div class="chart" id="c-lines" style="height:9rem"></div></section>"#
+        r#"<section class="chartcard"><h2>Code</h2><div class="cap">Commits each {per}, by repository; the line is yours, the rest your agents' (a Co-Authored-By trailer, or an agent session working in that repository when it was committed). Under it, lines added and removed: yours solid, agents' light. Lockfiles, generated, vendored and data files are left out. Hover for the breakdown.</div><div class="chart" id="c-commits" style="height:14rem"></div><div class="chart" id="c-lines" style="height:10rem"></div></section>"#
     );
     let _ = write!(
         out,
-        r#"<section class="chartcard"><h2>AI usage</h2><div class="cap">Every agent's tokens each {per} (Claude on both accounts, Codex, Grok, OpenCode), by model, from their own transcripts. Cost is the equivalent at API list prices: most of it is on subscriptions. Hover for input, cache and output.</div><div class="seg" id="c-ai-metric" role="group" aria-label="Metric"><button type="button" data-m="cost" class="on">Cost</button><button type="button" data-m="tokens">Tokens</button></div><div class="chart" id="c-ai" style="height:15rem"></div><div class="two"><div class="chart" id="c-ai-by" style="height:13rem"></div><div class="chart" id="c-ai-projects" style="height:13rem"></div></div><div class="chart" id="c-ai-threads" style="height:13rem"></div></section>"#
+        r#"<section class="chartcard"><h2>AI usage</h2><div class="cap">Every agent's tokens each {per} (Claude on both accounts, Codex, Grok, OpenCode), by model, from their own transcripts. Cost is the equivalent at API list prices: most of it is on subscriptions. Hover for input, cache and output.</div><div class="metric" id="c-ai-metric" role="group" aria-label="Metric"><button type="button" data-m="cost" class="on">Cost</button><button type="button" data-m="tokens">Tokens</button></div><div class="chart" id="c-ai" style="height:15rem"></div><div class="two"><div class="chart" id="c-ai-by" style="height:13rem"></div><div class="chart" id="c-ai-projects" style="height:13rem"></div></div><div class="chart" id="c-ai-threads" style="height:13rem"></div></section>"#
     );
     out
 }

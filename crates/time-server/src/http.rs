@@ -768,7 +768,7 @@ async fn api_work(State(state): State<Arc<AppState>>, q: Q) -> Response {
         v["sources"] = serde_json::json!({
             "commits": "github.commit events: local clones under ~/projects and ~/.dotfiles, and GitHub's commit search for commits no clone has (time-collect)",
             "agent": "a Co-Authored-By trailer naming an agent, or an agent session working in the same repository within 5 minutes before or 2 after the commit",
-            "lines": "git diffs with renames detected; lockfiles, generated, vendored and data files, files over 10k lines and commits over 50k lines left out",
+            "lines": "git diffs with renames detected; lockfiles, generated, vendored and data files, files over 3k lines and commits over 30k lines left out",
             "tokens": "llm.usage.hour events: T3 Code's usage scan of the Claude, Codex and Grok transcripts, and OpenCode's database",
             "cost": "LiteLLM list prices (T3 Code's usage-model-rates.json); OpenCode's own cost where it reports one",
         });

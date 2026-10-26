@@ -12,11 +12,11 @@ use crate::{stable_id, SERVICE};
 
 /// Lines in one file, in one commit, past which it is machine output: a data
 /// dump refresh is a real change and a fake day's work.
-const GENERATED_FILE_LINES: usize = 10_000;
+const GENERATED_FILE_LINES: usize = 3_000;
 
 /// Lines in one commit past which it is an import or a mass move (a vendored
 /// tree, a thousand generated pages): a commit, but no lines of work.
-pub const BULK_COMMIT_LINES: u32 = 50_000;
+pub const BULK_COMMIT_LINES: u32 = 30_000;
 
 /// Folders whose files are someone else's output: dependencies, build output,
 /// generated code. Matched anywhere in the path.

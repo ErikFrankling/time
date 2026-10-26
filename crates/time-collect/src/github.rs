@@ -167,20 +167,35 @@ pub fn commits(
         bail!("no GitHub token (set TIME_GITHUB_TOKEN, or run `gh auth login`)")
     };
     let client = reqwest::blocking::Client::new();
+    // Rate limited (403/429): wait as GitHub asks (at most a few minutes
+    // in all), then try again.
     let get = |url: &str| -> Result<serde_json::Value> {
-        let resp = client
-            .get(url)
-            .bearer_auth(&token)
-            .header("User-Agent", "time-collect")
-            .header("Accept", "application/vnd.github+json")
-            .send()
-            .with_context(|| url.to_owned())?;
-        let status = resp.status();
-        let v: serde_json::Value = resp.json().with_context(|| url.to_owned())?;
-        if !status.is_success() {
+        let mut waits = 0;
+        loop {
+            let resp = client
+                .get(url)
+                .bearer_auth(&token)
+                .header("User-Agent", "time-collect")
+                .header("Accept", "application/vnd.github+json")
+                .send()
+                .with_context(|| url.to_owned())?;
+            let status = resp.status();
+            let retry = resp
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<u64>().ok());
+            let v: serde_json::Value = resp.json().with_context(|| url.to_owned())?;
+            if status.is_success() {
+                return Ok(v);
+            }
+            if (status.as_u16() == 403 || status.as_u16() == 429) && waits < 4 {
+                waits += 1;
+                std::thread::sleep(std::time::Duration::from_secs(retry.unwrap_or(60).min(120)));
+                continue;
+            }
             bail!("github {status}: {url}: {v}");
         }
-        Ok(v)
     };
     let login = get("https://api.github.com/user")?["login"]
         .as_str()
@@ -215,7 +230,14 @@ pub fn commits(
                 day(a),
                 day(b)
             );
-            let v = get(&url)?;
+            let v = match get(&url) {
+                Ok(v) => v,
+                // Keep what was found; the next run looks again.
+                Err(e) => {
+                    eprintln!("collect: github commit search: {e:#}");
+                    break;
+                }
+            };
             let total = v["total_count"].as_u64().unwrap_or(0);
             if total > 1000 && b - a > 86_400_000 {
                 let mid = a + (b - a) / 2;
@@ -265,9 +287,12 @@ pub fn commits(
         if out.len() >= max_detail {
             break;
         }
-        let detail = get(&format!(
+        let Ok(detail) = get(&format!(
             "https://api.github.com/repos/{full}/commits/{sha}"
-        ))?;
+        ))
+        .inspect_err(|e| eprintln!("collect: github commit: {e:#}")) else {
+            break;
+        };
         let (mut added, mut removed, mut files) = (0u32, 0u32, 0u32);
         for f in detail["files"].as_array().map(Vec::as_slice).unwrap_or(&[]) {
             let a = f["additions"].as_u64().unwrap_or(0) as u32;
