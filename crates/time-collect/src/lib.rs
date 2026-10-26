@@ -12,6 +12,7 @@ pub mod github;
 pub mod pricing;
 pub mod speak;
 pub mod t3;
+pub mod transcripts;
 pub mod usage;
 
 use serde::Deserialize;

@@ -188,6 +188,13 @@ struct Cache {
 #[derive(Deserialize)]
 struct CacheFile {
     p: String,
+    /// Size when scanned, where reading resumes, and the parser's state.
+    #[serde(default)]
+    s: i64,
+    #[serde(default)]
+    o: i64,
+    #[serde(default)]
+    cs: Option<serde_json::Value>,
     #[serde(default)]
     r: Vec<Row>,
     #[serde(default)]
@@ -349,10 +356,11 @@ fn cwd_of(provider: &str, file: &Path) -> Cwd {
 }
 
 /// Every call in T3's usage cache.
-pub fn t3_calls(userdata: &Path) -> Result<Vec<Call>> {
+pub fn t3_calls(userdata: &Path, home: &Path) -> Result<Vec<Call>> {
     let Some(path) = newest_cache(userdata) else {
         return Ok(Vec::new());
     };
+    let scanned = std::fs::metadata(&path)?.modified()?;
     let text = std::fs::read_to_string(&path).with_context(|| path.display().to_string())?;
     let cache: Cache = serde_json::from_str(&text).with_context(|| path.display().to_string())?;
     // Rows seen in two transcripts (a resumed or forked session) are one
@@ -369,9 +377,21 @@ pub fn t3_calls(userdata: &Path) -> Result<Vec<Call>> {
     files.sort_by(|a, b| first(a.1).total_cmp(&first(b.1)).then(a.0.cmp(b.0)));
     let mut seen = HashSet::new();
     let mut out = Vec::new();
+    // Transcripts that grew since T3 scanned them go on from where it
+    // stopped (its unfinished tail is read again then); new ones from the
+    // start.
+    let mut fresh: Vec<(String, PathBuf, u64, Option<&serde_json::Value>)> = Vec::new();
     for (file, f) in files {
         let cwd = cwd_of(&f.p, Path::new(file));
-        for row in f.r.iter().chain(&f.t) {
+        let grown = matches!(f.p.as_str(), "claude" | "codex")
+            && f.s >= 0
+            && f.o >= 0
+            && std::fs::metadata(file).is_ok_and(|m| m.len() as i64 > f.s);
+        if grown {
+            fresh.push((f.p.clone(), PathBuf::from(file), f.o as u64, f.cs.as_ref()));
+        }
+        let tail: &[Row] = if grown { &[] } else { &f.t };
+        for row in f.r.iter().chain(tail) {
             if !row.valid {
                 continue;
             }
@@ -407,6 +427,28 @@ pub fn t3_calls(userdata: &Path) -> Result<Vec<Call>> {
                 speed: row.speed,
                 cwd: cwd.clone(),
             });
+        }
+    }
+    let since = scanned - std::time::Duration::from_secs(3600);
+    for (provider, dir) in [
+        ("claude", home.join(".claude/projects")),
+        ("codex", home.join(".codex/sessions")),
+    ] {
+        let mut found = Vec::new();
+        crate::transcripts::changed_since(&dir, since, &mut found);
+        found.sort();
+        for p in found {
+            if !cache.files.contains_key(&p.display().to_string()) {
+                fresh.push((provider.to_owned(), p, 0, None));
+            }
+        }
+    }
+    for (provider, p, offset, state) in fresh {
+        let cwd = cwd_of(&provider, &p);
+        for (call, key) in crate::transcripts::parse_from(&provider, &p, offset, state, &cwd) {
+            if key.is_none_or(|k| seen.insert(k)) {
+                out.push(call);
+            }
         }
     }
     Ok(out)

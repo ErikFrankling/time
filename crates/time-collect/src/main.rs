@@ -69,7 +69,7 @@ fn main() -> anyhow::Result<()> {
         eprintln!("collect: t3 sessions: {e:#}");
         Default::default()
     });
-    let mut calls = usage::t3_calls(&t3_dir).unwrap_or_else(|e| {
+    let mut calls = usage::t3_calls(&t3_dir, &expand("~/")).unwrap_or_else(|e| {
         eprintln!("collect: t3 usage: {e:#}");
         Vec::new()
     });

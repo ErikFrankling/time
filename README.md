@@ -109,7 +109,8 @@ of a day or per day of a week or month, under a line like "312 commits ·
   3k lines and commits over 30k lines; renames are not rewrites.
 - **Tokens** (`llm.usage.hour`, one per agent session, model and hour):
   input, cache reads and writes, and output, from T3 Code's usage scan of the
-  Claude (both accounts), Codex and Grok transcripts and from OpenCode's
+  Claude (both accounts), Codex and Grok transcripts (and, for what T3 has not
+  scanned yet, the transcripts themselves from where its scan stopped) and from OpenCode's
   database, priced at LiteLLM list prices as T3's usage page does: an
   equivalent at API prices, since most of it is on subscriptions. Per
   account, model, project and T3 thread.
