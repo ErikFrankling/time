@@ -150,7 +150,7 @@ package = ["com.fingersoft.hcr2", "br.com.tapps.cowevolution", "com.halfbrick.je
 id = "work.neptune-titles"
 activity = "work"
 project = "neptune"
-title = "(?i)(naiaclaw|naia bot|naia agent|neptune)"
+title = "(?i)(naiaclaw|naia bot|naia works|naia agent|neptune|planet9)"
 
 [[rule]]
 id = "work.husk-titles"
@@ -280,8 +280,8 @@ package = ["com.google.android.*"]
 
 [[project]]
 name = "neptune"
-title = "(?i)(naiaclaw|naia bot|naia agent|neptune)"
-paths = ["/home/erikf/projects/neptune/", "/home/erikf/projects/work/neptune/"]
+title = "(?i)(naiaclaw|naia bot|naia works|naia agent|neptune|planet9)"
+paths = ["/home/erikf/projects/work/"]
 
 [[project]]
 name = "husk"
