@@ -75,7 +75,17 @@
             ];
           };
           cargoLock.lockFile = ./Cargo.lock;
-          nativeBuildInputs = [ pkgs.makeWrapper ];
+          nativeBuildInputs = [
+            pkgs.makeWrapper
+            pkgs.pkg-config
+          ];
+          # nixpkgs' cargo hook exports LIBGIT2_NO_VENDOR, LIBSQLITE3_SYS_USE_PKG_CONFIG
+          # and friends, so the sys crates link the system libraries.
+          buildInputs = [
+            pkgs.libgit2
+            pkgs.sqlite
+            pkgs.zlib
+          ];
           # The agent asks MPRIS whether anything is playing via playerctl;
           # the collector falls back to the gh CLI for a GitHub token.
           postInstall = ''
