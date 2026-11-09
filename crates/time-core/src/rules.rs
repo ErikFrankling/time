@@ -21,13 +21,22 @@
 //! title = "(?i)\\bhusk\\b"               # a regex over the window title
 //! paths = ["/home/erikf/projects/husk/"] # working directories (T3, terminals)
 //! ```
+//!
+//! A rule or a project with `until = "2026-11-10"` ends at the start of that
+//! day in Stockholm: it does not apply to minutes from then on, while the
+//! minutes before keep it however often history is relabelled.
 
 use std::collections::HashMap;
 
+use chrono::NaiveDate;
 use regex::Regex;
 use serde::Deserialize;
 
+use crate::clock::Millis;
 use crate::label::Activity;
+
+/// The time zone an `until` date is a day in.
+const UNTIL_TZ: chrono_tz::Tz = chrono_tz::Europe::Stockholm;
 
 /// Which kind of device produced the facts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -40,6 +49,8 @@ pub enum Source {
 /// What is known about one device in one minute, as rules see it.
 #[derive(Debug, Clone, Default)]
 pub struct Facts<'a> {
+    /// The minute, for rules and projects that have ended.
+    pub ts: Millis,
     pub source: Option<Source>,
     pub class: &'a str,
     pub title: &'a str,
@@ -93,6 +104,8 @@ struct RawRule {
     /// looked at (see [`TabVerdict`]).
     #[serde(default)]
     ask_model: bool,
+    #[serde(default)]
+    until: Option<NaiveDate>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -110,6 +123,8 @@ struct RawProject {
     /// sentence or two, for the decision model.
     #[serde(default)]
     about: Option<String>,
+    #[serde(default)]
+    until: Option<NaiveDate>,
 }
 
 #[derive(Debug)]
@@ -123,6 +138,7 @@ pub struct Rule {
     host: Vec<String>,
     package: Vec<Glob>,
     ask_model: bool,
+    until: Option<Millis>,
 }
 
 #[derive(Debug)]
@@ -132,6 +148,7 @@ pub struct Project {
     paths: Vec<String>,
     pub kind: Option<String>,
     pub about: Option<String>,
+    until: Option<Millis>,
 }
 
 #[derive(Debug)]
@@ -238,6 +255,7 @@ impl RuleSet {
                 host: r.host.iter().map(|h| h.to_ascii_lowercase()).collect(),
                 package: r.package.iter().map(|p| Glob::new(p)).collect(),
                 ask_model: r.ask_model,
+                until: r.until.map(until_ms),
             });
         }
         let mut projects = Vec::new();
@@ -254,6 +272,7 @@ impl RuleSet {
                 paths: p.paths,
                 kind: p.kind,
                 about: p.about,
+                until: p.until.map(until_ms),
             });
         }
         Ok(Self {
@@ -273,14 +292,24 @@ impl RuleSet {
                 return Some(Match {
                     rule: "model.tab",
                     activity: v.activity,
-                    project: v.project.as_deref(),
+                    project: self.open_project(v.project.as_deref(), f.ts),
                 });
             }
         }
         Some(Match {
             rule: &r.id,
             activity: r.activity,
-            project: r.project.as_deref(),
+            project: self.open_project(r.project.as_deref(), f.ts),
+        })
+    }
+
+    /// The project, unless it had ended by `ts`.
+    fn open_project<'s>(&self, name: Option<&'s str>, ts: Millis) -> Option<&'s str> {
+        name.filter(|n| {
+            self.projects
+                .iter()
+                .find(|p| p.name == *n)
+                .is_none_or(|p| p.open_at(ts))
         })
     }
 
@@ -309,15 +338,19 @@ impl RuleSet {
         self
     }
 
-    /// What the decision model is told about Erik and his projects.
-    pub fn profile_prompt(&self) -> String {
+    /// What the decision model is told about Erik and his projects at `at`.
+    pub fn profile_prompt(&self, at: Millis) -> String {
         let mut out = String::new();
         if !self.profile.about.trim().is_empty() {
             out.push_str(self.profile.about.trim());
             out.push_str("\n\n");
         }
         out.push_str("His projects, and what time on each counts as:\n");
-        for p in self.projects.iter().filter(|p| p.about.is_some()) {
+        for p in self
+            .projects
+            .iter()
+            .filter(|p| p.about.is_some() && p.open_at(at))
+        {
             out.push_str(&format!(
                 "- {} ({}): {}\n",
                 p.name,
@@ -333,23 +366,29 @@ impl RuleSet {
         out
     }
 
-    /// The project names, for the model's answer.
-    pub fn project_names(&self) -> Vec<&str> {
-        self.projects.iter().map(|p| p.name.as_str()).collect()
-    }
-
-    /// A project named by the window title.
-    pub fn project_for_title(&self, title: &str) -> Option<&str> {
+    /// The names of the projects open at `at`, for the model's answer.
+    pub fn project_names(&self, at: Millis) -> Vec<&str> {
         self.projects
             .iter()
+            .filter(|p| p.open_at(at))
+            .map(|p| p.name.as_str())
+            .collect()
+    }
+
+    /// A project named by the window title at `at`.
+    pub fn project_for_title(&self, title: &str, at: Millis) -> Option<&str> {
+        self.projects
+            .iter()
+            .filter(|p| p.open_at(at))
             .find(|p| p.title.as_ref().is_some_and(|re| re.is_match(title)))
             .map(|p| p.name.as_str())
     }
 
-    /// A project owning a working directory (longest prefix wins).
-    pub fn project_for_path(&self, path: &str) -> Option<&str> {
+    /// A project owning a working directory at `at` (longest prefix wins).
+    pub fn project_for_path(&self, path: &str, at: Millis) -> Option<&str> {
         self.projects
             .iter()
+            .filter(|p| p.open_at(at))
             .flat_map(|p| p.paths.iter().map(move |prefix| (prefix, p)))
             .filter(|(prefix, _)| path.starts_with(prefix.as_str()))
             .max_by_key(|(prefix, _)| prefix.len())
@@ -357,8 +396,26 @@ impl RuleSet {
     }
 }
 
+impl Project {
+    fn open_at(&self, ts: Millis) -> bool {
+        self.until.is_none_or(|u| ts < u)
+    }
+}
+
+/// The start of `date` in Stockholm.
+fn until_ms(date: NaiveDate) -> Millis {
+    date.and_time(chrono::NaiveTime::MIN)
+        .and_local_timezone(UNTIL_TZ)
+        .earliest()
+        .expect("midnight exists in Stockholm")
+        .timestamp_millis()
+}
+
 impl Rule {
     fn matches(&self, f: &Facts) -> bool {
+        if self.until.is_some_and(|u| f.ts >= u) {
+            return false;
+        }
         if self.source.is_some() && self.source != f.source {
             return false;
         }
@@ -534,16 +591,66 @@ mod tests {
     #[test]
     fn projects_by_title_and_longest_path() {
         let s = set();
-        assert_eq!(s.project_for_title("Husk sprint planning"), Some("husk"));
-        assert_eq!(s.project_for_title("husky dogs"), None);
+        assert_eq!(s.project_for_title("Husk sprint planning", 0), Some("husk"));
+        assert_eq!(s.project_for_title("husky dogs", 0), None);
         assert_eq!(
-            s.project_for_path("/home/erikf/projects/husk/web/src"),
+            s.project_for_path("/home/erikf/projects/husk/web/src", 0),
             Some("husk-web")
         );
         assert_eq!(
-            s.project_for_path("/home/erikf/projects/husk/api"),
+            s.project_for_path("/home/erikf/projects/husk/api", 0),
             Some("husk")
         );
+    }
+
+    #[test]
+    fn rules_and_projects_end_at_until_in_stockholm() {
+        let s = RuleSet::parse(
+            r#"
+            [[rule]]
+            id = "work.teams-old"
+            activity = "work"
+            project = "job"
+            title = "(?i)teams"
+            until = "2026-11-10"
+
+            [[rule]]
+            id = "work.teams"
+            activity = "work"
+            title = "(?i)teams"
+
+            [[project]]
+            name = "job"
+            title = "(?i)\\bjob\\b"
+            paths = ["/home/erikf/projects/work/"]
+            until = "2026-11-10"
+            "#,
+        )
+        .unwrap();
+        // Midnight on 2026-11-10 in Stockholm (CET) is 23:00 UTC the day before.
+        let cutoff = chrono::DateTime::parse_from_rfc3339("2026-11-09T23:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        let at = |ts| {
+            let m = s
+                .classify(&Facts {
+                    ts,
+                    title: "Chat | Microsoft Teams",
+                    ..Default::default()
+                })
+                .unwrap();
+            (m.rule, m.project)
+        };
+        assert_eq!(at(cutoff - 60_000), ("work.teams-old", Some("job")));
+        assert_eq!(at(cutoff), ("work.teams", None));
+        assert_eq!(s.project_for_title("job board", cutoff - 1), Some("job"));
+        assert_eq!(s.project_for_title("job board", cutoff), None);
+        assert_eq!(
+            s.project_for_path("/home/erikf/projects/work/x", cutoff),
+            None
+        );
+        assert_eq!(s.project_names(cutoff - 1), ["job"]);
+        assert!(s.project_names(cutoff).is_empty());
     }
 
     #[test]

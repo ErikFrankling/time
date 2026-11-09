@@ -65,17 +65,29 @@ project = "kth"
 package = ["com.instructure.candroid"]
 
 # ---------------------------------------------------------------- work, first
-# What Erik does for his job is work wherever it shows up, so these come
+# What Erik does for work is work wherever it shows up, so these come
 # before the video, feeds and messaging rules that would otherwise catch it.
 # Teams is work (Erik, 2026-10-26: "Teams is not a channel I would use for
 # personal messaging; that's Discord"), in a browser tab, the PWA, the
-# desktop app and on the phone. So is the Neptune mail (Outlook), Azure and
-# Naia Works. Discord, Messenger, Signal and WhatsApp stay messaging.
+# desktop app and on the phone. So are Outlook, Azure and Naia Works.
+# Discord, Messenger, Signal and WhatsApp stay messaging.
+# Erik worked at Neptune until 2026-11-09: the rules that put this in
+# `neptune` end then, and the ones after them keep it work without a project.
 
 [[rule]]
 id = "work.teams-class"
 activity = "work"
 project = "neptune"
+until = "2026-11-10"
+class = [
+  "teams*", "*teams-for-linux*", "msteams*", "microsoft-teams*", "microsoft teams*",
+  "chrome-teams.*", "chromium-teams.*", "brave-teams.*", "chrome-*teams.microsoft.com*",
+  "chrome-*teams.cloud.microsoft*",
+]
+
+[[rule]]
+id = "work.teams-class-after-neptune"
+activity = "work"
 class = [
   "teams*", "*teams-for-linux*", "msteams*", "microsoft-teams*", "microsoft teams*",
   "chrome-teams.*", "chromium-teams.*", "brave-teams.*", "chrome-*teams.microsoft.com*",
@@ -86,31 +98,62 @@ class = [
 id = "work.teams-title"
 activity = "work"
 project = "neptune"
+until = "2026-11-10"
+title = "(?i)microsoft teams"
+
+[[rule]]
+id = "work.teams-title-after-neptune"
+activity = "work"
 title = "(?i)microsoft teams"
 
 [[rule]]
 id = "work.teams-site"
 activity = "work"
 project = "neptune"
+until = "2026-11-10"
+host = ["teams.microsoft.com", "teams.cloud.microsoft", "teams.office.com", "teams.live.com"]
+
+[[rule]]
+id = "work.teams-site-after-neptune"
+activity = "work"
 host = ["teams.microsoft.com", "teams.cloud.microsoft", "teams.office.com", "teams.live.com"]
 
 [[rule]]
 id = "work.teams-phone"
 activity = "work"
 project = "neptune"
+until = "2026-11-10"
 package = ["com.microsoft.teams"]
 
-# Outlook is the Neptune work mail; his own mail is Gmail.
+[[rule]]
+id = "work.teams-phone-after-neptune"
+activity = "work"
+package = ["com.microsoft.teams"]
+
+# Outlook was the Neptune work mail; his own mail is Gmail.
 [[rule]]
 id = "work.outlook-site"
 activity = "work"
 project = "neptune"
+until = "2026-11-10"
+host = ["outlook.office.com", "outlook.office365.com", "outlook.cloud.microsoft"]
+
+[[rule]]
+id = "work.outlook-site-after-neptune"
+activity = "work"
 host = ["outlook.office.com", "outlook.office365.com", "outlook.cloud.microsoft"]
 
 [[rule]]
 id = "work.outlook-title"
 activity = "work"
 project = "neptune"
+until = "2026-11-10"
+class = ["firefox", "zen*", "helium", "google-chrome", "chromium*", "brave-browser", "chrome-outlook*"]
+title = "(?i)\\boutlook\\b"
+
+[[rule]]
+id = "work.outlook-title-after-neptune"
+activity = "work"
 class = ["firefox", "zen*", "helium", "google-chrome", "chromium*", "brave-browser", "chrome-outlook*"]
 title = "(?i)\\boutlook\\b"
 
@@ -118,6 +161,12 @@ title = "(?i)\\boutlook\\b"
 id = "work.outlook-phone"
 activity = "work"
 project = "neptune"
+until = "2026-11-10"
+package = ["com.microsoft.office.outlook"]
+
+[[rule]]
+id = "work.outlook-phone-after-neptune"
+activity = "work"
 package = ["com.microsoft.office.outlook"]
 
 # Mail and chat apps stay messaging, unless the window is about Neptune.
@@ -125,6 +174,7 @@ package = ["com.microsoft.office.outlook"]
 id = "work.neptune-apps"
 activity = "work"
 project = "neptune"
+until = "2026-11-10"
 class = ["thunderbird", "Slack", "slack", "webcord", "discord", "vesktop"]
 title = "(?i)(naia ?works|naia ?claw|naia bot|neptune)"
 
@@ -133,6 +183,16 @@ title = "(?i)(naia ?works|naia ?claw|naia bot|neptune)"
 id = "work.azure-sites"
 activity = "work"
 project = "neptune"
+until = "2026-11-10"
+host = [
+  "portal.azure.com", "dev.azure.com", "azure.com", "visualstudio.com", "entra.microsoft.com",
+  "admin.microsoft.com", "portal.office.com", "m365.cloud.microsoft", "copilotstudio.microsoft.com",
+  "make.powerapps.com", "sharepoint.com",
+]
+
+[[rule]]
+id = "work.azure-sites-after-neptune"
+activity = "work"
 host = [
   "portal.azure.com", "dev.azure.com", "azure.com", "visualstudio.com", "entra.microsoft.com",
   "admin.microsoft.com", "portal.office.com", "m365.cloud.microsoft", "copilotstudio.microsoft.com",
@@ -143,6 +203,13 @@ host = [
 id = "work.azure-titles"
 activity = "work"
 project = "neptune"
+until = "2026-11-10"
+class = ["firefox", "zen*", "helium", "google-chrome", "chromium*", "brave-browser"]
+title = "(?i)(\\bazure\\b|microsoft 365|\\bm365\\b|agents playground|microsoft entra|copilot studio|sharepoint)"
+
+[[rule]]
+id = "work.azure-titles-after-neptune"
+activity = "work"
 class = ["firefox", "zen*", "helium", "google-chrome", "chromium*", "brave-browser"]
 title = "(?i)(\\bazure\\b|microsoft 365|\\bm365\\b|agents playground|microsoft entra|copilot studio|sharepoint)"
 
@@ -152,12 +219,14 @@ title = "(?i)(\\bazure\\b|microsoft 365|\\bm365\\b|agents playground|microsoft e
 id = "work.naia-sites"
 activity = "work"
 project = "neptune"
+until = "2026-11-10"
 host = ["naiaworks.neptune-software.com", "neptune-software.com", "naiaworks.com"]
 
 [[rule]]
 id = "work.neptune-titles"
 activity = "work"
 project = "neptune"
+until = "2026-11-10"
 title = "(?i)(naia ?works|naia ?claw|naia bot|naia agent|neptune)"
 
 [[rule]]
@@ -480,9 +549,10 @@ package = ["com.google.android.*"]
 [[project]]
 name = "neptune"
 kind = "work"
-about = """Erik's job. Neptune Software's Naia Works (tab title "Naia Works", "Naia Works Admin", sites under *.naiaworks.neptune-software.com) and NaiaClaw, the personal-agent product (repo neptune-software/naiaclaw on GitHub, Grafana dashboards, Teams chats such as "NaiaClaw Infrastructure"). Everything in Microsoft Teams, Outlook (his work mail), Azure, Azure DevOps, Microsoft 365 and the agents playground is this job. So are MCP, agent-gateway, authorization and agent-platform docs, Entra and OAuth pages he reads to build it."""
+about = """Erik's job until 2026-11-09. Neptune Software's Naia Works (tab title "Naia Works", "Naia Works Admin", sites under *.naiaworks.neptune-software.com) and NaiaClaw, the personal-agent product (repo neptune-software/naiaclaw on GitHub, Grafana dashboards, Teams chats such as "NaiaClaw Infrastructure"). Everything in Microsoft Teams, Outlook (his work mail), Azure, Azure DevOps, Microsoft 365 and the agents playground was this job. So were MCP, agent-gateway, authorization and agent-platform docs, Entra and OAuth pages he read to build it."""
 title = "(?i)(naia ?works|naia ?claw|naia bot|naia agent|neptune)"
-paths = ["/home/erikf/projects/neptune/", "/home/erikf/projects/work/neptune/"]
+paths = ["/home/erikf/projects/work/"]
+until = "2026-11-10"
 
 [[project]]
 name = "husk"
@@ -532,5 +602,5 @@ about = """x-graph: his phone-first archive and graph of X (Twitter) posts (x.er
 # (`crate::tabs` in the server). Plain sentences; keep them true.
 
 [profile]
-about = """Erik Frankling is a student at KTH in Stockholm who also works for Neptune Software on Naia Works and NaiaClaw, and runs his own company, Husk Security. Besides that he builds his own tools (a home lab, Time, T3 Code, x-graph, his NixOS dotfiles). He spends most of his waking day at the computer."""
-habits = """How he uses a browser: almost everything he does in it is work or study. He researches for his job and his company (agent platforms, MCP, AI tooling and infrastructure, startups, VC and founder communities, product and docs sites, competitors, tools he might use), reads documentation, papers and homework PDFs, and uses cloud consoles. Random browsing is rare: Swedish news (DN, SvD, Aftonbladet), Wikipedia, maps, shopping, and scrolling the X home feed are the usual non-work tabs. An X post he opened is work when it is about AI, agents, developer tooling or infrastructure, startups, security, or one of his projects, because he follows that field for his job; politics, entertainment and personal posts are feeds. So when a tab could plausibly serve his job, his company, his courses or his own projects, call it work (or study for course material) with the project that fits; use browsing only for news, shopping, entertainment and pages that clearly have nothing to do with any project; use video for watching, feeds for social feeds."""
+about = """Erik Frankling is a student at KTH in Stockholm who runs his own company, Husk Security. He worked for Neptune Software (Naia Works, NaiaClaw) until November 2026. Besides that he builds his own tools (a home lab, Time, T3 Code, x-graph, his NixOS dotfiles). He spends most of his waking day at the computer."""
+habits = """How he uses a browser: almost everything he does in it is work or study. He researches for his company (agent platforms, MCP, AI tooling and infrastructure, startups, VC and founder communities, product and docs sites, competitors, tools he might use), reads documentation, papers and homework PDFs, and uses cloud consoles. Random browsing is rare: Swedish news (DN, SvD, Aftonbladet), Wikipedia, maps, shopping, and scrolling the X home feed are the usual non-work tabs. An X post he opened is work when it is about AI, agents, developer tooling or infrastructure, startups, security, or one of his projects, because he follows that field for his work; politics, entertainment and personal posts are feeds. So when a tab could plausibly serve his company, his courses or his own projects, call it work (or study for course material) with the project that fits; use browsing only for news, shopping, entertainment and pages that clearly have nothing to do with any project; use video for watching, feeds for social feeds."""

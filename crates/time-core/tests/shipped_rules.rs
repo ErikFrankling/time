@@ -11,6 +11,7 @@ fn rules() -> RuleSet {
 
 fn window<'a>(class: &'a str, title: &'a str, host: Option<&'a str>) -> Facts<'a> {
     Facts {
+        ts: 0,
         source: Some(Source::Desktop),
         class,
         title,
@@ -33,7 +34,7 @@ fn decide(r: &RuleSet, f: &Facts) -> (Activity, String, Option<String>) {
     let project = m
         .project
         .map(str::to_owned)
-        .or_else(|| r.project_for_title(f.title).map(str::to_owned));
+        .or_else(|| r.project_for_title(f.title, f.ts).map(str::to_owned));
     (m.activity, m.rule.to_owned(), project)
 }
 
@@ -424,7 +425,7 @@ fn the_models_verdict_beats_a_last_resort_and_nothing_else() {
 
 #[test]
 fn the_model_is_told_who_erik_is_and_what_his_projects_are() {
-    let p = rules().profile_prompt();
+    let p = rules().profile_prompt(0);
     for needle in [
         "Naia Works",
         "KTH",
@@ -436,4 +437,43 @@ fn the_model_is_told_who_erik_is_and_what_his_projects_are() {
     ] {
         assert!(p.contains(needle), "profile prompt lacks {needle:?}:\n{p}");
     }
+}
+
+#[test]
+fn nothing_is_neptune_after_erik_left() {
+    let r = rules();
+    // 2026-11-10 00:00 in Stockholm.
+    let after = 1_794_265_200_000;
+    for (class, title, host) in [
+        (
+            "helium",
+            "Chat | Kaan Koska | Microsoft Teams - Helium",
+            None,
+        ),
+        ("zen-beta", "Calendar", Some("outlook.office.com")),
+        ("zen-beta", "Home", Some("portal.azure.com")),
+        (
+            "firefox",
+            "Naia Works — Original profile — Mozilla Firefox",
+            None,
+        ),
+        ("com.t3tools.T3Code", "neptune-software/naiaclaw", None),
+    ] {
+        let before = Facts {
+            ts: after - 60_000,
+            ..window(class, title, host)
+        };
+        assert_eq!(decide(&r, &before).2.as_deref(), Some("neptune"), "{title}");
+        let f = Facts {
+            ts: after,
+            ..window(class, title, host)
+        };
+        let (a, rule, project) = decide(&r, &f);
+        assert_eq!(project, None, "{class} / {title}: {rule}");
+        if title.contains("Teams") || host.is_some() {
+            assert_eq!(a, Activity::Work, "{class} / {title}: {rule}");
+        }
+    }
+    assert!(!r.project_names(after).contains(&"neptune"));
+    assert!(!r.profile_prompt(after).contains("- neptune"));
 }

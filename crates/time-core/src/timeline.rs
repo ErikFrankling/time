@@ -150,7 +150,7 @@ pub fn label_minutes(
             let touched_before = screens
                 .get(&(*device, ts - MINUTE_MS))
                 .is_some_and(|p| p.keys > 0 || p.mouse > 0);
-            obs.push(observe_screen(rules, device, source, m, touched_before));
+            obs.push(observe_screen(rules, ts, device, source, m, touched_before));
         }
         if let Some((env, _)) = spans
             .iter()
@@ -163,6 +163,7 @@ pub fn label_minutes(
         {
             if let Event::PhoneApp(app) = &env.event {
                 let facts = Facts {
+                    ts,
                     source: Some(Source::Phone),
                     package: Some(&app.package),
                     title: &app.label,
@@ -278,6 +279,7 @@ pub fn label_minutes(
 
 fn observe_screen<'e>(
     rules: &RuleSet,
+    ts: Millis,
     device: &'e str,
     source: Source,
     m: &'e ScreenMinute,
@@ -306,6 +308,7 @@ fn observe_screen<'e>(
         (Activity::Other, "no-window".to_owned(), None)
     } else {
         let facts = Facts {
+            ts,
             source: Some(source),
             class: &m.window_class,
             title: &m.window_title,
@@ -404,7 +407,7 @@ fn decide(rules: &RuleSet, f: &Facts) -> (Activity, String, Option<String>) {
             let project = m
                 .project
                 .map(str::to_owned)
-                .or_else(|| rules.project_for_title(f.title).map(str::to_owned));
+                .or_else(|| rules.project_for_title(f.title, f.ts).map(str::to_owned));
             (m.activity, m.rule.to_owned(), project)
         }
         None => (Activity::Unknown, "unmatched".to_owned(), None),

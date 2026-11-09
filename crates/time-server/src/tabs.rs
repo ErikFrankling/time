@@ -75,7 +75,7 @@ founders or a company he might compete with or sell to is work for the project i
 A tab titled \"<name> on X: <post>\" is a post he opened: work when the post is about AI, agents, developer tooling, infrastructure, startups, security or his projects, feeds when it is politics, entertainment or personal. \
 When unsure between work and browsing, choose work, with a lower confidence. \
 For each tab give the project it belongs to, one of the project names above, or null.\n\
-Answer JSON only: {\"tabs\":[{\"id\":\"T1\",\"activity\":\"work\",\"project\":\"neptune\",\"confidence\":0.0,\"reason\":\"under 15 words\"}]}";
+Answer JSON only: {\"tabs\":[{\"id\":\"T1\",\"activity\":\"work\",\"project\":\"husk\",\"confidence\":0.0,\"reason\":\"under 15 words\"}]}";
 
 /// The verdicts stored so far.
 pub fn load(store: &Store) -> Result<HashMap<String, TabVerdict>> {
@@ -107,10 +107,10 @@ pub fn pending(
     known: &HashMap<String, TabVerdict>,
     from: Millis,
 ) -> Result<Vec<Tab>> {
-    let rows: Vec<(String, String, Option<String>, i64)> = store.with(|c| {
+    let rows: Vec<(String, String, Option<String>, i64, Millis)> = store.with(|c| {
         let mut stmt = c.prepare(
             "SELECT json_extract(body, '$.\"window.class\"'), json_extract(body, '$.\"window.title\"'),
-                    json_extract(body, '$.\"browser.host\"'), count(*)
+                    json_extract(body, '$.\"browser.host\"'), count(*), max(start_ms)
              FROM event
              WHERE name = 'time.screen.minute' AND start_ms >= ?1
                AND coalesce(json_extract(body, '$.blocked'), 0) = 0
@@ -122,13 +122,15 @@ pub fn pending(
                 r.get::<_, Option<String>>(1)?.unwrap_or_default(),
                 r.get::<_, Option<String>>(2)?,
                 r.get(3)?,
+                r.get(4)?,
             ))
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     })?;
     let mut by_key: BTreeMap<String, Tab> = BTreeMap::new();
-    for (class, title, host, n) in rows {
+    for (class, title, host, n, last) in rows {
         let facts = Facts {
+            ts: last,
             source: Some(Source::Desktop),
             class: &class,
             title: &title,
@@ -159,11 +161,11 @@ pub fn pending(
 }
 
 /// The question: who Erik is, what his projects are, and the tabs.
-pub fn question(rules: &RuleSet, tabs: &[Tab]) -> (String, String) {
+pub fn question(rules: &RuleSet, tabs: &[Tab], now: Millis) -> (String, String) {
     let mut system = String::from(SYSTEM_HEAD);
-    system.push_str(&rules.profile_prompt());
+    system.push_str(&rules.profile_prompt(now));
     system.push_str("\nProject names: ");
-    system.push_str(&rules.project_names().join(", "));
+    system.push_str(&rules.project_names(now).join(", "));
     system.push('\n');
     system.push_str(SYSTEM_TAIL);
 
@@ -191,9 +193,10 @@ pub fn read_answer(
     rules: &RuleSet,
     tabs: &[Tab],
     answer: &Value,
+    now: Millis,
 ) -> Vec<(Tab, TabVerdict, f64, String)> {
     let list = answer["tabs"].as_array().cloned().unwrap_or_default();
-    let projects = rules.project_names();
+    let projects = rules.project_names(now);
     tabs.iter()
         .enumerate()
         .map(|(i, tab)| {
@@ -311,7 +314,7 @@ pub fn run_once(state: &AppState, now: Millis) -> Result<usize> {
                 let handles: Vec<_> = group
                     .iter()
                     .map(|tabs| {
-                        let (system, user) = question(&rules.rules, tabs);
+                        let (system, user) = question(&rules.rules, tabs, now);
                         let key = batch_key(tabs);
                         s.spawn(move || state.decider.ask(store, KIND, &key, &system, &user, now))
                     })
@@ -327,7 +330,7 @@ pub fn run_once(state: &AppState, now: Millis) -> Result<usize> {
             for (tabs, answer) in group.iter().zip(answers) {
                 match answer {
                     Ok(a) => {
-                        let rows = read_answer(&rules.rules, tabs, &a.value);
+                        let rows = read_answer(&rules.rules, tabs, &a.value, now);
                         done += rows.len();
                         save(store, &rows, a.id, now)?;
                     }
@@ -438,7 +441,7 @@ mod tests {
 
     #[test]
     fn the_prompt_knows_his_projects_and_his_habits() {
-        let (system, user) = question(&rules(), &[tab("naia works", 37)]);
+        let (system, user) = question(&rules(), &[tab("naia works", 37)], 0);
         for needle in [
             "Naia Works",
             "DD2395",
@@ -461,7 +464,7 @@ mod tests {
             {"id": "T3", "activity": "work", "project": null, "confidence": 0.1, "reason": "guess"},
             {"id": "T4", "activity": "banana", "confidence": 1.0, "reason": "?"}
         ]});
-        let v = read_answer(&rules(), &tabs, &answer);
+        let v = read_answer(&rules(), &tabs, &answer, 0);
         assert_eq!(
             (v[0].1.activity, v[0].1.project.as_deref()),
             (Activity::Work, Some("neptune"))
